@@ -111,8 +111,9 @@ import type { PageId } from "@akb/core";
 
 /**
  * A single addressable chunk inside a page.
- * line_start and line_end are 1-indexed and inclusive — they map directly
- * to citation ranges shown to users and returned via MCP.
+ * line_start and line_end are 1-indexed and inclusive physical file lines.
+ * They include frontmatter offset and map directly to citation ranges shown
+ * to users and returned via MCP.
  */
 export interface Chunk {
   id: string;            // format: "<page_id>:c<index>", e.g., "page_abc:c0"
@@ -133,7 +134,8 @@ export interface PageRow {
   path: string;
   title: string;
   frontmatter: string;   // JSON-serialized
-  content_hash: string;
+  content_hash: string;  // hash of frontmatter + bodyStartLine + body
+  body_start_line: number;
   indexed_at: string;    // ISO 8601
 }
 
@@ -179,6 +181,7 @@ CREATE TABLE IF NOT EXISTS pages (
     title           TEXT NOT NULL,
     frontmatter     TEXT NOT NULL,
     content_hash    TEXT NOT NULL,
+    body_start_line INTEGER NOT NULL,
     indexed_at      TEXT NOT NULL
 );
 
@@ -212,14 +215,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     tokenize='unicode61 remove_diacritics 2'
 );
 
-CREATE TABLE IF NOT EXISTS sources (
-    id              TEXT PRIMARY KEY,
-    page_id         TEXT NOT NULL,
-    original_path   TEXT,
-    imported_at     TEXT NOT NULL,
-    content_hash    TEXT NOT NULL,
-    FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE
-);
 `;
 
 /**
@@ -253,6 +248,8 @@ export interface ChunkingOptions {
   maxTokens?: number;
   /** Approximate chars-per-token ratio. Default: 4 (English-heavy). */
   charsPerToken?: number;
+  /** Physical file line number where `body` starts. Default: 1. */
+  bodyStartLine?: number;
 }
 
 /**
@@ -264,8 +261,10 @@ export interface ChunkingOptions {
  *  3. If a chunk exceeds maxTokens, split it again by paragraph (blank-line separated).
  *  4. If a single paragraph exceeds maxTokens, split it on sentence boundaries
  *     (., !, ?, 。, ！, ？ followed by space or newline).
- *  5. line_start and line_end are 1-indexed, inclusive, refer to the ORIGINAL body
- *     (not the chunk text). Trailing blank lines are NOT included in the range.
+ *  5. Header-like lines inside fenced code blocks are ignored.
+ *  6. line_start and line_end are 1-indexed, inclusive, and refer to the
+ *     physical markdown file after adding bodyStartLine - 1. Trailing blank
+ *     lines are NOT included in the range.
  *
  * Edge cases:
  *  - Empty body → return [].
@@ -283,9 +282,10 @@ export function chunkByHeaders(
 ): Chunk[] {
   const maxTokens = opts.maxTokens ?? 800;
   const charsPerToken = opts.charsPerToken ?? 4;
+  const bodyStartLine = opts.bodyStartLine ?? 1;
 
-  // TODO: split body into lines, preserving line numbers
-  // TODO: scan lines, find header positions (^#{1,3}\s)
+  // TODO: split body into lines, preserving physical file line numbers via bodyStartLine
+  // TODO: scan lines, find header positions (^#{1,3}\s), ignoring fenced code blocks
   // TODO: build coarse sections between header positions
   // TODO: for each section, if estimateTokens(text) > maxTokens, split further
   // TODO: assemble Chunk objects with correct lineStart, lineEnd, tokenCount
@@ -347,12 +347,28 @@ describe("chunkByHeaders", () => {
     expect(chunks).toHaveLength(1);
   });
 
+  it("does NOT split at header-looking lines inside fenced code blocks", () => {
+    const body = ["# A", "```bash", "# not a markdown header", "echo ok", "```", "## B", "text"].join("\n");
+    const chunks = chunkByHeaders("page_x", body);
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0].lineStart).toBe(1);
+    expect(chunks[0].lineEnd).toBe(5);
+    expect(chunks[1].lineStart).toBe(6);
+  });
+
   it("handles leading text before first header", () => {
     const body = "intro line\n# Section\nbody";
     const chunks = chunkByHeaders("page_x", body);
     expect(chunks).toHaveLength(2);
     expect(chunks[0].lineStart).toBe(1);
     expect(chunks[0].lineEnd).toBe(1);
+  });
+
+  it("applies bodyStartLine so citations match the physical markdown file", () => {
+    const body = "# Section\nbody";
+    const chunks = chunkByHeaders("page_x", body, { bodyStartLine: 7 });
+    expect(chunks[0].lineStart).toBe(7);
+    expect(chunks[0].lineEnd).toBe(8);
   });
 
   it("further splits sections exceeding maxTokens", () => {
@@ -409,6 +425,11 @@ export interface SearchOptions {
   snippetChars?: number;
 }
 
+export interface UpsertPageOptions {
+  /** Physical file line where the markdown body starts after frontmatter. Default: 1. */
+  bodyStartLine?: number;
+}
+
 /**
  * Synchronous, SQLite-backed search index with FTS5 BM25.
  *
@@ -431,8 +452,10 @@ export class SearchIndex {
 
   constructor(opts: SearchIndexOptions) {
     this.db = new Database(opts.dbPath, { readonly: opts.readonly ?? false });
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("synchronous = NORMAL");
+    if (!opts.readonly) {
+      this.db.pragma("journal_mode = WAL");
+      this.db.pragma("synchronous = NORMAL");
+    }
     this.db.pragma("foreign_keys = ON");
     this.maxChunkTokens = opts.maxChunkTokens ?? 800;
 
@@ -446,19 +469,23 @@ export class SearchIndex {
   /**
    * Insert or update a page and its chunks atomically.
    *
-   * Returns action="unchanged" if content_hash matches the existing row —
-   * this is the fast path for incremental indexing.
+   * Returns action="unchanged" if content_hash matches the existing row.
+   * The hash covers frontmatter, body, and bodyStartLine so citation offsets
+   * are refreshed when frontmatter length changes.
    */
-  upsertPage(page: Page, body: string): UpsertResult {
+  upsertPage(page: Page, body: string, opts: UpsertPageOptions = {}): UpsertResult {
     const startMs = performance.now();
-    const contentHash = sha256(body);
+    const bodyStartLine = opts.bodyStartLine ?? 1;
+    const contentHash = sha256(
+      JSON.stringify(page.frontmatter) + "\n" + bodyStartLine + "\n" + body
+    );
 
     // TODO: check existing hash via stmtGetPageHash
     // TODO: if unchanged → return action="unchanged" with chunkCount from existing
     // TODO: begin transaction
-    // TODO: upsert pages row
+    // TODO: upsert pages row, including body_start_line
     // TODO: delete existing chunks (cascade handles chunks_fts and pages_fts)
-    // TODO: chunk body via chunkByHeaders(page.id, body, { maxTokens: this.maxChunkTokens })
+    // TODO: chunk body via chunkByHeaders(page.id, body, { maxTokens: this.maxChunkTokens, bodyStartLine })
     // TODO: insert each chunk into chunks and chunks_fts
     // TODO: insert pages_fts row with title + concatenated body + tags
     // TODO: commit
@@ -516,7 +543,7 @@ export class SearchIndex {
    * Drop all data and rebuild from a fresh list of pages.
    * Used by `akb index --rebuild`.
    */
-  rebuild(pages: Iterable<{ page: Page; body: string }>): RebuildResult {
+  rebuild(pages: Iterable<{ page: Page; body: string; bodyStartLine?: number }>): RebuildResult {
     const startMs = performance.now();
     // TODO: drop all rows from pages, chunks, pages_fts, chunks_fts (DELETE FROM, not DROP TABLE)
     // TODO: count inserts inside a single big transaction (much faster than per-page tx)
@@ -555,6 +582,7 @@ function sha256(s: string): string {
 
 ```typescript
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import Database from "better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -591,7 +619,7 @@ describe("SearchIndex", () => {
     expect(r.chunkCount).toBeGreaterThan(1);
   });
 
-  it("search returns results with line ranges that exist in the original body", () => {
+  it("search returns results with physical line ranges", () => {
     const { page, body } = samplePages.gc;
     idx.upsertPage(page, body);
     const results = idx.search("garbage collection");
@@ -602,6 +630,13 @@ describe("SearchIndex", () => {
       expect(r.citation.line_end).toBeLessThanOrEqual(bodyLines.length);
       expect(r.citation.line_end).toBeGreaterThanOrEqual(r.citation.line_start);
     }
+  });
+
+  it("search line ranges include frontmatter offset", () => {
+    const { page, body } = samplePages.gc;
+    idx.upsertPage(page, body, { bodyStartLine: 7 });
+    const results = idx.search("garbage collection");
+    expect(results[0].citation.line_start).toBeGreaterThanOrEqual(7);
   });
 
   it("search ranks more relevant page higher", () => {
@@ -693,6 +728,7 @@ export { SearchIndex } from "./search-index.js";
 export type {
   SearchIndexOptions,
   SearchOptions,
+  UpsertPageOptions,
 } from "./search-index.js";
 export type {
   Chunk,
@@ -830,7 +866,9 @@ Constraints:
 4. **`bm25(table)` 返回值**：越小越好（不是越大）。Public API 要反转成"越大越好"，否则 MCP 客户端 LLM 会用错。
 5. **更新 `pages_fts` 必须先 DELETE 再 INSERT**：FTS5 没有 UPSERT 语义。
 6. **chunk 边界包含 trailing blank lines 的 bug**：测试里专门测了 `line_end` 不能超出 body 总行数——这个 case 容易写错。
-7. **`better-sqlite3` 是 ESM 不友好的 CJS 包**：在 `"type": "module"` 的项目里需要 `import Database from "better-sqlite3"` 而不是 `import { Database } from ...`。已经在示例代码里写对了。
+7. **代码块里的 `#` 不是标题**：扫描 header 时必须跟踪 fenced code block 状态，否则 shell 注释、YAML 示例、配置片段会打断 chunk 边界。
+8. **read-only 连接不要设置写入型 PRAGMA**：MCP server 用 readonly 打开索引时，不应执行 `journal_mode = WAL` / `synchronous = NORMAL` 这类可能改 DB 状态的 PRAGMA。
+9. **`better-sqlite3` 是 ESM 不友好的 CJS 包**：在 `"type": "module"` 的项目里需要 `import Database from "better-sqlite3"` 而不是 `import { Database } from ...`。已经在示例代码里写对了。
 
 ---
 
@@ -842,4 +880,3 @@ Constraints:
 - Issue 9（mcp-server）：把这个 package 接上 MCP
 
 也就是说 search-engine 是整个 v0.0 数据流的核心。它如果稳了，剩下的都是胶水代码，每个 1 天能搞定。
-
