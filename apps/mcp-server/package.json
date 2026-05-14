@@ -1,0 +1,24 @@
+{
+  "name": "@akb/mcp-server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/server.js",
+  "types": "./dist/server.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@akb/search-engine": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "yaml": "^2.8.1",
+    "zod": "^4.1.12"
+  }
+}

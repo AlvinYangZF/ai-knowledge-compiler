@@ -1,0 +1,12 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/git-store" },
+    { "path": "packages/markdown-engine" },
+    { "path": "packages/search-engine" },
+    { "path": "packages/eval-harness" },
+    { "path": "apps/mcp-server" },
+    { "path": "apps/cli" }
+  ]
+}

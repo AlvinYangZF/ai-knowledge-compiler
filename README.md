@@ -3,7 +3,7 @@
 > **The persistent, auditable memory layer for coding agents.**
 > coding agent 的可审计持久记忆层。
 
-> ⚠️ **状态：设计阶段（design-stage）**。本仓库目前只有设计文档，没有可运行代码。下面的路线图、命令、数据结构都是规约，不是已实现的功能。
+> ⚠️ **状态：v0.0 本地闭环可运行**。当前已有 TypeScript monorepo、核心类型、Markdown ingest、SQLite FTS5 搜索、CLI、eval harness、MCP server、sample vault 和端到端 demo。v0.0 还不是 npm 发布版本，接口仍可能调整。
 
 ---
 
@@ -131,6 +131,44 @@ Karpathy 在 2026 年 4 月提出的 [LLM Wiki 模式](https://gist.github.com/k
 
 详见 [docs/v0.0-spec.md](docs/v0.0-spec.md) 和 [docs/search-engine-skeleton.md](docs/search-engine-skeleton.md)。
 
+当前已实现的第一批命令：
+
+```bash
+pnpm install
+pnpm test
+node apps/cli/dist/main.js init /tmp/akb-demo
+cd /tmp/akb-demo
+node /path/to/ai-knowledge-compiler/apps/cli/dist/main.js ingest /path/to/ai-knowledge-compiler/examples/sample-vault
+node /path/to/ai-knowledge-compiler/apps/cli/dist/main.js index --rebuild
+node /path/to/ai-knowledge-compiler/apps/cli/dist/main.js search "garbage collection"
+```
+
+也可以直接运行端到端 demo：
+
+```bash
+scripts/demo.sh
+```
+
+性能基准：
+
+```bash
+pnpm bench
+```
+
+Claude Code MCP 配置示例：
+
+```json
+{
+  "mcpServers": {
+    "akb": {
+      "command": "node",
+      "args": ["/path/to/ai-knowledge-compiler/apps/cli/dist/main.js", "mcp", "serve"],
+      "cwd": "/path/to/your/vault"
+    }
+  }
+}
+```
+
 ### v0.1 — 知识不腐烂 + 知识自己长在一起（~3-4 个月）
 
 - **Confidence Ledger**（~21 天）—— append-only 事件流、时间衰减、来源权重、supersession 链、confidence-aware retrieval、runtime verification。详见 [docs/v0.1-confidence-ledger.md](docs/v0.1-confidence-ledger.md)
@@ -155,6 +193,7 @@ Karpathy 在 2026 年 4 月提出的 [LLM Wiki 模式](https://gist.github.com/k
 | [docs/search-engine-skeleton.md](docs/search-engine-skeleton.md) | `search-engine` 包的代码骨架 —— API / SQL schema / 测试用例 frozen，可直接交给 agent 实现 |
 | [docs/v0.1-confidence-ledger.md](docs/v0.1-confidence-ledger.md) | Confidence Ledger 设计 —— 事件流、衰减公式、来源权重、supersession、runtime verification |
 | [docs/v0.1-llm-compile.md](docs/v0.1-llm-compile.md) | LLM Compile 设计 —— 5 阶段 pipeline、chunk lineage schema、与 confidence ledger 的集成 |
+| [docs/demo.md](docs/demo.md) | v0.0 demo 脚本说明 |
 
 建议阅读顺序：`v0.0-spec` → `confidence-ledger` → `llm-compile` → `search-engine-skeleton`。
 
@@ -194,6 +233,6 @@ MIT —— 见 [LICENSE](LICENSE)。
 
 ## 贡献
 
-当前处于设计阶段。如果你对设计文档有意见、发现 prior art 里我们漏掉的实现、或想认领某个 v0.0 issue 的实现，欢迎开 issue 讨论。
+当前处于 v0.0 实现阶段。如果你对设计文档有意见、发现 prior art 里我们漏掉的实现、或想认领剩余 v0.0 issue，欢迎开 issue 讨论。
 
 代码开始前，所有架构变更先走 issue + 设计文档 PR，不直接写代码——这个项目本身就是在实践"知识先于代码"。

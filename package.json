@@ -1,0 +1,24 @@
+{
+  "name": "ai-knowledge-compiler",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.3",
+  "scripts": {
+    "build": "pnpm -r build",
+    "bench": "pnpm --filter @akb/search-engine bench",
+    "demo": "scripts/demo.sh",
+    "test": "pnpm build && vitest run",
+    "coverage": "pnpm build && vitest run --coverage",
+    "typecheck": "tsc -b",
+    "lint": "biome check ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.2.0",
+    "@types/node": "^24.10.0",
+    "@vitest/coverage-v8": "^4.1.6",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.8"
+  }
+}

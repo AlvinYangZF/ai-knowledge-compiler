@@ -1,0 +1,6 @@
+node_modules/
+coverage/
+dist/
+*.tsbuildinfo
+.akb/index.db
+.akb/index.db-*

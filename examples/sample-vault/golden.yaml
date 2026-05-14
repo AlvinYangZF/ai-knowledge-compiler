@@ -1,0 +1,22 @@
+version: "1.0"
+items:
+  - id: q001
+    query: garbage collection trigger policy
+    must_hit_pages:
+      - page_gc0000000000
+  - id: q002
+    query: flash translation layer mapping cache
+    must_hit_pages:
+      - page_ftl000000000
+  - id: q003
+    query: spreads erase cycles across blocks
+    must_hit_pages:
+      - page_wear00000000
+  - id: q004
+    query: pages programmed blocks erased NAND
+    must_hit_pages:
+      - page_nand00000000
+  - id: q005
+    query: persistent projection SQLite FTS index
+    must_hit_pages:
+      - page_kvcache00000

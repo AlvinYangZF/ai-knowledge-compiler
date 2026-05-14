@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "composite": true
+  },
+  "include": ["src/**/*"],
+  "references": [
+    { "path": "../../packages/core" },
+    { "path": "../../packages/eval-harness" },
+    { "path": "../../packages/git-store" },
+    { "path": "../../packages/markdown-engine" },
+    { "path": "../../packages/search-engine" },
+    { "path": "../mcp-server" }
+  ]
+}

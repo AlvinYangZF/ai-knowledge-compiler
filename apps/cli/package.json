@@ -1,0 +1,23 @@
+{
+  "name": "@akb/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "akb": "./dist/main.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@akb/core": "workspace:*",
+    "@akb/eval-harness": "workspace:*",
+    "@akb/git-store": "workspace:*",
+    "@akb/markdown-engine": "workspace:*",
+    "@akb/mcp-server": "workspace:*",
+    "@akb/search-engine": "workspace:*",
+    "commander": "^14.0.2",
+    "yaml": "^2.8.1"
+  }
+}
