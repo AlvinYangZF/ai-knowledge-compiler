@@ -1,9 +1,11 @@
+import { existsSync, readFileSync } from "node:fs";
 import { createServer, type Server as HttpServer } from "node:http";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { SearchIndex } from "@akb/search-engine";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { parse as parseYaml } from "yaml";
 import * as z from "zod/v4";
 
 export interface ServeMcpOptions {
@@ -26,7 +28,7 @@ export async function serveMcp(opts: ServeMcpOptions = {}): Promise<void> {
 
 export function createAkbMcpServer(cwd = process.cwd()): McpServer {
   const index = new SearchIndex({
-    dbPath: join(cwd, ".akb", "index.db"),
+    dbPath: getIndexPath(cwd),
     readonly: true,
   });
   const server = new McpServer({ name: "akb", version: "0.0.0" });
@@ -76,13 +78,16 @@ export function createAkbMcpServer(cwd = process.cwd()): McpServer {
           ],
         };
       }
+      const physicalPath = join(cwd, found.page.path);
+      const content = existsSync(physicalPath)
+        ? readFileSync(physicalPath, "utf8")
+        : found.body;
       const payload = {
         page_id: found.page.id,
         path: found.page.path,
         frontmatter: found.page.frontmatter,
-        content: found.body,
-        line_count:
-          found.body.length === 0 ? 0 : found.body.split(/\r?\n/).length,
+        content,
+        line_count: content.length === 0 ? 0 : content.split(/\r?\n/).length,
       };
       return {
         content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
@@ -104,7 +109,7 @@ export async function startHttpMcpServer(opts: {
   port?: number;
 }): Promise<HttpServer> {
   const cwd = opts.cwd ?? process.cwd();
-  const port = opts.port ?? 8765;
+  const port = opts.port ?? getMcpPort(cwd);
   const httpServer = createServer(async (req, res) => {
     if (req.method !== "POST" || req.url !== "/mcp") {
       res.writeHead(405, { "content-type": "application/json" });
@@ -163,4 +168,29 @@ async function readJsonBody(req: NodeJS.ReadableStream): Promise<unknown> {
     return undefined;
   }
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+interface VaultConfig {
+  index?: {
+    path?: string;
+  };
+  mcp?: {
+    port?: number;
+  };
+}
+
+function getIndexPath(cwd: string): string {
+  return resolve(cwd, readVaultConfig(cwd).index?.path ?? ".akb/index.db");
+}
+
+function getMcpPort(cwd: string): number {
+  return readVaultConfig(cwd).mcp?.port ?? 8765;
+}
+
+function readVaultConfig(cwd: string): VaultConfig {
+  const configPath = join(cwd, ".akb", "config.yaml");
+  if (!existsSync(configPath)) {
+    return {};
+  }
+  return (parseYaml(readFileSync(configPath, "utf8")) ?? {}) as VaultConfig;
 }

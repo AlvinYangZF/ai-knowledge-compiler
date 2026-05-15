@@ -131,7 +131,7 @@ Karpathy 在 2026 年 4 月提出的 [LLM Wiki 模式](https://gist.github.com/k
 
 详见 [docs/v0.0-spec.md](docs/v0.0-spec.md) 和 [docs/search-engine-skeleton.md](docs/search-engine-skeleton.md)。
 
-当前已实现的第一批命令：
+当前已实现的本地开发命令：
 
 ```bash
 pnpm install
@@ -141,6 +141,7 @@ cd /tmp/akb-demo
 node /path/to/ai-knowledge-compiler/apps/cli/dist/main.js ingest /path/to/ai-knowledge-compiler/examples/sample-vault
 node /path/to/ai-knowledge-compiler/apps/cli/dist/main.js index --rebuild
 node /path/to/ai-knowledge-compiler/apps/cli/dist/main.js search "garbage collection"
+node /path/to/ai-knowledge-compiler/apps/cli/dist/main.js eval --set /path/to/ai-knowledge-compiler/examples/sample-vault/golden.yaml
 ```
 
 也可以直接运行端到端 demo：
@@ -175,7 +176,7 @@ Claude Code MCP 配置示例：
 - **LLM Compile**（~27 天）—— 5 阶段 pipeline、关系判定、patch-as-proposal、chunk lineage、replay。详见 [docs/v0.1-llm-compile.md](docs/v0.1-llm-compile.md)
 - Patch workflow、vector search、hybrid retrieval、`akb ask`
 
-**实施顺序**：confidence ledger 先（compile 的 patch 要写 ledger 事件）→ compile → vector + ask。
+**实施顺序**：confidence ledger 先（compile 的 patch 要写 ledger 事件）→ compile → vector + ask。v0.1 起涉及 LLM API 的默认 provider 使用 DeepSeek；API key 只从环境变量读取，不写入 vault 或 git。
 
 ### v0.2 及以后
 
@@ -205,11 +206,12 @@ Claude Code MCP 配置示例：
 
 1. 任何要 LLM API key 的功能都不在 v0.0 —— 保证 v0.0 跑通不需要任何外部账号
 2. 任何让 LLM 写入 vault 的功能都走 patch + review gate，不直接写
-3. 任何加新 MCP tool 的提议都要先证明现有的不够 —— 工具爆炸是 agent 系统的头号风险
-4. 任何投影层数据都不入 git —— git 只追事实源
-5. 任何"修改 vault"的代码路径都必须先写 markdown 再更新投影
-6. 每个 PR 必须跑通 eval，retrieval 准确率不允许回归
-7. confidence 由系统事件自动产生，不允许 LLM 给自己打分 —— 那样无法 audit
+3. v0.1 起默认 LLM provider 是 DeepSeek；provider、model、base URL 可配置，但 secret 只能来自环境变量
+4. 任何加新 MCP tool 的提议都要先证明现有的不够 —— 工具爆炸是 agent 系统的头号风险
+5. 任何投影层数据都不入 git —— git 只追事实源
+6. 任何"修改 vault"的代码路径都必须先写 markdown 再更新投影
+7. 每个 PR 必须跑通 eval，retrieval 准确率不允许回归
+8. confidence 由系统事件自动产生，不允许 LLM 给自己打分 —— 那样无法 audit
 
 ---
 
@@ -233,6 +235,6 @@ MIT —— 见 [LICENSE](LICENSE)。
 
 ## 贡献
 
-当前处于 v0.0 实现阶段。如果你对设计文档有意见、发现 prior art 里我们漏掉的实现、或想认领剩余 v0.0 issue，欢迎开 issue 讨论。
+当前处于 v0.0 本地闭环阶段。如果你对设计文档有意见、发现 prior art 里我们漏掉的实现、或想认领 v0.1 设计中的下一步，欢迎开 issue 讨论。
 
 代码开始前，所有架构变更先走 issue + 设计文档 PR，不直接写代码——这个项目本身就是在实践"知识先于代码"。

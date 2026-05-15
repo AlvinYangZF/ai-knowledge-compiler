@@ -24,6 +24,7 @@ interface IngestOptions {
   tag?: string[];
   force?: boolean;
   commit?: boolean;
+  recursive?: boolean;
 }
 
 interface IndexOptions {
@@ -53,6 +54,11 @@ export async function run(argv = process.argv): Promise<void> {
     .option("--tag <tag>", "add a tag to imported pages", collect, [])
     .option("--force", "overwrite existing page file")
     .option("--no-commit", "skip git commit")
+    .option("--recursive", "recursively ingest markdown files from directories")
+    .option(
+      "--no-recursive",
+      "only ingest top-level markdown files from directories",
+    )
     .action(ingestCommand);
   program
     .command("index")
@@ -131,7 +137,7 @@ async function ingestCommand(
   const vaultDir = process.cwd();
   assertVault(vaultDir);
   const source = resolve(vaultDir, inputPath);
-  const files = markdownFiles(source);
+  const files = markdownFiles(source, options.recursive ?? true);
   const index = new SearchIndex({ dbPath: join(vaultDir, ".akb", "index.db") });
   const written: string[] = [];
   const removed: string[] = [];
@@ -291,7 +297,9 @@ async function evalCommand(options: EvalOptions): Promise<void> {
     }
     console.log(`Eval: ${report.total} items`);
     console.log(`  precision@5:  ${report.precision_at_5.toFixed(2)}`);
+    console.log(`  precision@10: ${report.precision_at_10.toFixed(2)}`);
     console.log(`  recall@5:     ${report.recall_at_5.toFixed(2)}`);
+    console.log(`  recall@10:    ${report.recall_at_10.toFixed(2)}`);
     console.log(
       `  must-hit pass rate:  ${report.total - report.failures.length}/${report.total} (${Math.round(
         report.must_hit_pass_rate * 100,
@@ -322,7 +330,7 @@ function assertVault(dir: string): void {
   }
 }
 
-function markdownFiles(path: string): string[] {
+function markdownFiles(path: string, recursive = true): string[] {
   if (!existsSync(path)) {
     throw new Error(`Path does not exist: ${path}`);
   }
@@ -341,7 +349,9 @@ function markdownFiles(path: string): string[] {
   for (const entry of readdirSync(path, { withFileTypes: true })) {
     const next = join(path, entry.name);
     if (entry.isDirectory()) {
-      files.push(...markdownFiles(next));
+      if (recursive) {
+        files.push(...markdownFiles(next, recursive));
+      }
     } else if (entry.isFile() && extname(entry.name) === ".md") {
       files.push(next);
     }

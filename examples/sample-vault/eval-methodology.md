@@ -11,5 +11,5 @@ Every retrieval change should run eval so line citation and recall regressions a
 
 ## Metrics
 
-The v0.0 eval reports precision at five, recall at five, and must-hit pass rate.
+The v0.0 eval reports precision at five and ten, recall at five and ten, and must-hit pass rate.
 Must-hit failures should fail CI because they mean a known answer is no longer retrievable.

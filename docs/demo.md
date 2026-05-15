@@ -11,6 +11,10 @@ The script builds the workspace, creates a temporary vault, ingests the sample M
 The sample vault currently contains 15 Markdown pages and a 5-query golden set. A passing run ends with:
 
 ```text
+precision@5:  0.20
+precision@10: 0.10
+recall@5:     1.00
+recall@10:    1.00
 must-hit pass rate:  5/5 (100%)
 ```
 

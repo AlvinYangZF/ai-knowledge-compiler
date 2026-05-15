@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -89,7 +90,12 @@ describe("akb CLI", () => {
         `      - ${pageId}`,
       ].join("\n"),
     );
-    expect(runCli(["eval"], vault)).toContain("must-hit pass rate");
+    const evalOutput = runCli(["eval"], vault);
+    expect(evalOutput).toContain("precision@5");
+    expect(evalOutput).toContain("precision@10");
+    expect(evalOutput).toContain("recall@5");
+    expect(evalOutput).toContain("recall@10");
+    expect(evalOutput).toContain("must-hit pass rate");
   });
 
   it("skips empty and non-UTF-8 markdown files during ingest", () => {
@@ -107,6 +113,27 @@ describe("akb CLI", () => {
     expect(badOutput).toContain("Ingested 0 pages");
     expect(existsSync(join(vault, "pages", "empty.md"))).toBe(false);
     expect(existsSync(join(vault, "pages", "bad.md"))).toBe(false);
+  });
+
+  it("supports non-recursive directory ingest", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "source");
+    mkdirSync(join(source, "nested"), { recursive: true });
+    writeFileSync(join(source, "top.md"), "# Top\n\nTop-level note.");
+    writeFileSync(
+      join(source, "nested", "child.md"),
+      "# Child\n\nNested note.",
+    );
+
+    const output = runCli(
+      ["ingest", source, "--no-recursive", "--no-commit"],
+      vault,
+    );
+
+    expect(output).toContain("Ingested 1 page");
+    expect(existsSync(join(vault, "pages", "top.md"))).toBe(true);
+    expect(existsSync(join(vault, "pages", "nested", "child.md"))).toBe(false);
   });
 
   it("rejects duplicate page ids unless force is used", () => {
