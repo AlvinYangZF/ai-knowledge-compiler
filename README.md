@@ -13,7 +13,7 @@
 
 一句话定位：**人和 agent 共享同一份事实**。
 
-![Uploading image.png…]()
+<img width="1024" height="1536" alt="image" src="https://github.com/user-attachments/assets/283870e2-2a78-4cda-af37-cad36e3d1c2b" />
 
 
 它**不是**：
