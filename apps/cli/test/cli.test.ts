@@ -301,4 +301,97 @@ describe("akb CLI", () => {
     expect(output).toContain("page_stale0000001");
     expect(readFileSync(ledgerPath, "utf8")).toBe(before);
   });
+
+  it("supersedes one page with another page and records both ledger events", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const oldSource = join(dir, "old.md");
+    const newSource = join(dir, "new.md");
+    writeFileSync(
+      oldSource,
+      [
+        "---",
+        "id: page_old000000001",
+        "title: Old Threshold Model",
+        'created_at: "2026-01-01"',
+        'source_path: "./old.md"',
+        "---",
+        "# Old Threshold Model",
+        "",
+        "The old model uses a fixed threshold.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      newSource,
+      [
+        "---",
+        "id: page_new000000001",
+        "title: New Adaptive Model",
+        'created_at: "2026-05-01"',
+        'source_path: "./new.md"',
+        "---",
+        "# New Adaptive Model",
+        "",
+        "The new model adapts the threshold to workload pressure.",
+      ].join("\n"),
+    );
+    runCli(["ingest", oldSource, "--no-commit"], vault);
+    runCli(["ingest", newSource, "--no-commit"], vault);
+    runCli(["migrate", "to-v0.1", "--no-commit"], vault);
+
+    const output = runCli(
+      [
+        "supersede",
+        "page_old000000001",
+        "--by",
+        "page_new000000001",
+        "--reason",
+        "adaptive model supersedes fixed threshold",
+        "--no-commit",
+      ],
+      vault,
+    );
+
+    const oldEvents = readFileSync(
+      join(vault, "pages", ".page_old000000001.ledger.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const newEvents = readFileSync(
+      join(vault, "pages", ".page_new000000001.ledger.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const newPage = readFileSync(join(vault, "pages", "new.md"), "utf8");
+
+    expect(output).toContain(
+      "Superseded page_old000000001 by page_new000000001",
+    );
+    expect(oldEvents.at(-1)).toMatchObject({
+      kind: "superseded_by",
+      pageId: "page_old000000001",
+      supersederPageId: "page_new000000001",
+      reason: "adaptive model supersedes fixed threshold",
+    });
+    expect(newEvents.at(-1)).toMatchObject({
+      kind: "supersedes",
+      pageId: "page_new000000001",
+      supersededPageId: "page_old000000001",
+      reason: "adaptive model supersedes fixed threshold",
+    });
+    expect(newPage).toContain("supersedes: page_old000000001");
+    expect(newPage).toContain("> Supersedes [[page_old000000001]].");
+
+    const oldReport = JSON.parse(
+      runCli(
+        ["confidence", "show", "page_old000000001", "--format", "json"],
+        vault,
+      ),
+    );
+    expect(oldReport.superseded_by).toBe("page_new000000001");
+  });
 });

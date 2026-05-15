@@ -52,10 +52,12 @@ export const ConfidenceEventSchema = z
     EventBaseSchema.extend({
       kind: z.literal("superseded_by"),
       supersederPageId: PageIdSchema,
+      reason: z.string().min(1).optional(),
     }),
     EventBaseSchema.extend({
       kind: z.literal("supersedes"),
       supersededPageId: PageIdSchema,
+      reason: z.string().min(1).optional(),
     }),
     EventBaseSchema.extend({
       kind: z.literal("decay_checkpoint"),

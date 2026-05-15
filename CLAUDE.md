@@ -40,7 +40,7 @@ pnpm --filter @akb/search-engine test
 - `packages/git-store` — thin `simple-git` wrapper: `initVault`, `commitFiles`, `getFileHistory`. Commits are always prefixed `akb: `.
 - `packages/confidence` — append-only Confidence Ledger (JSONL per page at `.${pageId}.ledger.jsonl`). `computeConfidenceState` folds events into a score using source weights, contradiction penalties, time decay, and verification boosts. Score is never stored in git; it's computed on demand from the event stream.
 - `packages/eval-harness` — `runEval` takes a `SearchIndex` and a golden YAML set, returns `EvalReport` with precision@5, precision@10, recall@5, recall@10, and `must_hit_pass_rate`.
-- `apps/cli` — `commander`-based CLI wiring together all packages. Commands: `init`, `ingest`, `index`, `search`, `eval`, `mcp serve`.
+- `apps/cli` — `commander`-based CLI wiring together all packages. v0.0 commands: `init`, `ingest`, `index`, `search`, `eval`, `mcp serve`. v0.1 confidence commands currently include `migrate to-v0.1`, `confidence show`, `verify`, and `supersede`.
 - `apps/mcp-server` — MCP server using `@modelcontextprotocol/sdk`. Supports `stdio` (default) and `http` transports.
 
 **Data flow for ingest:**

@@ -14,3 +14,4 @@
 - Started v0.1 confidence ledger work with event schemas, append-only JSONL storage, and deterministic score materialization.
 - Added `akb migrate to-v0.1` and `akb confidence show` as the first CLI surface for confidence ledgers.
 - Added `akb verify` to append `verified` confidence ledger events and dry-run low-confidence checks.
+- Added `akb supersede` to create supersession ledger links and update the superseding page.

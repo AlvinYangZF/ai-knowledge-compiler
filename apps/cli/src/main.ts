@@ -54,6 +54,12 @@ interface VerifyOptions {
   commit?: boolean;
 }
 
+interface SupersedeOptions {
+  by: string;
+  reason?: string;
+  commit?: boolean;
+}
+
 interface MigrateOptions {
   commit?: boolean;
 }
@@ -104,6 +110,16 @@ export async function run(argv = process.argv): Promise<void> {
     .option("--dry-run", "report low-confidence pages without writing events")
     .option("--no-commit", "skip git commit")
     .action(verifyCommand);
+  program
+    .command("supersede")
+    .argument("<old-page-id-or-path>")
+    .requiredOption(
+      "--by <new-page-id-or-path>",
+      "page that supersedes the old page",
+    )
+    .option("--reason <reason>", "human-readable supersession reason")
+    .option("--no-commit", "skip git commit")
+    .action(supersedeCommand);
   const migrate = program.command("migrate");
   migrate
     .command("to-v0.1")
@@ -434,6 +450,88 @@ async function verifyCommand(
   );
 }
 
+async function supersedeCommand(
+  oldPageIdOrPath: string,
+  options: SupersedeOptions,
+): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const oldFile = resolvePageFile(vaultDir, oldPageIdOrPath);
+  if (!oldFile) {
+    throw new Error(`Old page not found: ${oldPageIdOrPath}`);
+  }
+  const newFile = resolvePageFile(vaultDir, options.by);
+  if (!newFile) {
+    throw new Error(`Superseding page not found: ${options.by}`);
+  }
+
+  const oldPage = pageFromFile(vaultDir, oldFile).page;
+  const newPageBefore = pageFromFile(vaultDir, newFile).page;
+  if (oldPage.id === newPageBefore.id) {
+    throw new Error("A page cannot supersede itself");
+  }
+
+  const timestamp = new Date().toISOString();
+  const oldEvent = parseConfidenceEvent({
+    id: stableId(
+      "evt",
+      `${oldPage.id}:superseded_by:${newPageBefore.id}:${timestamp}`,
+    ),
+    kind: "superseded_by",
+    pageId: oldPage.id,
+    timestamp,
+    actor: "human",
+    supersederPageId: newPageBefore.id,
+    reason: options.reason,
+  });
+  const newEvent = parseConfidenceEvent({
+    id: stableId(
+      "evt",
+      `${newPageBefore.id}:supersedes:${oldPage.id}:${timestamp}`,
+    ),
+    kind: "supersedes",
+    pageId: newPageBefore.id,
+    timestamp,
+    actor: "human",
+    supersededPageId: oldPage.id,
+    reason: options.reason,
+  });
+
+  const written = new Set<string>();
+  written.add(
+    toPosix(
+      relative(
+        vaultDir,
+        appendConfidenceEvent(vaultDir, oldPage.path, oldEvent),
+      ),
+    ),
+  );
+  written.add(
+    toPosix(
+      relative(
+        vaultDir,
+        appendConfidenceEvent(vaultDir, newPageBefore.path, newEvent),
+      ),
+    ),
+  );
+
+  updateSupersedingPage(vaultDir, newFile, oldPage.id);
+  written.add(newPageBefore.path);
+  const { page, body, bodyStartLine } = pageFromFile(vaultDir, newFile);
+  const index = new SearchIndex({ dbPath: join(vaultDir, ".akb", "index.db") });
+  try {
+    index.upsertPage(page, body, { bodyStartLine });
+  } finally {
+    index.close();
+  }
+
+  if (options.commit !== false) {
+    await commitFiles(vaultDir, [...written], `supersede ${oldPage.id}`);
+  }
+
+  console.log(`Superseded ${oldPage.id} by ${newPageBefore.id}.`);
+}
+
 async function migrateToV01Command(options: MigrateOptions): Promise<void> {
   const vaultDir = process.cwd();
   assertVault(vaultDir);
@@ -528,6 +626,7 @@ async function confidenceShowCommand(
     score: state.score,
     source_count: state.sourceCount,
     contradiction_count: state.contradictionCount,
+    superseded_by: state.supersededBy,
     last_verified_at: state.lastVerifiedAt,
     last_event_at: state.lastEventAt,
     computed_at: state.computedAt,
@@ -666,16 +765,58 @@ function pageFromFile(
   return { page, body: parsed.body, bodyStartLine: parsed.bodyStartLine };
 }
 
+function updateSupersedingPage(
+  vaultDir: string,
+  file: string,
+  supersededPageId: PageId,
+): void {
+  const content = readFileSync(file, "utf8");
+  const parsed = parseMarkdown(content);
+  const frontmatter = normalizeLooseFrontmatter({
+    ...parsed.frontmatter,
+    supersedes: supersededPageId,
+    updated_at: new Date().toISOString().slice(0, 10),
+  });
+  const body = addSupersedeNotice(parsed.body, supersededPageId);
+  writeMarkdownFile(file, frontmatter, body);
+  pageFromFile(vaultDir, file);
+}
+
+function addSupersedeNotice(body: string, supersededPageId: PageId): string {
+  const notice = `> Supersedes [[${supersededPageId}]].`;
+  if (body.includes(notice)) {
+    return body;
+  }
+  return `${notice}\n\n${body.trimStart()}`;
+}
+
+function writeMarkdownFile(
+  file: string,
+  frontmatter: Record<string, unknown>,
+  body: string,
+): void {
+  writeFileSync(
+    file,
+    `---\n${stringifyYaml(frontmatter).trimEnd()}\n---\n${body.trimEnd()}\n`,
+  );
+}
+
 function normalizeFrontmatter(
   frontmatter: Record<string, unknown>,
 ): PageFrontmatter {
+  return PageFrontmatterSchema.parse(normalizeLooseFrontmatter(frontmatter));
+}
+
+function normalizeLooseFrontmatter(
+  frontmatter: Record<string, unknown>,
+): Record<string, unknown> {
   const normalized = Object.fromEntries(
     Object.entries(frontmatter).map(([key, value]) => [
       key,
       value instanceof Date ? value.toISOString() : value,
     ]),
   );
-  return PageFrontmatterSchema.parse(normalized);
+  return normalized;
 }
 
 function collect(value: string, previous: string[]): string[] {
