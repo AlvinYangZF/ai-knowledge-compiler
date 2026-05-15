@@ -13,6 +13,9 @@
 
 一句话定位：**人和 agent 共享同一份事实**。
 
+![Uploading image.png…]()
+
+
 它**不是**：
 
 - 不是另一个 Notion / Confluence —— 那些不为 agent 设计，也不可 git
