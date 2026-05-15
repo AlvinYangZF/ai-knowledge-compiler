@@ -11,3 +11,4 @@
 - Added MCP tools `search_knowledge` and `get_page`.
 - Added MCP SDK smoke tests for in-memory and streamable HTTP transports.
 - Added retrieval eval harness, 15-page sample vault, demo script, coverage gate, and search benchmark.
+- Started v0.1 confidence ledger work with event schemas, append-only JSONL storage, and deterministic score materialization.

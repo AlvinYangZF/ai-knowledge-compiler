@@ -69,6 +69,15 @@ importers:
         specifier: ^4.1.12
         version: 4.4.3
 
+  packages/confidence:
+    dependencies:
+      '@akb/core':
+        specifier: workspace:*
+        version: link:../core
+      zod:
+        specifier: ^4.1.12
+        version: 4.4.3
+
   packages/core:
     dependencies:
       zod:
