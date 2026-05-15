@@ -13,3 +13,4 @@
 - Added retrieval eval harness, 15-page sample vault, demo script, coverage gate, and search benchmark.
 - Started v0.1 confidence ledger work with event schemas, append-only JSONL storage, and deterministic score materialization.
 - Added `akb migrate to-v0.1` and `akb confidence show` as the first CLI surface for confidence ledgers.
+- Added `akb verify` to append `verified` confidence ledger events and dry-run low-confidence checks.

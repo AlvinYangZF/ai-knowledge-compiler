@@ -211,4 +211,94 @@ describe("akb CLI", () => {
     expect(report.score).toBeGreaterThan(0);
     expect(report.explanation.source_strength).toBeGreaterThan(0);
   });
+
+  it("verifies a page by appending a confidence ledger event", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "verify.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_verify000001",
+        "title: Verify Me",
+        'created_at: "2026-05-01"',
+        'source_path: "./verify.md"',
+        "---",
+        "# Verify Me",
+        "",
+        "This page should receive a verified ledger event.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+    runCli(["migrate", "to-v0.1", "--no-commit"], vault);
+
+    const output = runCli(
+      [
+        "verify",
+        "page_verify000001",
+        "--by-agent",
+        "claude-code",
+        "--reason",
+        "agent ran the documented workflow",
+        "--no-commit",
+      ],
+      vault,
+    );
+    const ledgerPath = join(vault, "pages", ".page_verify000001.ledger.jsonl");
+    const events = readFileSync(ledgerPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+
+    expect(output).toContain("Verified 1 page");
+    expect(events.at(-1)).toMatchObject({
+      kind: "verified",
+      pageId: "page_verify000001",
+      actor: "agent",
+      actorId: "agent:claude-code",
+      verifierType: "agent",
+      verifierId: "claude-code",
+      reason: "agent ran the documented workflow",
+    });
+
+    const report = JSON.parse(
+      runCli(
+        ["confidence", "show", "page_verify000001", "--format", "json"],
+        vault,
+      ),
+    );
+    expect(report.last_verified_at).toBe(events.at(-1).timestamp);
+    expect(report.explanation.verification_boost).toBe(0.15);
+  });
+
+  it("reports low-confidence pages during verify dry-run without writing events", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "stale.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_stale0000001",
+        "title: Stale Runbook",
+        'created_at: "2025-01-01"',
+        'source_path: "./stale.md"',
+        "---",
+        "# Stale Runbook",
+        "",
+        "This old runbook should be flagged by dry-run.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+    runCli(["migrate", "to-v0.1", "--no-commit"], vault);
+    const ledgerPath = join(vault, "pages", ".page_stale0000001.ledger.jsonl");
+    const before = readFileSync(ledgerPath, "utf8");
+
+    const output = runCli(["verify", "page_stale0000001", "--dry-run"], vault);
+
+    expect(output).toContain("Dry run");
+    expect(output).toContain("page_stale0000001");
+    expect(readFileSync(ledgerPath, "utf8")).toBe(before);
+  });
 });

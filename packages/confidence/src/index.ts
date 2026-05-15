@@ -42,6 +42,7 @@ export const ConfidenceEventSchema = z
       kind: z.literal("verified"),
       verifierType: z.enum(["human", "agent"]),
       verifierId: z.string().min(1).optional(),
+      reason: z.string().min(1).optional(),
     }),
     EventBaseSchema.extend({
       kind: z.literal("contradicted_by"),

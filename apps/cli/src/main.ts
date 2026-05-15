@@ -47,6 +47,13 @@ interface EvalOptions {
   output?: string;
 }
 
+interface VerifyOptions {
+  byAgent?: string;
+  reason?: string;
+  dryRun?: boolean;
+  commit?: boolean;
+}
+
 interface MigrateOptions {
   commit?: boolean;
 }
@@ -89,6 +96,14 @@ export async function run(argv = process.argv): Promise<void> {
     .option("--set <path>", "golden set path")
     .option("--output <path>", "write JSON report")
     .action(evalCommand);
+  program
+    .command("verify")
+    .argument("<page-or-glob>")
+    .option("--by-agent <id>", "record verification from an agent")
+    .option("--reason <reason>", "human-readable verification reason")
+    .option("--dry-run", "report low-confidence pages without writing events")
+    .option("--no-commit", "skip git commit")
+    .action(verifyCommand);
   const migrate = program.command("migrate");
   migrate
     .command("to-v0.1")
@@ -346,6 +361,79 @@ async function evalCommand(options: EvalOptions): Promise<void> {
   }
 }
 
+async function verifyCommand(
+  pageOrGlob: string,
+  options: VerifyOptions,
+): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const targets = resolvePageFiles(vaultDir, pageOrGlob);
+  if (targets.length === 0) {
+    throw new Error(`No pages matched: ${pageOrGlob}`);
+  }
+
+  if (options.dryRun) {
+    const threshold = 0.7;
+    const issues = targets
+      .map((file) => {
+        const { page } = pageFromFile(vaultDir, file);
+        const events = loadConfidenceEvents(vaultDir, page.path, page.id);
+        if (events.length === 0) {
+          return { page, score: undefined };
+        }
+        const state = computeConfidenceState(events, {
+          pageType:
+            typeof page.frontmatter.type === "string"
+              ? page.frontmatter.type
+              : undefined,
+        });
+        return state.score < threshold ? { page, score: state.score } : null;
+      })
+      .filter((item) => item !== null);
+
+    console.log(
+      `Dry run: ${issues.length} page${issues.length === 1 ? "" : "s"} need review below ${threshold.toFixed(2)}.`,
+    );
+    for (const issue of issues) {
+      console.log(
+        `  ${issue.page.id}  ${issue.page.path}  score=${issue.score?.toFixed(4) ?? "missing-ledger"}`,
+      );
+    }
+    return;
+  }
+
+  const timestamp = new Date().toISOString();
+  const written = new Set<string>();
+  for (const file of targets) {
+    const { page } = pageFromFile(vaultDir, file);
+    const actorId = options.byAgent ? `agent:${options.byAgent}` : undefined;
+    const event = parseConfidenceEvent({
+      id: stableId(
+        "evt",
+        `${page.id}:verified:${timestamp}:${actorId ?? "human"}:${options.reason ?? ""}`,
+      ),
+      kind: "verified",
+      pageId: page.id,
+      timestamp,
+      actor: options.byAgent ? "agent" : "human",
+      actorId,
+      verifierType: options.byAgent ? "agent" : "human",
+      verifierId: options.byAgent,
+      reason: options.reason,
+    });
+    const ledgerPath = appendConfidenceEvent(vaultDir, page.path, event);
+    written.add(toPosix(relative(vaultDir, ledgerPath)));
+  }
+
+  if (written.size > 0 && options.commit !== false) {
+    await commitFiles(vaultDir, [...written], `verify ${targets.length} pages`);
+  }
+
+  console.log(
+    `Verified ${targets.length} page${targets.length === 1 ? "" : "s"}.`,
+  );
+}
+
 async function migrateToV01Command(options: MigrateOptions): Promise<void> {
   const vaultDir = process.cwd();
   assertVault(vaultDir);
@@ -542,6 +630,18 @@ function resolvePageFile(
   return undefined;
 }
 
+function resolvePageFiles(vaultDir: string, pageOrGlob: string): string[] {
+  if (hasGlob(pageOrGlob)) {
+    const matcher = globToRegExp(toPosix(pageOrGlob));
+    return markdownFiles(join(vaultDir, "pages")).filter((file) => {
+      const relativePath = toPosix(relative(vaultDir, file));
+      return matcher.test(relativePath);
+    });
+  }
+  const file = resolvePageFile(vaultDir, pageOrGlob);
+  return file ? [file] : [];
+}
+
 function scanVaultPages(
   vaultDir: string,
 ): Array<{ page: Page; body: string; bodyStartLine: number }> {
@@ -596,6 +696,34 @@ function parseFormat(value: string): "text" | "json" {
     throw new InvalidArgumentError("must be text or json");
   }
   return value;
+}
+
+function hasGlob(value: string): boolean {
+  return /[*?[\]]/.test(value);
+}
+
+function globToRegExp(pattern: string): RegExp {
+  let source = "^";
+  for (let i = 0; i < pattern.length; i += 1) {
+    const char = pattern[i];
+    const next = pattern[i + 1];
+    if (char === "*" && next === "*") {
+      source += ".*";
+      i += 1;
+    } else if (char === "*") {
+      source += "[^/]*";
+    } else if (char === "?") {
+      source += "[^/]";
+    } else {
+      source += escapeRegExp(char);
+    }
+  }
+  source += "$";
+  return new RegExp(source);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
 }
 
 function toPosix(path: string): string {
