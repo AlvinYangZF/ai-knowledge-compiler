@@ -166,4 +166,49 @@ describe("akb CLI", () => {
       "second body",
     );
   });
+
+  it("migrates v0.0 pages to confidence ledgers and shows confidence", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "confidence.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_migrate00010",
+        "title: Confidence Migration",
+        'created_at: "2026-05-01"',
+        'imported_at: "2026-05-10T12:00:00.000Z"',
+        'source_path: "./confidence.md"',
+        'source_hash: "sha256:confidence-source"',
+        "---",
+        "# Confidence Migration",
+        "",
+        "This page should receive a source_added ledger event.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+
+    const migrateOutput = runCli(["migrate", "to-v0.1"], vault);
+    const ledgerPath = join(vault, "pages", ".page_migrate00010.ledger.jsonl");
+    const ledger = readFileSync(ledgerPath, "utf8").trim();
+    const event = JSON.parse(ledger);
+
+    expect(migrateOutput).toContain("Migrated 1 page");
+    expect(event.kind).toBe("source_added");
+    expect(event.pageId).toBe("page_migrate00010");
+    expect(event.timestamp).toBe("2026-05-10T12:00:00.000Z");
+    expect(event.sourceWeight).toBe(0.8);
+
+    const report = JSON.parse(
+      runCli(
+        ["confidence", "show", "page_migrate00010", "--format", "json"],
+        vault,
+      ),
+    );
+    expect(report.page_id).toBe("page_migrate00010");
+    expect(report.source_count).toBe(1);
+    expect(report.score).toBeGreaterThan(0);
+    expect(report.explanation.source_strength).toBeGreaterThan(0);
+  });
 });

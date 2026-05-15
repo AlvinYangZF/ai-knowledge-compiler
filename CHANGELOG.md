@@ -12,3 +12,4 @@
 - Added MCP SDK smoke tests for in-memory and streamable HTTP transports.
 - Added retrieval eval harness, 15-page sample vault, demo script, coverage gate, and search benchmark.
 - Started v0.1 confidence ledger work with event schemas, append-only JSONL storage, and deterministic score materialization.
+- Added `akb migrate to-v0.1` and `akb confidence show` as the first CLI surface for confidence ledgers.

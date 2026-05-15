@@ -29,6 +29,9 @@ importers:
 
   apps/cli:
     dependencies:
+      '@akb/confidence':
+        specifier: workspace:*
+        version: link:../../packages/confidence
       '@akb/core':
         specifier: workspace:*
         version: link:../../packages/core

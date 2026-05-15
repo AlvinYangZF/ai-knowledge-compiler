@@ -10,6 +10,12 @@ import {
 } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  appendConfidenceEvent,
+  computeConfidenceState,
+  loadConfidenceEvents,
+  parseConfidenceEvent,
+} from "@akb/confidence";
 import type { Page, PageFrontmatter, PageId } from "@akb/core";
 import { ConfigSchema, PageFrontmatterSchema } from "@akb/core";
 import { loadGoldenSet, runEval } from "@akb/eval-harness";
@@ -39,6 +45,14 @@ interface SearchOptions {
 interface EvalOptions {
   set?: string;
   output?: string;
+}
+
+interface MigrateOptions {
+  commit?: boolean;
+}
+
+interface ConfidenceShowOptions {
+  format?: "text" | "json";
 }
 
 export async function run(argv = process.argv): Promise<void> {
@@ -75,6 +89,17 @@ export async function run(argv = process.argv): Promise<void> {
     .option("--set <path>", "golden set path")
     .option("--output <path>", "write JSON report")
     .action(evalCommand);
+  const migrate = program.command("migrate");
+  migrate
+    .command("to-v0.1")
+    .option("--no-commit", "skip git commit")
+    .action(migrateToV01Command);
+  const confidence = program.command("confidence");
+  confidence
+    .command("show")
+    .argument("<page-id-or-path>")
+    .option("--format <format>", "text or json", parseFormat, "text")
+    .action(confidenceShowCommand);
   const mcp = program.command("mcp");
   mcp
     .command("serve")
@@ -321,6 +346,124 @@ async function evalCommand(options: EvalOptions): Promise<void> {
   }
 }
 
+async function migrateToV01Command(options: MigrateOptions): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const pages = scanVaultPages(vaultDir);
+  const written: string[] = [];
+  let skipped = 0;
+
+  for (const item of pages) {
+    const existing = loadConfidenceEvents(
+      vaultDir,
+      item.page.path,
+      item.page.id,
+    );
+    if (existing.length > 0) {
+      skipped += 1;
+      continue;
+    }
+
+    const sourceKey =
+      item.page.frontmatter.source_hash ??
+      item.page.frontmatter.source_path ??
+      String(item.page.id);
+    const timestamp = normalizeEventTimestamp(
+      item.page.frontmatter.imported_at ?? item.page.frontmatter.created_at,
+    );
+    const sourceAdded = parseConfidenceEvent({
+      id: stableId("evt", `${item.page.id}:${sourceKey}:${timestamp}`),
+      kind: "source_added",
+      pageId: item.page.id,
+      timestamp,
+      actor: "system",
+      actorId: "akb-migrate",
+      sourceId: stableId("src", sourceKey),
+      sourceWeight:
+        item.page.frontmatter.source_hash || item.page.frontmatter.source_path
+          ? 0.8
+          : 0.5,
+    });
+    const ledgerPath = appendConfidenceEvent(
+      vaultDir,
+      item.page.path,
+      sourceAdded,
+    );
+    written.push(toPosix(relative(vaultDir, ledgerPath)));
+
+    const lastVerifiedAt = item.page.frontmatter.last_verified_at;
+    if (typeof lastVerifiedAt === "string" && lastVerifiedAt.length > 0) {
+      const verified = parseConfidenceEvent({
+        id: stableId("evt", `${item.page.id}:verified:${lastVerifiedAt}`),
+        kind: "verified",
+        pageId: item.page.id,
+        timestamp: normalizeEventTimestamp(lastVerifiedAt),
+        actor: "human",
+        verifierType: "human",
+      });
+      appendConfidenceEvent(vaultDir, item.page.path, verified);
+    }
+  }
+
+  if (written.length > 0 && options.commit !== false) {
+    await commitFiles(vaultDir, written, "migrate confidence ledgers");
+  }
+
+  console.log(
+    `Migrated ${written.length} page${written.length === 1 ? "" : "s"} to v0.1 confidence ledgers (${skipped} skipped).`,
+  );
+}
+
+async function confidenceShowCommand(
+  pageIdOrPath: string,
+  options: ConfidenceShowOptions,
+): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const file = resolvePageFile(vaultDir, pageIdOrPath);
+  if (!file) {
+    throw new Error(`Page not found: ${pageIdOrPath}`);
+  }
+  const { page } = pageFromFile(vaultDir, file);
+  const events = loadConfidenceEvents(vaultDir, page.path, page.id);
+  if (events.length === 0) {
+    throw new Error(`No confidence ledger found for ${page.id}`);
+  }
+  const state = computeConfidenceState(events, {
+    pageType:
+      typeof page.frontmatter.type === "string"
+        ? page.frontmatter.type
+        : undefined,
+  });
+  const report = {
+    page_id: state.pageId,
+    score: state.score,
+    source_count: state.sourceCount,
+    contradiction_count: state.contradictionCount,
+    last_verified_at: state.lastVerifiedAt,
+    last_event_at: state.lastEventAt,
+    computed_at: state.computedAt,
+    explanation: {
+      base: state.explanation.base,
+      source_strength: state.explanation.sourceStrength,
+      contradiction_penalty: state.explanation.contradictionPenalty,
+      time_decay: state.explanation.timeDecay,
+      verification_boost: state.explanation.verificationBoost,
+    },
+  };
+
+  if (options.format === "json") {
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+
+  console.log(`${page.title} (${state.pageId})`);
+  console.log(`  score: ${state.score.toFixed(4)}`);
+  console.log(`  sources: ${state.sourceCount}`);
+  console.log(`  contradictions: ${state.contradictionCount}`);
+  console.log(`  last event: ${state.lastEventAt}`);
+}
+
 function assertVault(dir: string): void {
   if (
     !existsSync(join(dir, ".akb", "config.yaml")) ||
@@ -377,6 +520,24 @@ function findPagePathById(
         return file;
       }
     } catch {}
+  }
+  return undefined;
+}
+
+function resolvePageFile(
+  vaultDir: string,
+  pageIdOrPath: string,
+): string | undefined {
+  if (pageIdOrPath.startsWith("page_")) {
+    return findPagePathById(vaultDir, pageIdOrPath as PageId);
+  }
+  const direct = resolve(vaultDir, pageIdOrPath);
+  if (existsSync(direct)) {
+    return direct;
+  }
+  const underPages = resolve(vaultDir, "pages", pageIdOrPath);
+  if (existsSync(underPages)) {
+    return underPages;
   }
   return undefined;
 }
@@ -439,6 +600,29 @@ function parseFormat(value: string): "text" | "json" {
 
 function toPosix(path: string): string {
   return path.replaceAll("\\", "/");
+}
+
+function normalizeEventTimestamp(value: unknown): string {
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  if (typeof value === "string" && value.length > 0) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      return new Date(`${value}T00:00:00.000Z`).toISOString();
+    }
+    return new Date(value).toISOString();
+  }
+  return new Date().toISOString();
+}
+
+function stableId(prefix: "evt" | "src", input: string): string {
+  let hash = 0x811c9dc5;
+  for (const char of input) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  const suffix = Math.abs(hash).toString(36).padStart(12, "0").slice(0, 12);
+  return `${prefix}_${suffix}`;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
