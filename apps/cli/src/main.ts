@@ -126,6 +126,13 @@ interface LintReport {
   lowConfidence: Array<{ page: Page; score: number }>;
   stale: Array<{ page: Page; lastVerifiedAt: string }>;
   orphanPages: Page[];
+  highDerivedRatio: Array<{
+    page: Page;
+    derivedChunks: number;
+    totalChunks: number;
+    ratio: number;
+  }>;
+  orphanedLineage: Array<{ page: Page; chunkId: string; source: string }>;
   brokenWikiLinks: Array<{ page: Page; target: string }>;
   supersessionCycles: PageId[][];
 }
@@ -974,10 +981,30 @@ function buildLintReport(vaultDir: string): LintReport {
       citation: { line_start: 1, line_end: 1 },
     })),
   );
+  const knownPageIds = new Set(pages.map((item) => String(item.page.id)));
+  const chunksByPage = new Map<PageId, ReturnType<typeof chunkByHeaders>>();
+  const knownChunkIds = new Set<string>();
+  for (const item of pages) {
+    const chunks = chunkByHeaders(item.page.id, item.body, {
+      bodyStartLine: item.bodyStartLine,
+    });
+    chunksByPage.set(item.page.id, chunks);
+    for (const chunk of chunks) {
+      knownChunkIds.add(chunk.id);
+    }
+  }
+  const knownLineageUnitIds = new Set<string>();
+  for (const patch of loadAllPatches(vaultDir)) {
+    for (const unit of patch.lineage?.units ?? []) {
+      knownLineageUnitIds.add(unit.id);
+    }
+  }
 
   const lowConfidence: LintReport["lowConfidence"] = [];
   const stale: LintReport["stale"] = [];
   const brokenWikiLinks: LintReport["brokenWikiLinks"] = [];
+  const highDerivedRatio: LintReport["highDerivedRatio"] = [];
+  const orphanedLineage: LintReport["orphanedLineage"] = [];
   const outgoingCounts = new Map<PageId, number>(
     pages.map((item) => [item.page.id, 0]),
   );
@@ -993,6 +1020,33 @@ function buildLintReport(vaultDir: string): LintReport {
     }
     if (state?.lastVerifiedAt && isOlderThanDays(state.lastVerifiedAt, 180)) {
       stale.push({ page: item.page, lastVerifiedAt: state.lastVerifiedAt });
+    }
+    const chunks = chunksByPage.get(item.page.id) ?? [];
+    const derivedChunks = chunks.filter(
+      (chunk) => chunk.origin.kind === "derived",
+    );
+    if (chunks.length > 0 && derivedChunks.length / chunks.length > 0.5) {
+      highDerivedRatio.push({
+        page: item.page,
+        derivedChunks: derivedChunks.length,
+        totalChunks: chunks.length,
+        ratio: derivedChunks.length / chunks.length,
+      });
+    }
+    for (const chunk of derivedChunks) {
+      if (chunk.origin.kind !== "derived") {
+        continue;
+      }
+      for (const source of chunk.origin.derivedFrom.sourceChunkIds) {
+        if (!knownChunkIds.has(source)) {
+          orphanedLineage.push({ page: item.page, chunkId: chunk.id, source });
+        }
+      }
+      for (const source of chunk.origin.derivedFrom.sourceUnitIds) {
+        if (!sourceUnitExists(source, knownPageIds, knownLineageUnitIds)) {
+          orphanedLineage.push({ page: item.page, chunkId: chunk.id, source });
+        }
+      }
     }
     const links = extractWikiLinks(item.body);
     for (const target of links) {
@@ -1024,6 +1078,8 @@ function buildLintReport(vaultDir: string): LintReport {
     lowConfidence,
     stale,
     orphanPages,
+    highDerivedRatio,
+    orphanedLineage,
     brokenWikiLinks,
     supersessionCycles: findSupersessionCycles(pages.map((item) => item.page)),
   };
@@ -1052,6 +1108,22 @@ function printLintReport(report: LintReport): void {
     console.log(`  warn ${report.orphanPages.length} orphan pages`);
     for (const page of report.orphanPages) {
       console.log(`  warn orphan ${page.id} ${page.path}`);
+    }
+  }
+  if (report.highDerivedRatio.length > 0) {
+    console.log(`  warn ${report.highDerivedRatio.length} high derived ratio`);
+    for (const issue of report.highDerivedRatio) {
+      console.log(
+        `  warn derived-ratio ${issue.page.id} ${issue.page.path} ratio=${issue.ratio.toFixed(2)}`,
+      );
+    }
+  }
+  if (report.orphanedLineage.length > 0) {
+    console.log(`  warn ${report.orphanedLineage.length} orphaned lineage`);
+    for (const issue of report.orphanedLineage) {
+      console.log(
+        `  warn orphaned-lineage ${issue.page.id} ${issue.chunkId} <- ${issue.source}`,
+      );
     }
   }
 
@@ -1100,6 +1172,35 @@ function writeLintReports(vaultDir: string, report: LintReport): void {
       ]),
     ),
   );
+  writeFileSync(
+    join(lintDir, "derived-ratio.md"),
+    renderLintTable(
+      "High Derived Ratio",
+      ["Page", "Path", "Derived Chunks", "Total Chunks", "Ratio", "Suggestion"],
+      report.highDerivedRatio.map((issue) => [
+        issue.page.id,
+        issue.page.path,
+        String(issue.derivedChunks),
+        String(issue.totalChunks),
+        issue.ratio.toFixed(2),
+        "human review recommended for heavily synthesized content",
+      ]),
+    ),
+  );
+  writeFileSync(
+    join(lintDir, "orphaned-lineage.md"),
+    renderLintTable(
+      "Orphaned Lineage",
+      ["Page", "Path", "Chunk", "Missing Source", "Suggestion"],
+      report.orphanedLineage.map((issue) => [
+        issue.page.id,
+        issue.page.path,
+        issue.chunkId,
+        issue.source,
+        "restore the source page or re-verify the derived claim",
+      ]),
+    ),
+  );
   writeFileSync(join(lintDir, "suggestions.md"), renderLintSuggestions(report));
 }
 
@@ -1132,6 +1233,16 @@ function renderLintSuggestions(report: LintReport): string {
   for (const page of report.orphanPages) {
     lines.push(
       `- ${page.id}: add incoming/outgoing wiki links or mark it intentionally standalone.`,
+    );
+  }
+  for (const issue of report.highDerivedRatio) {
+    lines.push(
+      `- ${issue.page.id}: review heavily synthesized content (${issue.derivedChunks}/${issue.totalChunks} derived chunks).`,
+    );
+  }
+  for (const issue of report.orphanedLineage) {
+    lines.push(
+      `- ${issue.page.id}: restore missing lineage source ${issue.source} or re-verify ${issue.chunkId}.`,
     );
   }
   if (lines.length === 2) {
@@ -3019,6 +3130,18 @@ function sourceChunkExists(vaultDir: string, chunkId: string): boolean {
   return chunkByHeaders(page.id, body, { bodyStartLine }).some(
     (chunk) => chunk.id === chunkId,
   );
+}
+
+function sourceUnitExists(
+  sourceUnitId: string,
+  knownPageIds: Set<string>,
+  knownLineageUnitIds: Set<string>,
+): boolean {
+  if (knownLineageUnitIds.has(sourceUnitId) || knownPageIds.has(sourceUnitId)) {
+    return true;
+  }
+  const pagePrefix = sourceUnitId.split(":")[0];
+  return isValidPageId(pagePrefix) && knownPageIds.has(pagePrefix);
 }
 
 function createChangeRelativePath(

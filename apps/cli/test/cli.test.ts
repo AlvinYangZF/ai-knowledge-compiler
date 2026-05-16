@@ -985,6 +985,81 @@ describe("akb CLI", () => {
     expect(suggestions).toContain("page_orphan000001");
   });
 
+  it("lint reports high derived ratio and orphaned lineage", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "source.md");
+    const derived = join(dir, "derived.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_lintsrc00001",
+        "title: Lint Source",
+        "---",
+        "# Lint Source",
+        "",
+        "Original source claim.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      derived,
+      [
+        "---",
+        "id: page_lintder00001",
+        "title: Lint Derived",
+        "---",
+        "# Lint Derived",
+        "",
+        "<!-- akb:derived source=page_lintsrc00001:c0 method=summary -->",
+        "Synthesized derived claim.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", derived, "--no-commit", "--no-compile"], vault);
+    rmSync(join(vault, "pages", "source.md"));
+
+    const output = runCli(["lint"], vault);
+    const derivedReport = readFileSync(
+      join(vault, ".akb", "lint", "derived-ratio.md"),
+      "utf8",
+    );
+    const orphanedLineageReport = readFileSync(
+      join(vault, ".akb", "lint", "orphaned-lineage.md"),
+      "utf8",
+    );
+
+    expect(output).toContain("high derived ratio");
+    expect(output).toContain("orphaned lineage");
+    expect(derivedReport).toContain("page_lintder00001");
+    expect(orphanedLineageReport).toContain("page_lintsrc00001:c0");
+
+    writeFileSync(
+      derived,
+      [
+        "---",
+        "id: page_lintder00001",
+        "title: Lint Derived",
+        "---",
+        "# Lint Derived",
+        "",
+        "<!-- akb:derived source=page_lintsrc00001 method=summary -->",
+        "Synthesized derived claim.",
+      ].join("\n"),
+    );
+    runCli(
+      ["ingest", derived, "--force", "--no-commit", "--no-compile"],
+      vault,
+    );
+    const unitOutput = runCli(["lint"], vault);
+    const unitReport = readFileSync(
+      join(vault, ".akb", "lint", "orphaned-lineage.md"),
+      "utf8",
+    );
+    expect(unitOutput).toContain("orphaned lineage");
+    expect(unitReport).toContain("page_lintsrc00001");
+  });
+
   it("lint fails on broken wikilinks and supersession cycles", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
