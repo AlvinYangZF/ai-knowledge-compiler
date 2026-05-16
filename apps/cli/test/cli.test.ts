@@ -1628,6 +1628,63 @@ describe("akb CLI", () => {
     expect(failure).toContain("relation accuracy regression");
   });
 
+  it("passes compile eval supersede targets for create changes", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const fixtureDir = join(vault, ".akb", "eval", "fixtures");
+    mkdirSync(fixtureDir, { recursive: true });
+    writeFileSync(
+      join(fixtureDir, "gc-old.md"),
+      [
+        "---",
+        "id: page_evalold00001",
+        "title: Garbage Collection",
+        "---",
+        "# Garbage Collection",
+        "",
+        "GC uses fixed thresholds.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(fixtureDir, "gc-new.md"),
+      [
+        "---",
+        "id: page_evalnew00001",
+        "title: Adaptive GC",
+        "---",
+        "# Adaptive GC",
+        "",
+        "This supersedes Garbage Collection. Adaptive thresholds replace fixed thresholds.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(vault, ".akb", "eval", "compile-golden.yaml"),
+      [
+        'version: "1.0"',
+        "items:",
+        "  - id: c_supersede",
+        "    setup:",
+        "      existingPages:",
+        "        - fixtures/gc-old.md",
+        "      newSource: fixtures/gc-new.md",
+        "    expect:",
+        "      relations:",
+        "        - againstPage: page_evalold00001",
+        "          relation: supersede",
+        "      mustCreatePage: true",
+        "      mustNotDeleteContent: true",
+      ].join("\n"),
+    );
+
+    const output = runCli(
+      ["eval", "compile", "--set", ".akb/eval/compile-golden.yaml"],
+      vault,
+    );
+
+    expect(output).toContain("relation accuracy: 1/1");
+    expect(output).toContain("target accuracy:   1/1");
+  });
+
   it("rejects duplicate compile and invalid patches without partial writes", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);

@@ -735,7 +735,10 @@ function evalCompileCommand(options: EvalCompileOptions): void {
         expected.relationIn ?? (expected.relation ? [expected.relation] : []);
       const relationMatched = changes.find(
         (change) =>
-          "relation" in change && expectedRelations.includes(change.relation),
+          "relation" in change &&
+          expectedRelations.includes(change.relation) &&
+          (!expected.againstPage ||
+            compileChangeTargetPage(change) === expected.againstPage),
       );
       if (relationMatched) {
         relationPasses += 1;
@@ -749,8 +752,9 @@ function evalCompileCommand(options: EvalCompileOptions): void {
             expected.relationIn ?? expected.relation ?? "<missing>",
           actualRelation:
             actual && "relation" in actual ? actual.relation : undefined,
-          actualTargetPage:
-            actual && "pageId" in actual ? actual.pageId : undefined,
+          actualTargetPage: actual
+            ? compileChangeTargetPage(actual)
+            : undefined,
           kind: "relation",
         });
       }
@@ -758,8 +762,7 @@ function evalCompileCommand(options: EvalCompileOptions): void {
       if (expected.againstPage) {
         targetChecks += 1;
         const candidates = changes.filter(
-          (change) =>
-            "pageId" in change && change.pageId === expected.againstPage,
+          (change) => compileChangeTargetPage(change) === expected.againstPage,
         );
         if (candidates.length > 0) {
           targetPasses += 1;
@@ -773,8 +776,9 @@ function evalCompileCommand(options: EvalCompileOptions): void {
               expected.relationIn ?? expected.relation ?? "<missing>",
             actualRelation:
               actual && "relation" in actual ? actual.relation : undefined,
-            actualTargetPage:
-              actual && "pageId" in actual ? actual.pageId : undefined,
+            actualTargetPage: actual
+              ? compileChangeTargetPage(actual)
+              : undefined,
             kind: "target",
           });
         }
@@ -3315,6 +3319,13 @@ function changeCreatesPage(change: PatchChange): boolean {
     typeof raw.newPageId === "string" ||
     ("operation" in change && change.relation === "new")
   );
+}
+
+function compileChangeTargetPage(change: PatchChange): string | undefined {
+  if (change.type === "create") {
+    return change.supersedes ?? change.newPageId;
+  }
+  return change.pageId;
 }
 
 function normalizeVolatileCompileText(value: string): string {
