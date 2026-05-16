@@ -8,6 +8,43 @@ export interface Chunk {
   lineEnd: number;
   text: string;
   tokenCount: number;
+  origin: ChunkOrigin;
+}
+
+export type ChunkOrigin =
+  | { kind: "verbatim" }
+  | {
+      kind: "derived";
+      derivedFrom: DerivedFrom;
+    };
+
+export interface DerivedFrom {
+  sourceUnitIds: string[];
+  sourceChunkIds: string[];
+  method: CompileMethod;
+  compiledAt: string;
+  patchId: string;
+  promptHash: string;
+  modelId: string;
+}
+
+export type CompileMethod =
+  | "segment"
+  | "extend"
+  | "merge"
+  | "contradict"
+  | "supersede"
+  | "summary";
+
+export interface ChunkLineageRow {
+  chunkId: string;
+  sourceUnitId: string | null;
+  sourceChunkId: string | null;
+  method: CompileMethod;
+  patchId: string;
+  promptHash: string;
+  modelId: string;
+  compiledAt: string;
 }
 
 export interface PageRow {

@@ -25,7 +25,7 @@ import { commitFiles, initVault } from "@akb/git-store";
 import { ensureFrontmatter, parseMarkdown } from "@akb/markdown-engine";
 import { serveMcp } from "@akb/mcp-server";
 import { type RankConfidenceState, rankSearchResults } from "@akb/ranker";
-import { SearchIndex } from "@akb/search-engine";
+import { chunkByHeaders, SearchIndex } from "@akb/search-engine";
 import { Command, InvalidArgumentError } from "commander";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
@@ -1334,35 +1334,68 @@ function lineageCommand(
   const vaultDir = process.cwd();
   assertVault(vaultDir);
   const source = options.reverse;
-  const patches = loadAllPatches(vaultDir);
+  const index = new SearchIndex({ dbPath: join(vaultDir, ".akb", "index.db") });
   if (source) {
-    console.log(`${source} influenced:`);
-    for (const patch of patches) {
-      if (
-        patch.source?.pageId !== source &&
-        patch.source?.sourceId !== source
-      ) {
-        continue;
+    try {
+      console.log(`${source} influenced:`);
+      const rows = index.getReverseChunkLineage(source);
+      for (const row of rows) {
+        console.log(
+          `  ${row.chunkId} (${row.method}) <- ${row.sourceChunkId ?? row.sourceUnitId ?? "unknown"} via ${row.patchId}`,
+        );
       }
-      for (const change of patch.changes ?? []) {
-        console.log(`  ${change.pageId} (${change.relation}) via ${patch.id}`);
-      }
+    } finally {
+      index.close();
     }
     return;
   }
   if (!target) {
+    index.close();
     throw new Error("Choose a page/chunk or --reverse <source>");
   }
-  console.log(`${target}:`);
-  for (const patch of patches) {
-    for (const change of patch.changes ?? []) {
-      if (change.pageId === target || `${change.pageId}:c0` === target) {
+  try {
+    console.log(`${target}:`);
+    if (target.includes(":c")) {
+      for (const row of index.getChunkLineage(target)) {
         console.log(
-          `  derived from ${patch.source?.pageId ?? patch.source?.sourceId ?? "unknown"} via ${patch.id}`,
+          `  ${target} (${row.method}) <- ${formatLineageSource(index, row.sourceChunkId, row.sourceUnitId)} via ${row.patchId}`,
+        );
+      }
+      return;
+    }
+    const file = resolvePageFile(vaultDir, target);
+    if (!file) {
+      throw new Error(`Page not found: ${target}`);
+    }
+    const { page } = pageFromFile(vaultDir, file);
+    for (const chunk of index.getChunksForPage(page.id)) {
+      if (chunk.origin.kind !== "derived") {
+        continue;
+      }
+      for (const row of index.getChunkLineage(chunk.id)) {
+        console.log(
+          `  ${chunk.id} (${row.method}) <- ${formatLineageSource(index, row.sourceChunkId, row.sourceUnitId)} via ${row.patchId}`,
         );
       }
     }
+  } finally {
+    index.close();
   }
+}
+
+function formatLineageSource(
+  index: SearchIndex,
+  sourceChunkId: string | null,
+  sourceUnitId: string | null,
+): string {
+  if (!sourceChunkId) {
+    return sourceUnitId ?? "unknown";
+  }
+  const sourceChunk = index.getChunkById(sourceChunkId);
+  if (!sourceChunk) {
+    return sourceChunkId;
+  }
+  return `${sourceChunkId} L${sourceChunk.lineStart}-L${sourceChunk.lineEnd}`;
 }
 
 function assertVault(dir: string): void {
@@ -1788,6 +1821,14 @@ function buildCompilePatch(
   const target = candidates[0]?.item;
   const patchId = `patch_${source.page.id}`;
   const timestamp = new Date().toISOString();
+  const synthesizePromptHash = stablePromptHash("synthesize/heuristic-v0.1");
+  const targetChunkId = target
+    ? `${target.page.id}:c${
+        chunkByHeaders(target.page.id, target.body, {
+          bodyStartLine: target.bodyStartLine,
+        }).length
+      }`
+    : undefined;
   const changes: PatchChange[] = [];
   if (target) {
     changes.push({
@@ -1800,7 +1841,7 @@ function buildCompilePatch(
       content: [
         `## ${source.page.title} (compiled)`,
         "",
-        `<!-- akb:derived source=${source.page.id}:c0 method=extend patch=${patchId} -->`,
+        `<!-- akb:derived source=${source.page.id}:c0 method=extend patch=${patchId} promptHash="${synthesizePromptHash}" modelId="${model}" compiledAt="${timestamp}" -->`,
         source.body.trim(),
       ].join("\n"),
       confidenceImpact: {
@@ -1855,13 +1896,14 @@ function buildCompilePatch(
       derivedChunks: target
         ? [
             {
-              chunkId: `${target.page.id}:compiled:${source.page.id}`,
+              chunkId: targetChunkId,
               derivedFrom: {
                 sourceUnitIds: [`${source.page.id}:su0`],
                 sourceChunkIds: [`${source.page.id}:c0`],
                 method: "extend",
-                promptHash: stablePromptHash("synthesize/heuristic-v0.1"),
+                promptHash: synthesizePromptHash,
                 modelId: model,
+                compiledAt: timestamp,
               },
             },
           ]
@@ -2048,18 +2090,68 @@ function validatePatchForApply(vaultDir: string, patch: PatchDocument): void {
     if (!resolvePageFile(vaultDir, change.pageId)) {
       throw new Error(`Invalid patch: target page not found ${change.pageId}`);
     }
+    if (change.type === "modify") {
+      for (const source of extractDerivedSources(change.content)) {
+        if (source.includes(":c")) {
+          if (!sourceChunkExists(vaultDir, source)) {
+            throw new Error(
+              `Invalid patch: unresolved derived source ${source}`,
+            );
+          }
+        } else if (!lineageUnitExists(patch, source)) {
+          throw new Error(`Invalid patch: unresolved derived source ${source}`);
+        }
+      }
+    }
   }
   for (const unit of patch.lineage?.units ?? []) {
     if (unit.sourcePageId && !isValidPageId(unit.sourcePageId)) {
       throw new Error("Invalid patch: invalid lineage sourcePageId");
     }
     for (const chunkId of unit.sourceChunkIds ?? []) {
-      const pageId = chunkId.split(":")[0];
-      if (!isValidPageId(pageId) || !resolvePageFile(vaultDir, pageId)) {
+      if (!sourceChunkExists(vaultDir, chunkId)) {
         throw new Error(`Invalid patch: unresolved lineage source ${chunkId}`);
       }
     }
   }
+}
+
+function extractDerivedSources(content: string): string[] {
+  const sources: string[] = [];
+  for (const marker of content.matchAll(/<!--\s*akb:derived\s+([^>]+)-->/g)) {
+    const attrs = marker[1];
+    const source = attrs.match(/source=("[^"]*"|[^\s]+)/)?.[1];
+    if (!source) {
+      continue;
+    }
+    sources.push(
+      ...source
+        .replace(/^"|"$/g, "")
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    );
+  }
+  return sources;
+}
+
+function lineageUnitExists(patch: PatchDocument, unitId: string): boolean {
+  return (patch.lineage?.units ?? []).some((unit) => unit.id === unitId);
+}
+
+function sourceChunkExists(vaultDir: string, chunkId: string): boolean {
+  const pageId = chunkId.split(":")[0];
+  if (!isValidPageId(pageId)) {
+    return false;
+  }
+  const file = resolvePageFile(vaultDir, pageId);
+  if (!file) {
+    return false;
+  }
+  const { page, body, bodyStartLine } = pageFromFile(vaultDir, file);
+  return chunkByHeaders(page.id, body, { bodyStartLine }).some(
+    (chunk) => chunk.id === chunkId,
+  );
 }
 
 function normalizedCompilePatch(patch: PatchDocument): string {
@@ -2067,12 +2159,37 @@ function normalizedCompilePatch(patch: PatchDocument): string {
     source: patch.source,
     compileMeta: {
       ...patch.compileMeta,
-      createdAt: undefined,
+      createdAt: "<timestamp>",
       elapsedMs: undefined,
     },
-    changes: patch.changes,
-    lineage: patch.lineage,
+    changes: (patch.changes ?? []).map((change) =>
+      change.type === "modify"
+        ? {
+            ...change,
+            content: normalizeVolatileCompileText(change.content),
+          }
+        : change,
+    ),
+    lineage: {
+      ...patch.lineage,
+      derivedChunks: (patch.lineage?.derivedChunks ?? []).map((chunk) =>
+        normalizeVolatileDerivedChunk(chunk),
+      ),
+    },
   });
+}
+
+function normalizeVolatileCompileText(value: string): string {
+  return value.replace(/compiledAt="[^"]+"/g, 'compiledAt="<timestamp>"');
+}
+
+function normalizeVolatileDerivedChunk(
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  const derivedFrom = isRecord(value.derivedFrom)
+    ? { ...value.derivedFrom, compiledAt: "<timestamp>" }
+    : value.derivedFrom;
+  return { ...value, derivedFrom };
 }
 
 function appendPatchConfidenceEvent(

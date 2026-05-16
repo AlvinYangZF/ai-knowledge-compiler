@@ -15,4 +15,13 @@ export {
   type SearchOptions,
   type UpsertPageOptions,
 } from "./search-index.js";
-export type { Chunk, PageRow, RebuildResult, UpsertResult } from "./types.js";
+export type {
+  Chunk,
+  ChunkLineageRow,
+  ChunkOrigin,
+  CompileMethod,
+  DerivedFrom,
+  PageRow,
+  RebuildResult,
+  UpsertResult,
+} from "./types.js";

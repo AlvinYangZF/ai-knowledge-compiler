@@ -777,7 +777,8 @@ describe("akb CLI", () => {
 
     const lineage = runCli(["lineage", "page_compile00001"], vault);
     expect(lineage).toContain("page_compile00001");
-    expect(lineage).toContain("page_compile00002");
+    expect(lineage).toContain("page_compile00002:c0");
+    expect(lineage).toContain("L");
     const reverse = runCli(
       ["lineage", "--reverse", "page_compile00002"],
       vault,
@@ -869,6 +870,73 @@ describe("akb CLI", () => {
     expect(
       existsSync(join(vault, "pages", ".page_atomic000001.ledger.jsonl")),
     ).toBe(false);
+  });
+
+  it("rejects patches with unresolved derived source chunks", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const target = join(dir, "target.md");
+    const source = join(dir, "source.md");
+    writeFileSync(
+      target,
+      [
+        "---",
+        "id: page_chunk0000010",
+        "title: Chunk Target",
+        "---",
+        "# Chunk Target",
+        "",
+        "Target page.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_chunk0000020",
+        "title: Chunk Source",
+        "---",
+        "# Chunk Source",
+        "",
+        "Only one chunk exists.",
+      ].join("\n"),
+    );
+    runCli(["ingest", target, "--no-commit"], vault);
+    runCli(["ingest", source, "--no-commit"], vault);
+    writeFileSync(
+      join(vault, ".akb", "patches", "patch_bad_chunk.yaml"),
+      [
+        "id: patch_bad_chunk",
+        "status: proposed",
+        "source:",
+        "  pageId: page_chunk0000020",
+        "  sourceId: src_chunk0000010",
+        "changes:",
+        "  - type: modify",
+        "    pageId: page_chunk0000010",
+        "    operation: append_section",
+        "    relation: extend",
+        "    classifyConfidence: 0.7",
+        "    reasoning: invalid chunk source",
+        "    content: |",
+        "      ## Invalid Chunk",
+        "      <!-- akb:derived source=page_chunk0000020:c999 method=extend patch=patch_bad_chunk -->",
+        "      This must not apply.",
+        "    confidenceImpact:",
+        "      kind: source_added",
+        "      sourceWeight: 0.8",
+        "lineage:",
+        "  units:",
+        "    - id: page_chunk0000020:su0",
+        "      sourcePageId: page_chunk0000020",
+        "      sourceChunkIds:",
+        "        - page_chunk0000020:c999",
+      ].join("\n"),
+    );
+
+    const failure = runCliFailure(["patch", "apply", "patch_bad_chunk"], vault);
+
+    expect(failure).toContain("unresolved derived source");
   });
 
   it("rejects unmapped runtime webhook signals", () => {

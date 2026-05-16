@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SearchIndex } from "../src/search-index.js";
 import { samplePages } from "./fixtures/sample-pages.js";
@@ -103,5 +104,151 @@ describe("SearchIndex", () => {
       "Garbage Collection Strategy",
     );
     expect(idx.getPageByIdOrPath("pages/storage/gc.md")?.bodyStartLine).toBe(7);
+  });
+
+  it("materializes derived chunk lineage from akb derived comments", () => {
+    const { page } = samplePages.gc;
+    idx.upsertPage(
+      page,
+      [
+        "# Derived GC",
+        '<!-- akb:derived source=page_source00001:c0 method=extend patch=patch_source promptHash="sha256:def" modelId="deepseek-v4-flash" compiledAt="2026-05-16T00:00:00.000Z" -->',
+        "Compiled garbage collection guidance.",
+      ].join("\n"),
+    );
+
+    const chunks = idx.getChunksForPage(page.id);
+    expect(chunks[0].origin.kind).toBe("derived");
+    expect(idx.getChunkLineage(`${page.id}:c0`)).toEqual([
+      {
+        chunkId: `${page.id}:c0`,
+        sourceUnitId: null,
+        sourceChunkId: "page_source00001:c0",
+        method: "extend",
+        patchId: "patch_source",
+        promptHash: "sha256:def",
+        modelId: "deepseek-v4-flash",
+        compiledAt: "2026-05-16T00:00:00.000Z",
+      },
+    ]);
+    expect(idx.getReverseChunkLineage("page_source00001")).toEqual([
+      expect.objectContaining({
+        chunkId: `${page.id}:c0`,
+        sourceChunkId: "page_source00001:c0",
+      }),
+    ]);
+
+    expect(idx.getChunkById(`${page.id}:c0`)?.lineStart).toBe(1);
+
+    idx.upsertPage(page, "# Verbatim GC\nNo derived marker.");
+
+    expect(idx.getChunksForPage(page.id)[0].origin.kind).toBe("verbatim");
+    expect(idx.getChunkLineage(`${page.id}:c0`)).toEqual([]);
+  });
+
+  it("supports reverse lineage from source unit ids", () => {
+    const { page } = samplePages.gc;
+    idx.upsertPage(
+      page,
+      [
+        "# Derived From Unit",
+        '<!-- akb:derived source=su_001 method=merge patch=patch_unit promptHash="sha256:abc" modelId="deepseek-v4-flash" compiledAt="2026-05-16T00:00:00.000Z" -->',
+        "Merged guidance.",
+      ].join("\n"),
+    );
+
+    expect(idx.getReverseChunkLineage("su_001")).toEqual([
+      {
+        chunkId: `${page.id}:c0`,
+        sourceUnitId: "su_001",
+        sourceChunkId: null,
+        method: "merge",
+        patchId: "patch_unit",
+        promptHash: "sha256:abc",
+        modelId: "deepseek-v4-flash",
+        compiledAt: "2026-05-16T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("migrates v1 indexes to the lineage schema", () => {
+    idx.close();
+    const dbPath = join(dir, "legacy.db");
+    const db = new Database(dbPath);
+    db.exec(`
+      PRAGMA user_version = 1;
+      CREATE TABLE pages (
+        id TEXT PRIMARY KEY,
+        path TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        frontmatter TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        body_start_line INTEGER NOT NULL,
+        indexed_at TEXT NOT NULL
+      );
+      CREATE VIRTUAL TABLE pages_fts USING fts5(
+        id UNINDEXED,
+        title,
+        body,
+        tags,
+        tokenize='unicode61 remove_diacritics 2'
+      );
+      CREATE TABLE chunks (
+        id TEXT PRIMARY KEY,
+        page_id TEXT NOT NULL,
+        idx INTEGER NOT NULL,
+        line_start INTEGER NOT NULL,
+        line_end INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        token_count INTEGER NOT NULL
+      );
+      CREATE VIRTUAL TABLE chunks_fts USING fts5(
+        id UNINDEXED,
+        page_id UNINDEXED,
+        text,
+        tokenize='unicode61 remove_diacritics 2'
+      );
+    `);
+    db.close();
+
+    const migrated = new SearchIndex({ dbPath });
+    expect(
+      migrated.upsertPage(samplePages.gc.page, samplePages.gc.body).action,
+    ).toBe("inserted");
+    expect(
+      migrated.getChunksForPage(samplePages.gc.page.id)[0].origin.kind,
+    ).toBe("verbatim");
+    migrated.close();
+  });
+
+  it("keeps derived origin on all pieces of an oversized derived section", () => {
+    idx.close();
+    const small = new SearchIndex({
+      dbPath: join(dir, "small.db"),
+      maxChunkTokens: 5,
+    });
+    try {
+      small.upsertPage(
+        samplePages.gc.page,
+        [
+          "# Large Derived",
+          '<!-- akb:derived source=page_source00001:c0 method=extend patch=patch_large promptHash="sha256:large" modelId="deepseek-v4-flash" compiledAt="2026-05-16T00:00:00.000Z" -->',
+          "word ".repeat(120),
+        ].join("\n"),
+      );
+
+      const chunks = small.getChunksForPage(samplePages.gc.page.id);
+      expect(chunks.length).toBeGreaterThan(1);
+      expect(chunks.every((chunk) => chunk.origin.kind === "derived")).toBe(
+        true,
+      );
+      for (const chunk of chunks) {
+        expect(small.getChunkLineage(chunk.id)[0]?.sourceChunkId).toBe(
+          "page_source00001:c0",
+        );
+      }
+    } finally {
+      small.close();
+    }
   });
 });

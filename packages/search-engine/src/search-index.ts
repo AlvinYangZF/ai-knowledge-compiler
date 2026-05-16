@@ -3,8 +3,20 @@ import { statSync } from "node:fs";
 import type { Page, PageId, SearchResult } from "@akb/core";
 import Database from "better-sqlite3";
 import { chunkByHeaders } from "./chunking.js";
-import { assertSchemaCompatible, SCHEMA_SQL } from "./schema.js";
-import type { PageRow, RebuildResult, UpsertResult } from "./types.js";
+import {
+  assertSchemaCompatible,
+  migrateSchema,
+  SCHEMA_SQL,
+  SCHEMA_VERSION,
+} from "./schema.js";
+import type {
+  Chunk,
+  ChunkLineageRow,
+  CompileMethod,
+  PageRow,
+  RebuildResult,
+  UpsertResult,
+} from "./types.js";
 
 export interface SearchIndexOptions {
   dbPath: string;
@@ -39,8 +51,18 @@ export class SearchIndex {
     const currentVersion = this.db.pragma("user_version", {
       simple: true,
     }) as number;
-    assertSchemaCompatible(currentVersion);
-    if (!opts.readonly && currentVersion === 0) {
+    if (
+      !opts.readonly &&
+      currentVersion > 0 &&
+      currentVersion < SCHEMA_VERSION
+    ) {
+      migrateSchema(this.db, currentVersion);
+    }
+    const migratedVersion = this.db.pragma("user_version", {
+      simple: true,
+    }) as number;
+    assertSchemaCompatible(migratedVersion);
+    if (!opts.readonly && migratedVersion === 0) {
       this.db.exec(SCHEMA_SQL);
     }
   }
@@ -201,6 +223,89 @@ export class SearchIndex {
     ).map((row) => row.id as PageId);
   }
 
+  getChunksForPage(pageId: PageId): Chunk[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT id, page_id, idx, line_start, line_end, text, token_count, origin_kind
+        FROM chunks
+        WHERE page_id = ?
+        ORDER BY idx
+      `,
+      )
+      .all(pageId) as ChunkRow[];
+    return rows.map((row) => this.chunkFromRow(row));
+  }
+
+  getChunkLineage(chunkId: string): ChunkLineageRow[] {
+    if (!this.hasChunkLineageTable()) {
+      return [];
+    }
+    return (
+      this.db
+        .prepare(
+          `
+          SELECT
+            chunk_id, source_unit_id, source_chunk_id, method,
+            patch_id, prompt_hash, model_id, compiled_at
+          FROM chunk_lineage
+          WHERE chunk_id = ?
+          ORDER BY id
+        `,
+        )
+        .all(chunkId) as LineageDbRow[]
+    ).map(lineageRowFromDb);
+  }
+
+  getChunkById(chunkId: string): Chunk | undefined {
+    const row = this.db
+      .prepare(
+        `
+        SELECT id, page_id, idx, line_start, line_end, text, token_count, origin_kind
+        FROM chunks
+        WHERE id = ?
+      `,
+      )
+      .get(chunkId) as ChunkRow | undefined;
+    return row ? this.chunkFromRow(row) : undefined;
+  }
+
+  getReverseChunkLineage(sourcePageOrChunkId: string): ChunkLineageRow[] {
+    if (!this.hasChunkLineageTable()) {
+      return [];
+    }
+    const rows = sourcePageOrChunkId.includes(":c")
+      ? (this.db
+          .prepare(
+            `
+            SELECT
+              chunk_id, source_unit_id, source_chunk_id, method,
+              patch_id, prompt_hash, model_id, compiled_at
+            FROM chunk_lineage
+            WHERE source_chunk_id = ?
+            ORDER BY chunk_id, id
+          `,
+          )
+          .all(sourcePageOrChunkId) as LineageDbRow[])
+      : (this.db
+          .prepare(
+            `
+            SELECT
+              chunk_id, source_unit_id, source_chunk_id, method,
+              patch_id, prompt_hash, model_id, compiled_at
+            FROM chunk_lineage
+            WHERE source_chunk_id LIKE ? OR source_unit_id = ? OR source_unit_id LIKE ?
+            ORDER BY chunk_id, id
+          `,
+          )
+          .all(
+            `${sourcePageOrChunkId}:%`,
+            sourcePageOrChunkId,
+            `${sourcePageOrChunkId}:%`,
+          ) as LineageDbRow[]);
+    return rows.map(lineageRowFromDb);
+  }
+
   getStats(): { pages: number; chunks: number; dbSizeBytes: number } {
     const pages = this.db
       .prepare("SELECT COUNT(*) AS count FROM pages")
@@ -260,6 +365,11 @@ export class SearchIndex {
   ): void {
     this.db.prepare("DELETE FROM pages_fts WHERE id = ?").run(page.id);
     this.db.prepare("DELETE FROM chunks_fts WHERE page_id = ?").run(page.id);
+    this.db
+      .prepare(
+        "DELETE FROM chunk_lineage WHERE chunk_id IN (SELECT id FROM chunks WHERE page_id = ?)",
+      )
+      .run(page.id);
     this.db.prepare("DELETE FROM chunks WHERE page_id = ?").run(page.id);
     this.db
       .prepare(
@@ -292,8 +402,25 @@ export class SearchIndex {
 
     const insertChunk = this.db.prepare(
       `
-      INSERT INTO chunks (id, page_id, idx, line_start, line_end, text, token_count)
-      VALUES (@id, @page_id, @idx, @line_start, @line_end, @text, @token_count)
+      INSERT INTO chunks (
+        id, page_id, idx, line_start, line_end, text, token_count, origin_kind
+      )
+      VALUES (
+        @id, @page_id, @idx, @line_start, @line_end, @text, @token_count,
+        @origin_kind
+      )
+    `,
+    );
+    const insertLineage = this.db.prepare(
+      `
+      INSERT INTO chunk_lineage (
+        id, chunk_id, source_unit_id, source_chunk_id, method, patch_id,
+        prompt_hash, model_id, compiled_at
+      )
+      VALUES (
+        @id, @chunk_id, @source_unit_id, @source_chunk_id, @method, @patch_id,
+        @prompt_hash, @model_id, @compiled_at
+      )
     `,
     );
     const insertChunkFts = this.db.prepare(
@@ -308,9 +435,56 @@ export class SearchIndex {
         line_end: chunk.lineEnd,
         text: chunk.text,
         token_count: chunk.tokenCount,
+        origin_kind: chunk.origin.kind,
       });
       insertChunkFts.run(chunk.id, chunk.pageId, chunk.text);
+      if (isDerivedChunk(chunk)) {
+        for (const row of lineageRowsForChunk(chunk)) {
+          insertLineage.run(row);
+        }
+      }
     }
+  }
+
+  private chunkFromRow(row: ChunkRow): Chunk {
+    const lineage = this.getChunkLineage(row.id);
+    return {
+      id: row.id,
+      pageId: row.page_id as PageId,
+      index: row.idx,
+      lineStart: row.line_start,
+      lineEnd: row.line_end,
+      text: row.text,
+      tokenCount: row.token_count,
+      origin:
+        row.origin_kind === "derived"
+          ? {
+              kind: "derived",
+              derivedFrom: {
+                sourceUnitIds: lineage
+                  .map((item) => item.sourceUnitId)
+                  .filter((item): item is string => item !== null),
+                sourceChunkIds: lineage
+                  .map((item) => item.sourceChunkId)
+                  .filter((item): item is string => item !== null),
+                method: lineage[0]?.method ?? "extend",
+                patchId: lineage[0]?.patchId ?? "",
+                promptHash: lineage[0]?.promptHash ?? "",
+                modelId: lineage[0]?.modelId ?? "",
+                compiledAt: lineage[0]?.compiledAt ?? "",
+              },
+            }
+          : { kind: "verbatim" },
+    };
+  }
+
+  private hasChunkLineageTable(): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'chunk_lineage'",
+      )
+      .get() as { count: number };
+    return row.count === 1;
   }
 }
 
@@ -327,6 +501,84 @@ interface SearchRow {
   line_end: number;
   text: string;
   rank: number;
+}
+
+interface ChunkRow {
+  id: string;
+  page_id: string;
+  idx: number;
+  line_start: number;
+  line_end: number;
+  text: string;
+  token_count: number;
+  origin_kind: string;
+}
+
+interface LineageDbRow {
+  chunk_id: string;
+  source_unit_id: string | null;
+  source_chunk_id: string | null;
+  method: string;
+  patch_id: string;
+  prompt_hash: string;
+  model_id: string;
+  compiled_at: string;
+}
+
+function lineageRowsForChunk(
+  chunk: Chunk & { origin: Extract<Chunk["origin"], { kind: "derived" }> },
+): Array<{
+  id: string;
+  chunk_id: string;
+  source_unit_id: string | null;
+  source_chunk_id: string | null;
+  method: CompileMethod;
+  patch_id: string;
+  prompt_hash: string;
+  model_id: string;
+  compiled_at: string;
+}> {
+  const derived = chunk.origin.derivedFrom;
+  const rows = [
+    ...derived.sourceUnitIds.map((sourceUnitId) => ({
+      sourceUnitId,
+      sourceChunkId: null,
+    })),
+    ...derived.sourceChunkIds.map((sourceChunkId) => ({
+      sourceUnitId: null,
+      sourceChunkId,
+    })),
+  ];
+  return rows.map((row, index) => ({
+    id: `${chunk.id}:l${index}`,
+    chunk_id: chunk.id,
+    source_unit_id: row.sourceUnitId,
+    source_chunk_id: row.sourceChunkId,
+    method: derived.method,
+    patch_id: derived.patchId,
+    prompt_hash: derived.promptHash,
+    model_id: derived.modelId,
+    compiled_at: derived.compiledAt,
+  }));
+}
+
+function isDerivedChunk(chunk: Chunk): chunk is Chunk & {
+  origin: Extract<Chunk["origin"], { kind: "derived" }>;
+} {
+  return chunk.origin.kind === "derived";
+}
+
+function lineageRowFromDb(row: LineageDbRow): ChunkLineageRow {
+  return {
+    chunkId: row.chunk_id,
+    sourceUnitId: row.source_unit_id,
+    sourceChunkId: row.source_chunk_id,
+    method: row.method as CompileMethod,
+    patchId: row.patch_id,
+    promptHash: row.prompt_hash,
+    modelId: row.model_id,
+    compiledAt: row.compiled_at,
+  };
 }
 
 function pageContentHash(

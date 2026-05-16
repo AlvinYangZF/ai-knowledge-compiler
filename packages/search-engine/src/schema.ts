@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export const SCHEMA_SQL = `
 PRAGMA user_version = ${SCHEMA_VERSION};
@@ -31,10 +31,28 @@ CREATE TABLE IF NOT EXISTS chunks (
     line_end        INTEGER NOT NULL,
     text            TEXT NOT NULL,
     token_count     INTEGER NOT NULL,
+    origin_kind     TEXT NOT NULL DEFAULT 'verbatim',
     FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_chunks_page ON chunks(page_id);
+
+CREATE TABLE IF NOT EXISTS chunk_lineage (
+    id              TEXT PRIMARY KEY,
+    chunk_id        TEXT NOT NULL,
+    source_unit_id  TEXT,
+    source_chunk_id TEXT,
+    method          TEXT NOT NULL,
+    patch_id        TEXT NOT NULL,
+    prompt_hash     TEXT NOT NULL,
+    model_id        TEXT NOT NULL,
+    compiled_at     TEXT NOT NULL,
+    FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_lineage_chunk ON chunk_lineage(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_lineage_source_chunk
+  ON chunk_lineage(source_chunk_id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     id UNINDEXED,
@@ -53,5 +71,35 @@ export function assertSchemaCompatible(actual: number): void {
       `Schema version mismatch: db is v${actual}, code expects v${SCHEMA_VERSION}. ` +
         "Run 'akb index --rebuild' to recreate the index.",
     );
+  }
+}
+
+export function migrateSchema(
+  db: { exec(sql: string): void },
+  actual: number,
+): void {
+  if (actual === 1) {
+    db.exec(`
+      ALTER TABLE chunks ADD COLUMN origin_kind TEXT NOT NULL DEFAULT 'verbatim';
+
+      CREATE TABLE IF NOT EXISTS chunk_lineage (
+          id              TEXT PRIMARY KEY,
+          chunk_id        TEXT NOT NULL,
+          source_unit_id  TEXT,
+          source_chunk_id TEXT,
+          method          TEXT NOT NULL,
+          patch_id        TEXT NOT NULL,
+          prompt_hash     TEXT NOT NULL,
+          model_id        TEXT NOT NULL,
+          compiled_at     TEXT NOT NULL,
+          FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_lineage_chunk ON chunk_lineage(chunk_id);
+      CREATE INDEX IF NOT EXISTS idx_lineage_source_chunk
+        ON chunk_lineage(source_chunk_id);
+
+      PRAGMA user_version = ${SCHEMA_VERSION};
+    `);
   }
 }

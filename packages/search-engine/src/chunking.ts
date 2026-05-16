@@ -1,5 +1,5 @@
 import type { PageId } from "@akb/core";
-import type { Chunk } from "./types.js";
+import type { Chunk, CompileMethod } from "./types.js";
 
 export interface ChunkingOptions {
   maxTokens?: number;
@@ -36,6 +36,7 @@ export function chunkByHeaders(
       continue;
     }
     const text = lines.slice(trimmed.start, trimmed.end + 1).join("\n");
+    const origin = parseChunkOrigin(text);
     for (const piece of splitOversizedText(text, maxTokens, charsPerToken)) {
       chunks.push({
         id: `${pageId}:c${chunks.length}`,
@@ -45,11 +46,63 @@ export function chunkByHeaders(
         lineEnd: bodyStartLine + trimmed.end,
         text: piece,
         tokenCount: estimateTokens(piece, charsPerToken),
+        origin,
       });
     }
   }
 
   return chunks;
+}
+
+function parseChunkOrigin(text: string): Chunk["origin"] {
+  const marker = text.match(/<!--\s*akb:derived\s+([^>]+)-->/);
+  if (!marker) {
+    return { kind: "verbatim" };
+  }
+  const attrs = parseDerivedAttributes(marker[1]);
+  const sources = attrs.source
+    ? attrs.source
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean)
+    : [];
+  const sourceUnitIds = sources.filter((source) => !source.includes(":c"));
+  const sourceChunkIds = sources.filter((source) => source.includes(":c"));
+  return {
+    kind: "derived",
+    derivedFrom: {
+      sourceUnitIds,
+      sourceChunkIds,
+      method: toCompileMethod(attrs.method),
+      compiledAt: attrs.compiledAt ?? new Date(0).toISOString(),
+      patchId: attrs.patch ?? "",
+      promptHash: attrs.promptHash ?? "",
+      modelId: attrs.modelId ?? "",
+    },
+  };
+}
+
+function parseDerivedAttributes(value: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  for (const match of value.matchAll(
+    /([A-Za-z][A-Za-z0-9_-]*)=("[^"]*"|[^\s]+)/g,
+  )) {
+    attrs[match[1]] = match[2].replace(/^"|"$/g, "");
+  }
+  return attrs;
+}
+
+function toCompileMethod(value: string | undefined): CompileMethod {
+  switch (value) {
+    case "segment":
+    case "merge":
+    case "contradict":
+    case "supersede":
+    case "summary":
+      return value;
+    default:
+      return "extend";
+  }
 }
 
 export function estimateTokens(text: string, charsPerToken = 4): number {
