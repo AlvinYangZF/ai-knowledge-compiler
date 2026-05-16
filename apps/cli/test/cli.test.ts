@@ -328,6 +328,179 @@ describe("akb CLI", () => {
     expect(invalidNow).toContain("Invalid --now timestamp");
   });
 
+  it("explains confidence score components with source events", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "explain.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_explain00001",
+        "title: Confidence Explain",
+        'type: "module"',
+        'created_at: "2026-01-01"',
+        "---",
+        "# Confidence Explain",
+        "",
+        "This page should expose confidence score evidence.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+
+    const events = [
+      {
+        id: "evt_explain00001",
+        kind: "source_added",
+        pageId: "page_explain00001",
+        timestamp: "2026-01-01T00:00:00.000Z",
+        actor: "system",
+        actorId: "akb-test",
+        sourceId: "src_explain00001",
+        sourceWeight: 0.8,
+      },
+      {
+        id: "evt_explain00002",
+        kind: "source_removed",
+        pageId: "page_explain00001",
+        timestamp: "2026-01-15T00:00:00.000Z",
+        actor: "system",
+        actorId: "akb-test",
+        sourceId: "src_explain00001",
+        reason: "source superseded",
+      },
+      {
+        id: "evt_explain00003",
+        kind: "source_added",
+        pageId: "page_explain00001",
+        timestamp: "2026-01-20T00:00:00.000Z",
+        actor: "system",
+        actorId: "akb-test",
+        sourceId: "src_explain00003",
+        sourceWeight: 0.9,
+      },
+      {
+        id: "evt_explain00004",
+        kind: "verified",
+        pageId: "page_explain00001",
+        timestamp: "2026-02-01T00:00:00.000Z",
+        actor: "agent",
+        actorId: "ci:github-actions",
+        verifierType: "agent",
+        verifierId: "ci:github-actions",
+        reason: "linked CI passed",
+      },
+      {
+        id: "evt_explain00005",
+        kind: "contradicted_by",
+        pageId: "page_explain00001",
+        timestamp: "2026-03-01T00:00:00.000Z",
+        actor: "system",
+        actorId: "akb-test",
+        bySourceId: "src_explain00002",
+        severity: "minor",
+      },
+      {
+        id: "evt_explain00006",
+        kind: "manual_override",
+        pageId: "page_explain00001",
+        timestamp: "2026-03-15T00:00:00.000Z",
+        actor: "human",
+        actorId: "alvin",
+        reason: "temporary audit downgrade",
+        newBase: 0.4,
+      },
+      {
+        id: "evt_explain00007",
+        kind: "manual_override",
+        pageId: "page_explain00001",
+        timestamp: "2026-04-01T00:00:00.000Z",
+        actor: "human",
+        actorId: "alvin",
+        reason: "audit completed",
+        newBase: 0.6,
+      },
+    ];
+    writeFileSync(
+      join(vault, "pages", ".page_explain00001.ledger.jsonl"),
+      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+    );
+
+    const report = JSON.parse(
+      runCli(
+        [
+          "confidence",
+          "show",
+          "page_explain00001",
+          "--format",
+          "json",
+          "--now",
+          "2026-05-16T00:00:00.000Z",
+        ],
+        vault,
+      ),
+    );
+
+    expect(report.events).toHaveLength(7);
+    expect(report.events[0]).toMatchObject({
+      id: "evt_explain00001",
+      kind: "source_added",
+      source_id: "src_explain00001",
+      source_weight: 0.8,
+    });
+    expect(report.explanation.source_strength_events).toEqual([
+      "evt_explain00003",
+    ]);
+    expect(report.explanation.active_sources).toEqual([
+      {
+        event_id: "evt_explain00003",
+        source_id: "src_explain00003",
+        weight: 0.9,
+      },
+    ]);
+    expect(report.explanation.base_events).toEqual(["evt_explain00007"]);
+    expect(report.explanation.verification_boost_events).toEqual([
+      "evt_explain00004",
+    ]);
+    expect(report.explanation.contradiction_penalty_events).toEqual([
+      "evt_explain00005",
+    ]);
+    expect(report.explanation.time_decay_event).toBe("evt_explain00007");
+    expect(report.computed_at).toBe("2026-05-16T00:00:00.000Z");
+    expect(report.status.flags).toContain("STALE");
+
+    const repeatedReport = JSON.parse(
+      runCli(
+        [
+          "confidence",
+          "show",
+          "page_explain00001",
+          "--format",
+          "json",
+          "--now",
+          "2026-05-16T00:00:00.000Z",
+        ],
+        vault,
+      ),
+    );
+    expect(repeatedReport).toEqual(report);
+
+    const text = runCli(
+      [
+        "confidence",
+        "show",
+        "page_explain00001",
+        "--now",
+        "2026-05-16T00:00:00.000Z",
+      ],
+      vault,
+    );
+    expect(text).toContain("breakdown:");
+    expect(text).toContain("events: 7 total");
+    expect(text).toContain("source_added");
+    expect(text).toContain("status:");
+  });
+
   it("verifies a page by appending a confidence ledger event", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);

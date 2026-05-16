@@ -13,7 +13,9 @@ import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   appendConfidenceEvent,
+  type ConfidenceEvent,
   ConfidenceProjection,
+  type ConfidenceState,
   computeConfidenceState,
   loadConfidenceEvents,
   parseConfidenceEvent,
@@ -71,11 +73,10 @@ interface MigrateOptions {
 
 interface ConfidenceShowOptions {
   format?: "text" | "json";
-}
-
-interface ConfidenceRecomputeOptions extends ConfidenceShowOptions {
   now?: string;
 }
+
+interface ConfidenceRecomputeOptions extends ConfidenceShowOptions {}
 
 interface ProjectionRebuildOptions {
   confidence?: boolean;
@@ -242,6 +243,7 @@ export async function run(argv = process.argv): Promise<void> {
     .command("show")
     .argument("<page-id-or-path>")
     .option("--format <format>", "text or json", parseFormat, "text")
+    .option("--now <timestamp>", "clock timestamp for deterministic output")
     .action(confidenceShowCommand);
   confidence
     .command("recompute")
@@ -1160,40 +1162,22 @@ async function confidenceShowCommand(
   if (events.length === 0) {
     throw new Error(`No confidence ledger found for ${page.id}`);
   }
+  const now = parseOptionalNow(options.now);
   const state = computeConfidenceState(events, {
+    now,
     pageType:
       typeof page.frontmatter.type === "string"
         ? page.frontmatter.type
         : undefined,
   });
-  const report = {
-    page_id: state.pageId,
-    score: state.score,
-    source_count: state.sourceCount,
-    contradiction_count: state.contradictionCount,
-    superseded_by: state.supersededBy,
-    last_verified_at: state.lastVerifiedAt,
-    last_event_at: state.lastEventAt,
-    computed_at: state.computedAt,
-    explanation: {
-      base: state.explanation.base,
-      source_strength: state.explanation.sourceStrength,
-      contradiction_penalty: state.explanation.contradictionPenalty,
-      time_decay: state.explanation.timeDecay,
-      verification_boost: state.explanation.verificationBoost,
-    },
-  };
+  const report = buildConfidenceReport(page, events, state);
 
   if (options.format === "json") {
     console.log(JSON.stringify(report, null, 2));
     return;
   }
 
-  console.log(`${page.title} (${state.pageId})`);
-  console.log(`  score: ${state.score.toFixed(4)}`);
-  console.log(`  sources: ${state.sourceCount}`);
-  console.log(`  contradictions: ${state.contradictionCount}`);
-  console.log(`  last event: ${state.lastEventAt}`);
+  printConfidenceReport(report);
 }
 
 async function confidenceRecomputeCommand(
@@ -1219,24 +1203,9 @@ async function confidenceRecomputeCommand(
         ? page.frontmatter.type
         : undefined,
   });
-  const report = {
-    page_id: state.pageId,
-    events_replayed: events.length,
-    score: state.score,
-    source_count: state.sourceCount,
-    contradiction_count: state.contradictionCount,
-    superseded_by: state.supersededBy,
-    last_verified_at: state.lastVerifiedAt,
-    last_event_at: state.lastEventAt,
-    computed_at: state.computedAt,
-    explanation: {
-      base: state.explanation.base,
-      source_strength: state.explanation.sourceStrength,
-      contradiction_penalty: state.explanation.contradictionPenalty,
-      time_decay: state.explanation.timeDecay,
-      verification_boost: state.explanation.verificationBoost,
-    },
-  };
+  const report = buildConfidenceReport(page, events, state, {
+    eventsReplayed: events.length,
+  });
 
   if (options.format === "json") {
     console.log(JSON.stringify(report, null, 2));
@@ -1251,6 +1220,239 @@ async function confidenceRecomputeCommand(
   console.log(`  contradictions: ${state.contradictionCount}`);
   console.log(`  last event: ${state.lastEventAt}`);
   console.log(`  computed at: ${state.computedAt}`);
+}
+
+function buildConfidenceReport(
+  page: Page,
+  events: ConfidenceEvent[],
+  state: ConfidenceState,
+  options: { eventsReplayed?: number } = {},
+) {
+  const sortedEvents = [...events].sort((a, b) =>
+    a.timestamp.localeCompare(b.timestamp),
+  );
+  const activeSources = activeSourceSummaries(sortedEvents);
+  const contradictionEvents = sortedEvents.filter(
+    (event) =>
+      event.kind === "contradicted_by" || event.kind === "superseded_by",
+  );
+  const verificationEvents = sortedEvents.filter(
+    (event) => event.kind === "verified",
+  );
+  const manualOverrideEvent = [...sortedEvents]
+    .reverse()
+    .find((event) => event.kind === "manual_override");
+  const timeDecayEvent = sortedEvents.at(-1);
+  const pageType =
+    typeof page.frontmatter.type === "string" ? page.frontmatter.type : "note";
+  const status = confidenceStatus(state);
+  const report = {
+    page_id: state.pageId,
+    path: page.path,
+    title: page.title,
+    score: state.score,
+    source_count: state.sourceCount,
+    contradiction_count: state.contradictionCount,
+    superseded_by: state.supersededBy,
+    last_verified_at: state.lastVerifiedAt,
+    last_event_at: state.lastEventAt,
+    computed_at: state.computedAt,
+    ...(options.eventsReplayed === undefined
+      ? {}
+      : { events_replayed: options.eventsReplayed }),
+    explanation: {
+      base: state.explanation.base,
+      base_events: manualOverrideEvent ? [manualOverrideEvent.id] : [],
+      source_strength: state.explanation.sourceStrength,
+      source_strength_events: activeSources.map((source) => source.event_id),
+      active_sources: activeSources,
+      contradiction_penalty: state.explanation.contradictionPenalty,
+      contradiction_penalty_events: contradictionEvents.map(
+        (event) => event.id,
+      ),
+      time_decay: state.explanation.timeDecay,
+      time_decay_event: timeDecayEvent?.id,
+      time_decay_basis: {
+        last_event_at: state.lastEventAt,
+        page_type: pageType,
+        days_since_last_event: roundForReport(
+          daysBetweenIso(state.lastEventAt, new Date(state.computedAt)),
+        ),
+      },
+      verification_boost: state.explanation.verificationBoost,
+      verification_boost_events: verificationEvents.map((event) => event.id),
+    },
+    events: sortedEvents.map(summarizeConfidenceEvent),
+    status,
+  };
+  return report;
+}
+
+function printConfidenceReport(
+  report: ReturnType<typeof buildConfidenceReport>,
+) {
+  console.log(`${report.page_id}  "${report.title}"`);
+  console.log(`  current score: ${report.score.toFixed(4)}`);
+  console.log("");
+  console.log("  breakdown:");
+  console.log(
+    `    base                  +${report.explanation.base.toFixed(4)}${report.explanation.base_events.length > 0 ? `  (${report.explanation.base_events.join(", ")})` : ""}`,
+  );
+  console.log(
+    `    source_strength       +${report.explanation.source_strength.toFixed(4)}  (${formatActiveSources(report.explanation.active_sources)})`,
+  );
+  console.log(
+    `    contradiction_penalty -${report.explanation.contradiction_penalty.toFixed(4)}  (${report.explanation.contradiction_penalty_events.length} event${report.explanation.contradiction_penalty_events.length === 1 ? "" : "s"})`,
+  );
+  console.log(
+    `    time_decay            -${report.explanation.time_decay.toFixed(4)}  (${report.explanation.time_decay_basis.days_since_last_event} days since last_event, type=${report.explanation.time_decay_basis.page_type})`,
+  );
+  console.log(
+    `    verification_boost    +${report.explanation.verification_boost.toFixed(4)}  (${report.explanation.verification_boost_events.length} event${report.explanation.verification_boost_events.length === 1 ? "" : "s"})`,
+  );
+  console.log("");
+  console.log(`  events: ${report.events.length} total`);
+  for (const event of report.events) {
+    console.log(
+      `    ${event.timestamp.slice(0, 10)}  ${event.kind.padEnd(17)} ${event.summary}`,
+    );
+  }
+  console.log("");
+  console.log(`  status: ${report.status.flags.join(", ") || "OK"}`);
+  for (const reason of report.status.reasons) {
+    console.log(`    reason: ${reason}`);
+  }
+}
+
+function activeSourceSummaries(events: ConfidenceEvent[]) {
+  const sources = new Map<string, { eventId: string; weight: number }>();
+  for (const event of events) {
+    if (event.kind === "source_added") {
+      sources.set(event.sourceId, {
+        eventId: event.id,
+        weight: event.sourceWeight,
+      });
+    } else if (event.kind === "source_removed") {
+      sources.delete(event.sourceId);
+    }
+  }
+  return [...sources.entries()].map(([sourceId, source]) => ({
+    event_id: source.eventId,
+    source_id: sourceId,
+    weight: source.weight,
+  }));
+}
+
+function formatActiveSources(
+  sources: Array<{ source_id: string; weight: number }>,
+): string {
+  if (sources.length === 0) {
+    return "0 active sources";
+  }
+  return `${sources.length} source${sources.length === 1 ? "" : "s"}: ${sources
+    .map((source) => `${source.source_id} w=${source.weight}`)
+    .join(", ")}`;
+}
+
+function summarizeConfidenceEvent(event: ConfidenceEvent) {
+  const base = {
+    id: event.id,
+    kind: event.kind,
+    timestamp: event.timestamp,
+    actor: event.actor,
+    actor_id: event.actorId,
+  };
+  if (event.kind === "source_added") {
+    return {
+      ...base,
+      source_id: event.sourceId,
+      source_weight: event.sourceWeight,
+      summary: `${event.sourceId} (w=${event.sourceWeight})`,
+    };
+  }
+  if (event.kind === "source_removed") {
+    return {
+      ...base,
+      source_id: event.sourceId,
+      reason: event.reason,
+      summary: `${event.sourceId} removed: ${event.reason}`,
+    };
+  }
+  if (event.kind === "verified") {
+    return {
+      ...base,
+      verifier_type: event.verifierType,
+      verifier_id: event.verifierId,
+      reason: event.reason,
+      summary: event.verifierId ?? event.actorId ?? event.verifierType,
+    };
+  }
+  if (event.kind === "contradicted_by") {
+    return {
+      ...base,
+      by_source_id: event.bySourceId,
+      severity: event.severity,
+      summary: `${event.bySourceId} (severity=${event.severity})`,
+    };
+  }
+  if (event.kind === "superseded_by") {
+    return {
+      ...base,
+      superseder_page_id: event.supersederPageId,
+      reason: event.reason,
+      summary: `${event.supersederPageId}${event.reason ? `: ${event.reason}` : ""}`,
+    };
+  }
+  if (event.kind === "supersedes") {
+    return {
+      ...base,
+      superseded_page_id: event.supersededPageId,
+      reason: event.reason,
+      summary: `${event.supersededPageId}${event.reason ? `: ${event.reason}` : ""}`,
+    };
+  }
+  if (event.kind === "decay_checkpoint") {
+    return {
+      ...base,
+      days_since_last_event: event.daysSinceLastEvent,
+      applied_decay: event.appliedDecay,
+      summary: `${roundForReport(event.daysSinceLastEvent)} days, -${event.appliedDecay}`,
+    };
+  }
+  return {
+    ...base,
+    new_base: event.newBase,
+    reason: event.reason,
+    summary: `base=${event.newBase}: ${event.reason}`,
+  };
+}
+
+function confidenceStatus(state: ConfidenceState) {
+  const flags: string[] = [];
+  const reasons: string[] = [];
+  if (state.score < 0.5) {
+    flags.push("NEEDS_REVIEW");
+    reasons.push("score < 0.5");
+  }
+  if (state.supersededBy) {
+    flags.push("SUPERSEDED");
+    reasons.push(`superseded by ${state.supersededBy}`);
+  }
+  if (
+    state.lastVerifiedAt &&
+    daysBetweenIso(state.lastVerifiedAt, new Date(state.computedAt)) > 60
+  ) {
+    flags.push("STALE");
+    reasons.push("last verified > 60 days ago");
+  }
+  return {
+    flags,
+    reasons,
+  };
+}
+
+function roundForReport(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
 async function compileCommand(options: CompileOptions): Promise<void> {
