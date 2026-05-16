@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -8,6 +8,8 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfidenceProjection } from "@akb/confidence";
@@ -21,6 +23,32 @@ function runCli(args: string[], cwd: string): string {
     cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+function runCliWithEnvAsync(
+  args: string[],
+  cwd: string,
+  env: Record<string, string>,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      process.execPath,
+      ["--import", tsxLoader, cli, ...args],
+      {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, ...env },
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          Object.assign(error, { stdout, stderr });
+          reject(error);
+          return;
+        }
+        resolve(stdout);
+      },
+    );
   });
 }
 
@@ -150,6 +178,290 @@ describe("akb CLI", () => {
     expect(text).toContain("Extractive answer");
     expect(text).toContain("[1] page_answer000001");
     expect(text).toContain("Warning:");
+  });
+
+  it("generates ask answers with configured DeepSeek citations", async () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "gc-generated-answer.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_askllm000001",
+        "title: Generated Answer Source",
+        "---",
+        "# Generated Answer Source",
+        "",
+        "Garbage collection reclaims NAND blocks when free block count is low.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+
+    const requests: unknown[] = [];
+    const requestMeta: Array<{
+      method?: string;
+      url?: string;
+      authorization?: string;
+    }> = [];
+    const server = createServer((request, response) => {
+      requestMeta.push({
+        method: request.method,
+        url: request.url,
+        authorization: request.headers.authorization,
+      });
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => {
+        body += chunk;
+      });
+      request.on("end", () => {
+        requests.push(JSON.parse(body));
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(
+          JSON.stringify({
+            model: "deepseek-v4-pro-routed",
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    answer:
+                      "Garbage collection reclaims NAND blocks when free block count is low. [1]",
+                    used_refs: [1],
+                  }),
+                },
+              },
+            ],
+          }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    const address = server.address() as AddressInfo;
+    try {
+      writeFileSync(
+        join(vault, ".akb", "config.yaml"),
+        [
+          'version: "0.0"',
+          "workspace:",
+          '  name: "vault"',
+          '  vault_dir: "."',
+          "index:",
+          '  engine: "sqlite-fts5"',
+          '  path: ".akb/index.db"',
+          "mcp:",
+          '  host: "127.0.0.1"',
+          "  port: 8765",
+          "llm:",
+          `  base_url: "http://127.0.0.1:${address.port}"`,
+          '  model: "deepseek-v4-pro"',
+          '  api_key_env: "AKB_TEST_DEEPSEEK_KEY"',
+          "",
+        ].join("\n"),
+      );
+
+      const payload = JSON.parse(
+        await runCliWithEnvAsync(
+          ["ask", "garbage collection reclaims blocks?", "--format", "json"],
+          vault,
+          { AKB_TEST_DEEPSEEK_KEY: "test-key" },
+        ),
+      );
+
+      expect(payload.degraded).toBe(false);
+      expect(payload.answer).toContain("free block count is low. [1]");
+      expect(payload.answer_provider).toBe("deepseek");
+      expect(payload.answer_model).toBe("deepseek-v4-pro-routed");
+      expect(payload.citations[0]).toMatchObject({
+        ref: 1,
+        page_id: "page_askllm000001",
+      });
+      expect(requests).toHaveLength(1);
+      expect(requestMeta[0]).toMatchObject({
+        method: "POST",
+        url: "/chat/completions",
+        authorization: "Bearer test-key",
+      });
+      expect(requests[0]).toMatchObject({
+        model: "deepseek-v4-pro",
+        temperature: 0,
+        response_format: { type: "json_object" },
+      });
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("falls back when generated ask answers cite unavailable refs", async () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "gc-bad-citation.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_askbadref001",
+        "title: Bad Citation Source",
+        "---",
+        "# Bad Citation Source",
+        "",
+        "Garbage collection reclaims NAND blocks when free block count is low.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+
+    const server = createServer((request, response) => {
+      request.resume();
+      request.on("end", () => {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(
+          JSON.stringify({
+            model: "deepseek-v4-pro-routed",
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    answer:
+                      "Garbage collection reclaims NAND blocks when free block count is low. [999]",
+                    used_refs: [999],
+                  }),
+                },
+              },
+            ],
+          }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    const address = server.address() as AddressInfo;
+    try {
+      writeFileSync(
+        join(vault, ".akb", "config.yaml"),
+        [
+          'version: "0.0"',
+          "workspace:",
+          '  name: "vault"',
+          '  vault_dir: "."',
+          "index:",
+          '  engine: "sqlite-fts5"',
+          '  path: ".akb/index.db"',
+          "mcp:",
+          '  host: "127.0.0.1"',
+          "  port: 8765",
+          "llm:",
+          `  base_url: "http://127.0.0.1:${address.port}"`,
+          '  model: "deepseek-v4-pro"',
+          '  api_key_env: "AKB_TEST_DEEPSEEK_KEY"',
+          "",
+        ].join("\n"),
+      );
+
+      const payload = JSON.parse(
+        await runCliWithEnvAsync(
+          ["ask", "garbage collection reclaims blocks?", "--format", "json"],
+          vault,
+          { AKB_TEST_DEEPSEEK_KEY: "test-key" },
+        ),
+      );
+
+      expect(payload.degraded).toBe(true);
+      expect(payload.degraded_reason).toContain("cited unavailable ref");
+      expect(payload.answer).toContain("Garbage collection reclaims");
+      expect(payload.answer).toContain("[1]");
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("does not fall back to extractive answers when generated ask reports no answer", async () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "gc-no-answer.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_asknoanswer1",
+        "title: No Answer Source",
+        "---",
+        "# No Answer Source",
+        "",
+        "Garbage collection reclaims NAND blocks when free block count is low.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+
+    const server = createServer((request, response) => {
+      request.resume();
+      request.on("end", () => {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(
+          JSON.stringify({
+            model: "deepseek-v4-pro-routed",
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    answer: null,
+                    used_refs: [],
+                    no_answer: true,
+                  }),
+                },
+              },
+            ],
+          }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    const address = server.address() as AddressInfo;
+    try {
+      writeFileSync(
+        join(vault, ".akb", "config.yaml"),
+        [
+          'version: "0.0"',
+          "workspace:",
+          '  name: "vault"',
+          '  vault_dir: "."',
+          "index:",
+          '  engine: "sqlite-fts5"',
+          '  path: ".akb/index.db"',
+          "mcp:",
+          '  host: "127.0.0.1"',
+          "  port: 8765",
+          "llm:",
+          `  base_url: "http://127.0.0.1:${address.port}"`,
+          '  model: "deepseek-v4-pro"',
+          '  api_key_env: "AKB_TEST_DEEPSEEK_KEY"',
+          "",
+        ].join("\n"),
+      );
+
+      const payload = JSON.parse(
+        await runCliWithEnvAsync(
+          ["ask", "garbage collection reclaims blocks?", "--format", "json"],
+          vault,
+          { AKB_TEST_DEEPSEEK_KEY: "test-key" },
+        ),
+      );
+
+      expect(payload.degraded).toBe(false);
+      expect(payload.answer).toBeNull();
+      expect(payload.no_evidence).toBe(false);
+      expect(payload.answer_no_evidence).toBe(true);
+      expect(payload.citations).toHaveLength(1);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("does not fabricate ask answers without evidence", () => {

@@ -17,6 +17,7 @@ import {
   buildHeuristicCompilePatch,
   buildCompilePatch as buildProviderCompilePatch,
   type CompilePageInput,
+  DeepSeekCompileProvider,
 } from "@akb/compile";
 import {
   appendConfidenceEvent,
@@ -64,6 +65,23 @@ interface SearchOptions {
 }
 
 interface AskOptions extends SearchOptions {}
+
+interface AskCitation {
+  ref: number;
+  page_id: PageId;
+  path: string;
+  title: string;
+  line_start: number;
+  line_end: number;
+  flags: string[];
+}
+
+interface GeneratedAskAnswer {
+  answer: string | null;
+  provider: string;
+  model: string;
+  noAnswer?: boolean;
+}
 
 interface EvalOptions {
   set?: string;
@@ -679,9 +697,9 @@ async function askCommand(
   const vaultDir = process.cwd();
   assertVault(vaultDir);
   const start = performance.now();
+  const config = readVaultConfig(vaultDir);
   const results = rankedResultsForQuery(vaultDir, question, options);
   const noEvidence = results.length === 0;
-  const answer = noEvidence ? null : extractiveAnswer(results);
   const citations = results.map((result, index) => ({
     ref: index + 1,
     page_id: result.page_id,
@@ -691,16 +709,33 @@ async function askCommand(
     line_end: result.citation.line_end,
     flags: result.flags,
   }));
+  let generated: GeneratedAskAnswer | undefined;
+  let degradedReason: string | undefined = noEvidence
+    ? `No indexed knowledge matched: ${question}`
+    : undefined;
+  if (!noEvidence) {
+    try {
+      generated = await generateAskAnswer(question, results, citations, config);
+    } catch (error) {
+      degradedReason = askDegradedReason(error, config.llm?.api_key_env);
+    }
+  }
+  const answer = noEvidence
+    ? null
+    : generated
+      ? generated.answer
+      : extractiveAnswer(results);
   const payload = {
     question,
     answer,
     citations,
     no_evidence: noEvidence,
+    answer_no_evidence: generated?.noAnswer === true,
     retrieval_mode: options.hybrid ? "hybrid" : "bm25",
-    degraded: true,
-    degraded_reason: noEvidence
-      ? `No indexed knowledge matched: ${question}`
-      : "LLM answer generation not configured; used extractive retrieval answer",
+    degraded: generated === undefined,
+    degraded_reason: generated === undefined ? degradedReason : undefined,
+    answer_provider: generated?.provider,
+    answer_model: generated?.model,
     elapsed_ms: Math.round(performance.now() - start),
   };
   if (options.format === "json") {
@@ -708,7 +743,11 @@ async function askCommand(
     return;
   }
   console.log(
-    noEvidence ? "No evidence found." : "Extractive answer (degraded):",
+    noEvidence
+      ? "No evidence found."
+      : generated
+        ? "Generated answer:"
+        : "Extractive answer (degraded):",
   );
   if (answer) {
     console.log(answer);
@@ -720,7 +759,9 @@ async function askCommand(
     );
   }
   console.log("");
-  console.log(`Warning: ${payload.degraded_reason}.`);
+  if (payload.degraded_reason) {
+    console.log(`Warning: ${payload.degraded_reason}.`);
+  }
 }
 
 function extractiveAnswer(
@@ -734,6 +775,148 @@ function extractiveAnswer(
 
 function cleanSnippet(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+async function generateAskAnswer(
+  question: string,
+  results: ReturnType<typeof rankSearchResults>,
+  citations: AskCitation[],
+  config: Config,
+): Promise<GeneratedAskAnswer> {
+  if (!config.llm) {
+    throw new Error("LLM answer generation not configured");
+  }
+  const llm = config.llm;
+  const provider = llm.provider;
+  if (provider !== "deepseek") {
+    throw new Error(`Unsupported ask LLM provider: ${provider}`);
+  }
+  const apiKeyEnv = llm.api_key_env;
+  const apiKey = process.env[apiKeyEnv];
+  if (!apiKey) {
+    throw new Error(`Missing ${apiKeyEnv}`);
+  }
+  const model = llm.model;
+  const deepseek = new DeepSeekCompileProvider({
+    apiKey,
+    baseUrl: llm.base_url,
+    model,
+    retries: 0,
+    timeoutMs: 8_000,
+  });
+  const response = await deepseek.completeJson({
+    responseSchemaName: "akb_ask_answer",
+    messages: [
+      {
+        role: "system",
+        content: [
+          "You answer questions using only the provided knowledge snippets.",
+          'Return JSON only: {"answer":"...","used_refs":[1],"no_answer":false}.',
+          "Every factual sentence in answer must include bracket citations like [1].",
+          "Only cite refs that appear in the provided snippets.",
+          'If the snippets do not answer the question, return {"answer":null,"used_refs":[],"no_answer":true}.',
+        ].join(" "),
+      },
+      {
+        role: "user",
+        content: [
+          `Question: ${question}`,
+          "",
+          "Snippets:",
+          ...results.map((result, index) =>
+            [
+              `[${index + 1}] ${result.title} (${result.page_id}) ${result.path} L${result.citation.line_start}-L${result.citation.line_end}`,
+              cleanSnippet(result.snippet),
+            ].join("\n"),
+          ),
+        ].join("\n"),
+      },
+    ],
+  });
+  const parsed = JSON.parse(response.content) as unknown;
+  if (
+    !isRecord(parsed) ||
+    (parsed.answer !== null && typeof parsed.answer !== "string")
+  ) {
+    throw new Error("DeepSeek ask response missing answer");
+  }
+  if (parsed.no_answer === true) {
+    if (parsed.answer !== null) {
+      throw new Error("DeepSeek ask no_answer response must use null answer");
+    }
+    const refs = Array.isArray(parsed.used_refs) ? parsed.used_refs : [];
+    if (refs.length > 0) {
+      throw new Error("DeepSeek ask no_answer response cannot cite refs");
+    }
+    return {
+      answer: null,
+      provider,
+      model: response.model || model,
+      noAnswer: true,
+    };
+  }
+  if (parsed.answer === null || parsed.answer.trim().length === 0) {
+    throw new Error("DeepSeek ask response omitted answer");
+  }
+  const usedRefs = Array.isArray(parsed.used_refs) ? parsed.used_refs : [];
+  const allowedRefs = new Set(citations.map((citation) => citation.ref));
+  if (usedRefs.length === 0 && parsed.answer.trim().length > 0) {
+    throw new Error("DeepSeek ask response omitted citations");
+  }
+  for (const ref of usedRefs) {
+    if (
+      typeof ref !== "number" ||
+      !Number.isInteger(ref) ||
+      !allowedRefs.has(ref)
+    ) {
+      throw new Error(`DeepSeek ask response cited unavailable ref: ${ref}`);
+    }
+  }
+  const answerRefs = new Set(
+    [...parsed.answer.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1])),
+  );
+  if (answerRefs.size === 0 && parsed.answer.trim().length > 0) {
+    throw new Error("DeepSeek ask response omitted visible citations");
+  }
+  for (const ref of answerRefs) {
+    if (!allowedRefs.has(ref)) {
+      throw new Error(`DeepSeek ask response cited unavailable ref: ${ref}`);
+    }
+  }
+  for (const ref of usedRefs) {
+    if (!answerRefs.has(ref)) {
+      throw new Error(`DeepSeek ask response omitted visible citation: ${ref}`);
+    }
+  }
+  for (const ref of answerRefs) {
+    if (!usedRefs.includes(ref)) {
+      throw new Error(`DeepSeek ask response omitted used ref: ${ref}`);
+    }
+  }
+  return {
+    answer: parsed.answer,
+    provider,
+    model: response.model || model,
+  };
+}
+
+function askDegradedReason(error: unknown, apiKeyEnv = "DEEPSEEK_API_KEY") {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : String(error);
+  return `LLM answer generation failed (${sanitizeAskError(message, apiKeyEnv)}); used extractive retrieval answer`;
+}
+
+function sanitizeAskError(message: string, apiKeyEnv: string): string {
+  const secret = process.env[apiKeyEnv];
+  let sanitized = secret ? message.split(secret).join("[redacted]") : message;
+  sanitized = sanitized.replace(/Authorization\s+Bearer\s+\S+/gi, "[redacted]");
+  sanitized = sanitized.replace(/Bearer\s+\S+/gi, "[redacted]");
+  sanitized = sanitized.replace(/https?:\/\/\S+/gi, "[redacted-url]");
+  return sanitized;
 }
 
 function rankConfidenceStateForResults(
