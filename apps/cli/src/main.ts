@@ -429,11 +429,18 @@ async function ingestCommand(
           );
         }
         rmSync(existingPath, { force: true });
+        index.deletePage(importedId);
         removed.push(toPosix(relative(vaultDir, existingPath)));
       }
+      const replacedPageId = existsSync(target)
+        ? pageFromFile(vaultDir, target).page.id
+        : undefined;
       mkdirSync(dirname(target), { recursive: true });
       writeFileSync(target, finalContent);
       const { page, body, bodyStartLine } = pageFromFile(vaultDir, target);
+      if (replacedPageId && replacedPageId !== page.id) {
+        index.deletePage(replacedPageId);
+      }
       index.upsertPage(page, body, { bodyStartLine });
       written.push(targetRelative);
     }
@@ -441,17 +448,20 @@ async function ingestCommand(
     index.close();
   }
 
+  const metadataFiles =
+    options.compile === false ? recordCompileDisabled(vaultDir, written) : [];
+
   if (written.length > 0 && options.commit !== false) {
     await commitFiles(
       vaultDir,
-      [...written, ...removed],
+      [...written, ...removed, ...metadataFiles],
       `ingest ${written.length === 1 ? basename(written[0]) : `${written.length} pages`}`,
     );
   }
   console.log(
     `Ingested ${written.length} page${written.length === 1 ? "" : "s"}.`,
   );
-  if (options.compile === true) {
+  if (options.compile !== false) {
     for (const path of written) {
       await compileCommand({ source: path });
     }
@@ -1894,6 +1904,7 @@ async function compileCommand(options: CompileOptions): Promise<void> {
     const patchPath = patchPathFor(vaultDir, patch.id, "proposed");
     mkdirSync(dirname(patchPath), { recursive: true });
     writeFileSync(patchPath, stringifyYaml(patch));
+    clearCompileDisabled(vaultDir, patch.source?.pageId ?? sourceRef);
     console.log(`Compiled ${patch.source?.pageId ?? sourceRef} -> ${patch.id}`);
     for (const change of patch.changes ?? []) {
       console.log(`  - ${change.type} ${change.pageId} (${change.relation})`);
@@ -1908,11 +1919,15 @@ function compileStatusCommand(): void {
   const applied = listPatchFiles(vaultDir, "applied").length;
   const rejected = listPatchFiles(vaultDir, "rejected").length;
   const compiled = proposed + applied + rejected;
+  const degraded = loadAllPatches(vaultDir).filter(
+    (patch) => patch.compileMeta?.degraded === true,
+  ).length;
+  const disabled = compileDisabledSources(vaultDir).size;
   console.log("Sources:");
   console.log(`  compiled:        ${compiled}`);
   console.log(`  pending:         ${pendingCompileSources(vaultDir).length}`);
-  console.log("  degraded:        0");
-  console.log("  compile-disabled: 0");
+  console.log(`  degraded:        ${degraded}`);
+  console.log(`  compile-disabled: ${disabled}`);
 }
 
 function compileReplayCommand(patchId: string): void {
@@ -2525,9 +2540,67 @@ function pendingCompileSources(vaultDir: string): string[] {
       .map((patch) => patch.source?.pageId)
       .filter((value): value is string => typeof value === "string"),
   );
+  const disabledSources = compileDisabledSources(vaultDir);
   return scanVaultPages(vaultDir)
     .map((item) => item.page.id)
-    .filter((pageId) => !patchedSources.has(pageId));
+    .filter((pageId) => !patchedSources.has(pageId))
+    .filter((pageId) => !disabledSources.has(pageId));
+}
+
+function recordCompileDisabled(
+  vaultDir: string,
+  pagePaths: string[],
+): string[] {
+  const disabled = compileDisabledSources(vaultDir);
+  const before = disabled.size;
+  for (const path of pagePaths) {
+    const file = join(vaultDir, path);
+    if (existsSync(file)) {
+      disabled.add(pageFromFile(vaultDir, file).page.id);
+    }
+  }
+  if (disabled.size === before) {
+    return [];
+  }
+  writeFileSync(
+    compileDisabledPath(vaultDir),
+    `${JSON.stringify([...disabled].sort(), null, 2)}\n`,
+  );
+  return [toPosix(relative(vaultDir, compileDisabledPath(vaultDir)))];
+}
+
+function clearCompileDisabled(vaultDir: string, pageId: string): void {
+  const path = compileDisabledPath(vaultDir);
+  if (!existsSync(path)) {
+    return;
+  }
+  const disabled = compileDisabledSources(vaultDir);
+  if (!disabled.delete(pageId)) {
+    return;
+  }
+  writeFileSync(path, `${JSON.stringify([...disabled].sort(), null, 2)}\n`);
+}
+
+function compileDisabledSources(vaultDir: string): Set<string> {
+  const path = compileDisabledPath(vaultDir);
+  if (!existsSync(path)) {
+    return new Set();
+  }
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  const currentPages = new Set(
+    scanVaultPages(vaultDir).map((item) => String(item.page.id)),
+  );
+  return new Set(
+    Array.isArray(parsed)
+      ? parsed
+          .filter((value): value is string => typeof value === "string")
+          .filter((value) => currentPages.has(value))
+      : [],
+  );
+}
+
+function compileDisabledPath(vaultDir: string): string {
+  return join(vaultDir, ".akb", "compile-disabled.json");
 }
 
 function buildCompilePatch(

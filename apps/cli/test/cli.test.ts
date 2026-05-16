@@ -155,7 +155,7 @@ describe("akb CLI", () => {
     writeFileSync(first, `${frontmatter}first body`);
     writeFileSync(second, `${frontmatter}second body`);
 
-    runCli(["ingest", first], vault);
+    runCli(["ingest", first, "--no-compile"], vault);
     const failure = runCliFailure(["ingest", second], vault);
 
     expect(failure).toContain("Page id already exists");
@@ -163,7 +163,7 @@ describe("akb CLI", () => {
       "first body",
     );
 
-    runCli(["ingest", second, "--force"], vault);
+    runCli(["ingest", second, "--force", "--no-compile"], vault);
     expect(existsSync(join(vault, "pages", "first.md"))).toBe(false);
     expect(readFileSync(join(vault, "pages", "second.md"), "utf8")).toContain(
       "second body",
@@ -1162,8 +1162,8 @@ describe("akb CLI", () => {
         "New measurements show garbage collection should use an adaptive threshold.",
       ].join("\n"),
     );
-    runCli(["ingest", existing, "--no-commit"], vault);
-    runCli(["ingest", incoming, "--no-commit"], vault);
+    runCli(["ingest", existing, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", incoming, "--no-commit", "--no-compile"], vault);
     const before = readFileSync(join(vault, "pages", "gc.md"), "utf8");
 
     const output = runCli(["compile", "--source", "page_compile00002"], vault);
@@ -1231,6 +1231,84 @@ describe("akb CLI", () => {
       vault,
     );
     expect(reverse).toContain("page_compile00001");
+  });
+
+  it("ingest compiles by default and tracks compile-disabled sources", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const autoSource = join(dir, "auto-compile.md");
+    const disabledSource = join(dir, "disabled-compile.md");
+    writeFileSync(
+      autoSource,
+      [
+        "---",
+        "id: page_autocompile1",
+        "title: Auto Compile",
+        "---",
+        "# Auto Compile",
+        "",
+        "Auto compile standalone source.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      disabledSource,
+      [
+        "---",
+        "id: page_compileoff01",
+        "title: Compile Disabled",
+        "---",
+        "# Compile Disabled",
+        "",
+        "Compile disabled standalone source.",
+      ].join("\n"),
+    );
+
+    const autoOutput = runCli(["ingest", autoSource, "--no-commit"], vault);
+    expect(autoOutput).toContain("Compiled page_autocompile1");
+    expect(
+      existsSync(
+        join(vault, ".akb", "patches", "patch_page_autocompile1.yaml"),
+      ),
+    ).toBe(true);
+
+    const disabledOutput = runCli(
+      ["ingest", disabledSource, "--no-compile", "--no-commit"],
+      vault,
+    );
+    expect(disabledOutput).not.toContain("Compiled page_compileoff01");
+
+    writeFileSync(
+      disabledSource,
+      [
+        "---",
+        "id: page_compileoff02",
+        "title: Compile Disabled Replacement",
+        "---",
+        "# Compile Disabled Replacement",
+        "",
+        "Replacement source should clean stale disabled ids.",
+      ].join("\n"),
+    );
+    runCli(
+      ["ingest", disabledSource, "--force", "--no-compile", "--no-commit"],
+      vault,
+    );
+
+    const status = runCli(["compile", "status"], vault);
+    expect(status).toContain("compiled:");
+    expect(status).toContain("degraded:        1");
+    expect(status).toContain("compile-disabled: 1");
+    expect(
+      readFileSync(join(vault, ".akb", "compile-disabled.json"), "utf8"),
+    ).not.toContain("page_compileoff01");
+
+    const manualOutput = runCli(
+      ["compile", "--source", "page_compileoff02"],
+      vault,
+    );
+    expect(manualOutput).toContain("Compiled page_compileoff02");
+    const afterManualCompile = runCli(["compile", "status"], vault);
+    expect(afterManualCompile).toContain("compile-disabled: 0");
   });
 
   it("runs compile eval golden gates", () => {
@@ -1361,8 +1439,8 @@ describe("akb CLI", () => {
         "Atomic patch source mentions target.",
       ].join("\n"),
     );
-    runCli(["ingest", first, "--no-commit"], vault);
-    runCli(["ingest", second, "--no-commit"], vault);
+    runCli(["ingest", first, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", second, "--no-commit", "--no-compile"], vault);
     runCli(["compile", "--source", "page_atomic000002"], vault);
     expect(
       runCliFailure(["compile", "--source", "page_atomic000002"], vault),
