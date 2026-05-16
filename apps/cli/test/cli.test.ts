@@ -2503,4 +2503,66 @@ describe("akb CLI", () => {
 
     expect(failure).toContain("did not match any pages");
   });
+
+  it("rejects runtime signals without evidence or valid page mapping", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "runtime-reject.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_rtreject0001",
+        "title: Runtime Reject",
+        "references:",
+        "  - src/runtime-reject.ts",
+        "---",
+        "# Runtime Reject",
+        "",
+        "Runtime rejection target.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+
+    expect(
+      runCliFailure(
+        [
+          "webhook",
+          "ci-success",
+          "--changed-file",
+          "src/runtime-reject.ts",
+          "--no-commit",
+        ],
+        vault,
+      ),
+    ).toContain("Runtime signals require --evidence or --pr-number");
+
+    const signalDir = join(vault, ".akb", "runtime-signals");
+    mkdirSync(signalDir, { recursive: true });
+    writeFileSync(
+      join(signalDir, "missing-evidence.json"),
+      JSON.stringify({
+        kind: "deploy_success",
+        page_ids: ["page_rtreject0001"],
+        actor_id: "deploy-bot",
+      }),
+    );
+    expect(runCliFailure(["watch", "--once", "--no-commit"], vault)).toContain(
+      "requires actor_id and evidence",
+    );
+
+    rmSync(join(signalDir, "missing-evidence.json"));
+    writeFileSync(
+      join(signalDir, "unknown-page.json"),
+      JSON.stringify({
+        kind: "deploy_success",
+        page_ids: ["page_missing00001"],
+        actor_id: "deploy-bot",
+        evidence: "deploy-42",
+      }),
+    );
+    expect(runCliFailure(["watch", "--once", "--no-commit"], vault)).toContain(
+      "references unknown page page_missing00001",
+    );
+  });
 });
