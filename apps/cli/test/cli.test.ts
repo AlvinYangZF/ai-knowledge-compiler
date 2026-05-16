@@ -843,6 +843,24 @@ describe("akb CLI", () => {
     );
     expect(report.last_verified_at).toBe(events.at(-1).timestamp);
     expect(report.explanation.verification_boost).toBe(0.02);
+
+    const projection = new ConfidenceProjection({
+      dbPath: join(vault, ".akb", "index.db"),
+      readonly: true,
+    });
+    try {
+      const projectedEvents = projection.getEvents(
+        "page_verify000001" as never,
+      );
+      const projectedState = projection
+        .getStates(["page_verify000001" as never])
+        .get("page_verify000001" as never);
+      expect(projectedEvents).toHaveLength(events.length);
+      expect(projectedEvents.at(-1)?.kind).toBe("verified");
+      expect(projectedState?.lastVerifiedAt).toBe(events.at(-1).timestamp);
+    } finally {
+      projection.close();
+    }
   });
 
   it("records human verification events with an explicit actor id", () => {
@@ -1128,6 +1146,20 @@ describe("akb CLI", () => {
       ],
       vault,
     );
+    const projection = new ConfidenceProjection({
+      dbPath: join(vault, ".akb", "index.db"),
+      readonly: true,
+    });
+    try {
+      const oldState = projection
+        .getStates(["page_oldsearch001" as never])
+        .get("page_oldsearch001" as never);
+      const newEvents = projection.getEvents("page_newsearch001" as never);
+      expect(oldState?.supersededBy).toBe("page_newsearch001");
+      expect(newEvents.at(-1)?.kind).toBe("supersedes");
+    } finally {
+      projection.close();
+    }
     runCli(["index", "--rebuild"], vault);
 
     const ranked = JSON.parse(

@@ -1740,7 +1740,9 @@ async function decayCommand(options: DecayOptions): Promise<void> {
       toPosix(
         relative(
           vaultDir,
-          appendConfidenceEvent(vaultDir, item.page.path, event),
+          appendConfidenceEventAndUpdateProjection(vaultDir, item.page, event, {
+            now,
+          }),
         ),
       ),
     );
@@ -1979,7 +1981,11 @@ async function verifyCommand(
       verifierId: options.byAgent ?? actorId,
       reason: options.reason,
     });
-    const ledgerPath = appendConfidenceEvent(vaultDir, page.path, event);
+    const ledgerPath = appendConfidenceEventAndUpdateProjection(
+      vaultDir,
+      page,
+      event,
+    );
     written.add(toPosix(relative(vaultDir, ledgerPath)));
   }
 
@@ -2057,7 +2063,7 @@ async function supersedeCommand(
     toPosix(
       relative(
         vaultDir,
-        appendConfidenceEvent(vaultDir, oldPage.path, oldEvent),
+        appendConfidenceEventAndUpdateProjection(vaultDir, oldPage, oldEvent),
       ),
     ),
   );
@@ -2065,7 +2071,11 @@ async function supersedeCommand(
     toPosix(
       relative(
         vaultDir,
-        appendConfidenceEvent(vaultDir, newPageBefore.path, newEvent),
+        appendConfidenceEventAndUpdateProjection(
+          vaultDir,
+          newPageBefore,
+          newEvent,
+        ),
       ),
     ),
   );
@@ -2132,10 +2142,11 @@ async function migrateToV01Command(options: MigrateOptions): Promise<void> {
       sourceKey,
       sourceWeight: sourceWeightForPage(vaultDir, item.page),
     });
-    const ledgerPath = appendConfidenceEvent(
+    const ledgerPath = appendConfidenceEventAndUpdateProjection(
       vaultDir,
-      item.page.path,
+      item.page,
       sourceAdded,
+      { now },
     );
     written.push(toPosix(relative(vaultDir, ledgerPath)));
 
@@ -2155,7 +2166,12 @@ async function migrateToV01Command(options: MigrateOptions): Promise<void> {
         toPosix(
           relative(
             vaultDir,
-            appendConfidenceEvent(vaultDir, item.page.path, verified),
+            appendConfidenceEventAndUpdateProjection(
+              vaultDir,
+              item.page,
+              verified,
+              { now },
+            ),
           ),
         ),
       );
@@ -2243,9 +2259,9 @@ function appendDecayCheckpointIfDue(
     return false;
   }
   const lastEventAt = events.at(-1)?.timestamp ?? now.toISOString();
-  appendConfidenceEvent(
+  appendConfidenceEventAndUpdateProjection(
     vaultDir,
-    item.page.path,
+    item.page,
     parseConfidenceEvent({
       id: stableId("evt", `${item.page.id}:decay:${now.toISOString()}`),
       kind: "decay_checkpoint",
@@ -2256,8 +2272,49 @@ function appendDecayCheckpointIfDue(
       daysSinceLastEvent: daysBetweenIso(lastEventAt, now),
       appliedDecay: Math.max(0, before.score - after.score),
     }),
+    { now },
   );
   return true;
+}
+
+function appendConfidenceEventAndUpdateProjection(
+  vaultDir: string,
+  page: Page,
+  event: ConfidenceEvent,
+  opts: { now?: Date } = {},
+): string {
+  const ledgerPath = appendConfidenceEvent(vaultDir, page.path, event);
+  updateConfidenceProjectionForPage(vaultDir, page, opts.now);
+  return ledgerPath;
+}
+
+function updateConfidenceProjectionForPage(
+  vaultDir: string,
+  page: Page,
+  now = new Date(),
+): void {
+  const events = loadConfidenceEvents(vaultDir, page.path, page.id);
+  if (events.length === 0) {
+    return;
+  }
+  const projection = new ConfidenceProjection({
+    dbPath: join(vaultDir, ".akb", "index.db"),
+  });
+  try {
+    projection.upsertPage({
+      pageId: page.id,
+      events,
+      state: computeConfidenceState(events, {
+        now,
+        pageType:
+          typeof page.frontmatter.type === "string"
+            ? page.frontmatter.type
+            : undefined,
+      }),
+    });
+  } finally {
+    projection.close();
+  }
 }
 
 function rebuildConfidenceProjection(
@@ -3489,7 +3546,11 @@ function writeRuntimeVerifiedEvents(
       toPosix(
         relative(
           vaultDir,
-          appendConfidenceEvent(vaultDir, target.page.path, event),
+          appendConfidenceEventAndUpdateProjection(
+            vaultDir,
+            target.page,
+            event,
+          ),
         ),
       ),
     );
@@ -4264,9 +4325,9 @@ function appendPatchConfidenceEvent(
       ? patch.source.sourceId
       : stableId("src", patch.id);
   if (impact.kind === "source_added" || change.relation === "duplicate") {
-    appendConfidenceEvent(
+    appendConfidenceEventAndUpdateProjection(
       vaultDir,
-      page.path,
+      page,
       parseConfidenceEvent({
         id: stableId("evt", `${patch.id}:${page.id}:source_added:${timestamp}`),
         kind: "source_added",
@@ -4280,9 +4341,9 @@ function appendPatchConfidenceEvent(
       }),
     );
   } else if (impact.kind === "contradicted_by") {
-    appendConfidenceEvent(
+    appendConfidenceEventAndUpdateProjection(
       vaultDir,
-      page.path,
+      page,
       parseConfidenceEvent({
         id: stableId(
           "evt",
@@ -4301,9 +4362,9 @@ function appendPatchConfidenceEvent(
     impact.kind === "superseded_by" &&
     isValidPageId(impact.supersederPageId)
   ) {
-    appendConfidenceEvent(
+    appendConfidenceEventAndUpdateProjection(
       vaultDir,
-      page.path,
+      page,
       parseConfidenceEvent({
         id: stableId(
           "evt",
@@ -4322,9 +4383,9 @@ function appendPatchConfidenceEvent(
     impact.kind === "supersedes" &&
     isValidPageId(impact.supersededPageId)
   ) {
-    appendConfidenceEvent(
+    appendConfidenceEventAndUpdateProjection(
       vaultDir,
-      page.path,
+      page,
       parseConfidenceEvent({
         id: stableId("evt", `${patch.id}:${page.id}:supersedes:${timestamp}`),
         kind: "supersedes",

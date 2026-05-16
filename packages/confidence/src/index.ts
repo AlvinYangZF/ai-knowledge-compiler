@@ -1,4 +1,12 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  writeSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { type PageId, PageIdSchema } from "@akb/core";
 import Database from "better-sqlite3";
@@ -165,7 +173,13 @@ export function appendConfidenceEvent(
 ): string {
   const path = ledgerPathForPage(vaultDir, pagePath, event.pageId);
   mkdirSync(dirname(path), { recursive: true });
-  appendFileSync(path, `${JSON.stringify(event)}\n`, "utf8");
+  const fd = openSync(path, "a");
+  try {
+    writeSync(fd, `${JSON.stringify(event)}\n`, undefined, "utf8");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
   return path;
 }
 
@@ -356,6 +370,56 @@ export class ConfidenceProjection {
     });
     write();
     return { pages: items.length, events: eventCount };
+  }
+
+  upsertPage(item: ProjectedConfidencePage): ConfidenceProjectionRebuildResult {
+    const write = this.db.transaction(() => {
+      this.db
+        .prepare("DELETE FROM confidence_events WHERE page_id = ?")
+        .run(item.pageId);
+      this.db
+        .prepare("DELETE FROM confidence_state WHERE page_id = ?")
+        .run(item.pageId);
+      const insertEvent = this.db.prepare(`
+        INSERT INTO confidence_events (
+          id, page_id, kind, timestamp, actor, actor_id, payload
+        ) VALUES (
+          @id, @pageId, @kind, @timestamp, @actor, @actorId, @payload
+        )
+      `);
+      const insertState = this.db.prepare(`
+        INSERT INTO confidence_state (
+          page_id, score, source_count, contradiction_count,
+          last_verified_at, last_event_at, superseded_by, computed_at
+        ) VALUES (
+          @pageId, @score, @sourceCount, @contradictionCount,
+          @lastVerifiedAt, @lastEventAt, @supersededBy, @computedAt
+        )
+      `);
+      for (const event of item.events) {
+        insertEvent.run({
+          id: event.id,
+          pageId: event.pageId,
+          kind: event.kind,
+          timestamp: event.timestamp,
+          actor: event.actor,
+          actorId: event.actorId ?? null,
+          payload: JSON.stringify(event),
+        });
+      }
+      insertState.run({
+        pageId: item.state.pageId,
+        score: item.state.score,
+        sourceCount: item.state.sourceCount,
+        contradictionCount: item.state.contradictionCount,
+        lastVerifiedAt: item.state.lastVerifiedAt ?? null,
+        lastEventAt: item.state.lastEventAt,
+        supersededBy: item.state.supersededBy ?? null,
+        computedAt: item.state.computedAt,
+      });
+    });
+    write();
+    return { pages: 1, events: item.events.length };
   }
 
   getStates(pageIds: Iterable<PageId>): Map<PageId, ProjectedConfidenceState> {

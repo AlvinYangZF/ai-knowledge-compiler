@@ -334,4 +334,62 @@ describe("confidence ledger", () => {
       projection.close();
     }
   });
+
+  it("upserts one page in SQLite confidence projection tables", () => {
+    const source = parseConfidenceEvent({
+      id: "evt_project00002",
+      kind: "source_added",
+      pageId: "page_project00002",
+      timestamp: "2026-05-01T12:00:00.000Z",
+      actor: "system",
+      actorId: "akb-test",
+      sourceId: "src_project00002",
+      sourceWeight: 0.2,
+    });
+    const verified = parseConfidenceEvent({
+      id: "evt_project00003",
+      kind: "verified",
+      pageId: "page_project00002",
+      timestamp: "2026-05-02T12:00:00.000Z",
+      actor: "agent",
+      actorId: "agent:test",
+      verifierType: "agent",
+      verifierId: "test",
+    });
+    const projection = new ConfidenceProjection({
+      dbPath: join(dir, "index.db"),
+    });
+
+    try {
+      projection.rebuild([
+        {
+          pageId: source.pageId,
+          events: [source],
+          state: computeConfidenceState([source], {
+            now: new Date("2026-05-15T12:00:00.000Z"),
+          }),
+        },
+      ]);
+      const state = computeConfidenceState([source, verified], {
+        now: new Date("2026-05-15T12:00:00.000Z"),
+      });
+      const result = projection.upsertPage({
+        pageId: source.pageId,
+        events: [source, verified],
+        state,
+      });
+
+      expect(result).toEqual({ pages: 1, events: 2 });
+      expect(projection.getEvents(source.pageId)).toEqual([source, verified]);
+      expect(
+        projection.getStates([source.pageId]).get(source.pageId),
+      ).toMatchObject({
+        score: state.score,
+        lastVerifiedAt: verified.timestamp,
+        lastEventAt: verified.timestamp,
+      });
+    } finally {
+      projection.close();
+    }
+  });
 });
