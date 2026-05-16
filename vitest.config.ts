@@ -6,6 +6,7 @@ const root = fileURLToPath(new URL(".", import.meta.url));
 export default defineConfig({
   resolve: {
     alias: {
+      "@akb/compile": `${root}packages/compile/src/index.ts`,
       "@akb/core": `${root}packages/core/src/index.ts`,
       "@akb/confidence": `${root}packages/confidence/src/index.ts`,
       "@akb/git-store": `${root}packages/git-store/src/index.ts`,

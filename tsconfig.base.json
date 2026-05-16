@@ -13,6 +13,7 @@
     "sourceMap": true,
     "baseUrl": ".",
     "paths": {
+      "@akb/compile": ["packages/compile/src/index.ts"],
       "@akb/core": ["packages/core/src/index.ts"],
       "@akb/confidence": ["packages/confidence/src/index.ts"],
       "@akb/git-store": ["packages/git-store/src/index.ts"],

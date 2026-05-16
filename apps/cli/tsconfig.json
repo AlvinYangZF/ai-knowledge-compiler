@@ -7,6 +7,7 @@
   },
   "include": ["src/**/*"],
   "references": [
+    { "path": "../../packages/compile" },
     { "path": "../../packages/confidence" },
     { "path": "../../packages/core" },
     { "path": "../../packages/eval-harness" },

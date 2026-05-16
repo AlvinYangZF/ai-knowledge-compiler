@@ -1190,6 +1190,19 @@ describe("akb CLI", () => {
     );
     expect(replay).toContain("Replay matched patch_page_compile00002");
 
+    const legacyPatch = patch
+      .replace(/\n {2}apiKeyEnv: DEEPSEEK_API_KEY\n/, "\n")
+      .replace(/\n {4}locate: sha256:[a-z0-9]+\n/, "\n")
+      .replace(/\n {4}emit: sha256:[a-z0-9]+\n/, "\n")
+      .replace(/\n {2}stages:\n(?: {4}- .+\n(?: {6}.+\n)+)+/, "\n")
+      .replace(/\n {2}temperature: 0\n/, "\n");
+    writeFileSync(patchPath, legacyPatch);
+    const legacyReplay = runCli(
+      ["compile", "replay", "patch_page_compile00002"],
+      vault,
+    );
+    expect(legacyReplay).toContain("Replay matched patch_page_compile00002");
+
     const applyOutput = runCli(
       ["patch", "apply", "patch_page_compile00002", "--no-commit"],
       vault,

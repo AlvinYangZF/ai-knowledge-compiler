@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { buildHeuristicCompilePatch } from "@akb/compile";
 import {
   appendConfidenceEvent,
   type ConfidenceEvent,
@@ -2235,140 +2236,12 @@ function buildCompilePatch(
     throw new Error(`Compile source not found: ${sourceRef}`);
   }
   const source = pageFromFile(vaultDir, sourceFile);
-  const candidates = scanVaultPages(vaultDir)
-    .filter((item) => item.page.id !== source.page.id)
-    .map((item) => ({
-      item,
-      score: lexicalRelatedness(source, item),
-    }))
-    .filter((candidate) => candidate.score > 0)
-    .sort((a, b) => b.score - a.score);
-  const target = candidates[0]?.item;
-  const patchId = `patch_${source.page.id}`;
-  const timestamp = new Date().toISOString();
-  const synthesizePromptHash = stablePromptHash("synthesize/heuristic-v0.1");
-  const targetChunkId = target
-    ? `${target.page.id}:c${
-        chunkByHeaders(target.page.id, target.body, {
-          bodyStartLine: target.bodyStartLine,
-        }).length
-      }`
-    : undefined;
-  const changes: PatchChange[] = [];
-  if (target) {
-    changes.push({
-      type: "modify",
-      pageId: target.page.id,
-      operation: "append_section",
-      relation: "extend",
-      classifyConfidence: 0.7,
-      reasoning: `${source.page.title} shares terms with ${target.page.title}`,
-      content: [
-        `## ${source.page.title} (compiled)`,
-        "",
-        `<!-- akb:derived source=${source.page.id}:c0 method=extend patch=${patchId} promptHash="${synthesizePromptHash}" modelId="${model}" compiledAt="${timestamp}" -->`,
-        source.body.trim(),
-      ].join("\n"),
-      confidenceImpact: {
-        kind: "source_added",
-        sourceWeight: 0.8,
-      },
-    });
-  } else {
-    changes.push({
-      type: "confidence_only",
-      pageId: source.page.id,
-      relation: "duplicate",
-      confidenceImpact: {
-        kind: "source_added",
-        sourceWeight: 0.7,
-      },
-    });
-  }
-  return {
-    id: patchId,
-    status: "proposed",
-    source: {
-      sourceId: stableId("src", source.page.id),
-      pageId: source.page.id,
-      ingestPath: source.page.path,
-    },
-    compileMeta: {
-      provider: "heuristic",
-      modelId: model,
-      promptHashes: {
-        segment: stablePromptHash("segment/heuristic-v0.1"),
-        classify: stablePromptHash("classify/heuristic-v0.1"),
-        synthesize: stablePromptHash("synthesize/heuristic-v0.1"),
-      },
-      pipelineVersion: "compile/0.1",
-      segmentCount: 1,
-      llmCallCount: 0,
-      elapsedMs: 0,
-      degraded: !process.env.DEEPSEEK_API_KEY,
-      createdAt: timestamp,
-    },
-    changes,
-    lineage: {
-      units: [
-        {
-          id: `${source.page.id}:su0`,
-          sourcePageId: source.page.id,
-          sourceChunkIds: [`${source.page.id}:c0`],
-          kind: "claim_cluster",
-        },
-      ],
-      derivedChunks: target
-        ? [
-            {
-              chunkId: targetChunkId,
-              derivedFrom: {
-                sourceUnitIds: [`${source.page.id}:su0`],
-                sourceChunkIds: [`${source.page.id}:c0`],
-                method: "extend",
-                promptHash: synthesizePromptHash,
-                modelId: model,
-                compiledAt: timestamp,
-              },
-            },
-          ]
-        : [],
-    },
-  };
-}
-
-function lexicalRelatedness(
-  source: { page: Page; body: string },
-  target: { page: Page; body: string },
-): number {
-  const sourceTerms = termsForPage(source.page, source.body);
-  const targetTerms = termsForPage(target.page, target.body);
-  let score = 0;
-  for (const term of sourceTerms) {
-    if (targetTerms.has(term)) {
-      score += 1;
-    }
-  }
-  return score;
-}
-
-function termsForPage(page: Page, body: string): Set<string> {
-  return new Set(
-    [
-      page.title,
-      ...toStringArray(page.frontmatter.aliases),
-      ...toStringArray(page.frontmatter.tags),
-      body,
-    ]
-      .join(" ")
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter((term) => term.length > 3),
-  );
-}
-
-function stablePromptHash(input: string): string {
-  return `sha256:${stableId("src", input).slice("src_".length)}`;
+  return buildHeuristicCompilePatch({
+    source,
+    candidates: scanVaultPages(vaultDir),
+    model,
+    deepseekApiKey: process.env.DEEPSEEK_API_KEY,
+  }) as PatchDocument;
 }
 
 function patchPathFor(
@@ -2580,12 +2453,25 @@ function sourceChunkExists(vaultDir: string, chunkId: string): boolean {
 }
 
 function normalizedCompilePatch(patch: PatchDocument): string {
+  const compileMeta = { ...patch.compileMeta };
+  const promptHashes = isRecord(compileMeta.promptHashes)
+    ? compileMeta.promptHashes
+    : {};
   return JSON.stringify({
     source: patch.source,
     compileMeta: {
-      ...patch.compileMeta,
+      provider: compileMeta.provider,
+      modelId: compileMeta.modelId,
+      promptHashes: {
+        segment: promptHashes.segment,
+        classify: promptHashes.classify,
+        synthesize: promptHashes.synthesize,
+      },
+      pipelineVersion: compileMeta.pipelineVersion,
+      segmentCount: compileMeta.segmentCount,
+      llmCallCount: compileMeta.llmCallCount,
+      degraded: compileMeta.degraded,
       createdAt: "<timestamp>",
-      elapsedMs: undefined,
     },
     changes: (patch.changes ?? []).map((change) =>
       change.type === "modify"

@@ -29,6 +29,9 @@ importers:
 
   apps/cli:
     dependencies:
+      '@akb/compile':
+        specifier: workspace:*
+        version: link:../../packages/compile
       '@akb/confidence':
         specifier: workspace:*
         version: link:../../packages/confidence
@@ -80,6 +83,15 @@ importers:
       zod:
         specifier: ^4.1.12
         version: 4.4.3
+
+  packages/compile:
+    dependencies:
+      '@akb/core':
+        specifier: workspace:*
+        version: link:../core
+      '@akb/search-engine':
+        specifier: workspace:*
+        version: link:../search-engine
 
   packages/confidence:
     dependencies:

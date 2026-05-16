@@ -11,6 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@akb/compile": "workspace:*",
     "@akb/confidence": "workspace:*",
     "@akb/core": "workspace:*",
     "@akb/eval-harness": "workspace:*",
