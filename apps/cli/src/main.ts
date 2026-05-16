@@ -521,6 +521,7 @@ function rankConfidenceStateForResults(
       supersededBy: state.supersededBy,
       lastVerifiedAt: state.lastVerifiedAt,
       lastEventAt: state.lastEventAt,
+      recentMajorContradictedAt: latestMajorContradictionAt(events),
     });
   }
   return states;
@@ -542,6 +543,9 @@ function loadProjectedRankConfidenceState(
         supersededBy: state.supersededBy,
         lastVerifiedAt: state.lastVerifiedAt,
         lastEventAt: state.lastEventAt,
+        recentMajorContradictedAt: latestMajorContradictionAt(
+          projection.getEvents(pageId),
+        ),
       });
     }
     return states;
@@ -550,6 +554,16 @@ function loadProjectedRankConfidenceState(
   } finally {
     projection.close();
   }
+}
+
+function latestMajorContradictionAt(
+  events: ReturnType<typeof loadConfidenceEvents>,
+): string | undefined {
+  return events
+    .filter(
+      (event) => event.kind === "contradicted_by" && event.severity === "major",
+    )
+    .sort((a, b) => b.timestamp.localeCompare(a.timestamp))[0]?.timestamp;
 }
 
 async function evalCommand(options: EvalOptions): Promise<void> {

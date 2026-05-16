@@ -154,6 +154,57 @@ describe("akb MCP server", () => {
     }
   });
 
+  it("returns recently contradicted confidence flags in MCP search", async () => {
+    const ledgerPath = join(dir, "pages", ".page_mcp000000000.ledger.jsonl");
+    const source = parseConfidenceEvent({
+      id: "evt_mcpmajor0001",
+      kind: "source_added",
+      pageId: "page_mcp000000000",
+      timestamp: "2026-05-01T00:00:00.000Z",
+      actor: "system",
+      actorId: "akb-test",
+      sourceId: "src_mcpmajor0001",
+      sourceWeight: 0.8,
+    });
+    const contradiction = parseConfidenceEvent({
+      id: "evt_mcpmajor0002",
+      kind: "contradicted_by",
+      pageId: "page_mcp000000000",
+      timestamp: new Date().toISOString(),
+      actor: "system",
+      actorId: "akb-test",
+      bySourceId: "src_mcpmajor0002",
+      severity: "major",
+    });
+    writeFileSync(
+      ledgerPath,
+      `${JSON.stringify(source)}\n${JSON.stringify(contradiction)}\n`,
+    );
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const server = createAkbMcpServer(dir);
+    const client = new Client({ name: "akb-test-client", version: "0.0.0" });
+
+    try {
+      await Promise.all([
+        server.connect(serverTransport),
+        client.connect(clientTransport),
+      ]);
+      const search = await client.callTool({
+        name: "search_knowledge",
+        arguments: { query: "citation data", top_k: 1 },
+      });
+      const payload = JSON.parse(
+        search.content[0].type === "text" ? search.content[0].text : "",
+      );
+
+      expect(payload.results[0].flags).toContain("RECENTLY_CONTRADICTED");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it("exposes search_knowledge over streamable HTTP", async () => {
     const httpServer = await startHttpMcpServer({ cwd: dir, port: 0 });
     const address = httpServer.address();

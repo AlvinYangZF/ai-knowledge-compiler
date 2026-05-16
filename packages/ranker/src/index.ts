@@ -1,6 +1,10 @@
 import type { PageId, SearchResult } from "@akb/core";
 
-export type ResultFlag = "NEEDS_REVIEW" | "STALE" | "SUPERSEDED";
+export type ResultFlag =
+  | "NEEDS_REVIEW"
+  | "RECENTLY_CONTRADICTED"
+  | "STALE"
+  | "SUPERSEDED";
 
 export interface RankWeights {
   relevance: number;
@@ -14,6 +18,7 @@ export interface RankConfidenceState {
   supersededBy?: PageId;
   lastVerifiedAt?: string;
   lastEventAt?: string;
+  recentMajorContradictedAt?: string;
 }
 
 export interface RankOptions {
@@ -105,10 +110,23 @@ function flagsForState(
   if (state?.supersededBy !== undefined) {
     flags.push("SUPERSEDED");
   }
+  if (isRecentMajorContradiction(state?.recentMajorContradictedAt, now)) {
+    flags.push("RECENTLY_CONTRADICTED");
+  }
   if (isStale(state?.lastVerifiedAt, now)) {
     flags.push("STALE");
   }
   return flags;
+}
+
+function isRecentMajorContradiction(
+  timestamp: string | undefined,
+  now: Date,
+): boolean {
+  if (!timestamp) {
+    return false;
+  }
+  return daysBetween(timestamp, now) <= 30;
 }
 
 function freshnessScore(lastEventAt: string | undefined, now: Date): number {

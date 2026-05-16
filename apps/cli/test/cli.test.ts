@@ -484,18 +484,29 @@ describe("akb CLI", () => {
     );
     runCli(["ingest", source, "--no-commit"], vault);
     const ledgerPath = join(vault, "pages", ".page_projsearch01.ledger.jsonl");
+    const sourceAdded = {
+      id: "evt_projsearch01",
+      kind: "source_added",
+      pageId: "page_projsearch01",
+      timestamp: "2026-05-01T12:00:00.000Z",
+      actor: "system",
+      actorId: "akb-test",
+      sourceId: "src_projsearch01",
+      sourceWeight: 0.1,
+    };
+    const contradicted = {
+      id: "evt_projsearch02",
+      kind: "contradicted_by",
+      pageId: "page_projsearch01",
+      timestamp: new Date().toISOString(),
+      actor: "system",
+      actorId: "akb-test",
+      bySourceId: "src_projsearch02",
+      severity: "major",
+    };
     writeFileSync(
       ledgerPath,
-      `${JSON.stringify({
-        id: "evt_projsearch01",
-        kind: "source_added",
-        pageId: "page_projsearch01",
-        timestamp: "2026-05-01T12:00:00.000Z",
-        actor: "system",
-        actorId: "akb-test",
-        sourceId: "src_projsearch01",
-        sourceWeight: 0.1,
-      })}\n`,
+      `${JSON.stringify(sourceAdded)}\n${JSON.stringify(contradicted)}\n`,
     );
 
     const output = runCli(["projection", "rebuild", "--confidence"], vault);
@@ -508,7 +519,58 @@ describe("akb CLI", () => {
     expect(output).toContain("Rebuilt confidence projection");
     expect(ranked.results[0].page_id).toBe("page_projsearch01");
     expect(ranked.results[0].flags).toContain("NEEDS_REVIEW");
+    expect(ranked.results[0].flags).toContain("RECENTLY_CONTRADICTED");
     expect(ranked.results[0].component_scores.confidence).toBeLessThan(0.5);
+  });
+
+  it("search flags recently major contradicted pages from JSONL fallback", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "contradicted.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_recentmajor0",
+        "title: Recent Major Contradiction",
+        "---",
+        "# Recent Major Contradiction",
+        "",
+        "contradiction target content.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+    writeFileSync(
+      join(vault, "pages", ".page_recentmajor0.ledger.jsonl"),
+      [
+        JSON.stringify({
+          id: "evt_recentmaj001",
+          kind: "source_added",
+          pageId: "page_recentmajor0",
+          timestamp: "2026-05-01T00:00:00.000Z",
+          actor: "system",
+          actorId: "akb-test",
+          sourceId: "src_recentmaj001",
+          sourceWeight: 0.8,
+        }),
+        JSON.stringify({
+          id: "evt_recentmaj002",
+          kind: "contradicted_by",
+          pageId: "page_recentmajor0",
+          timestamp: new Date().toISOString(),
+          actor: "system",
+          actorId: "akb-test",
+          bySourceId: "src_recentmaj002",
+          severity: "major",
+        }),
+      ].join("\n"),
+    );
+
+    const payload = JSON.parse(
+      runCli(["search", "contradiction target", "--format", "json"], vault),
+    );
+
+    expect(payload.results[0].flags).toContain("RECENTLY_CONTRADICTED");
   });
 
   it("lint reports low-confidence warnings without failing", () => {

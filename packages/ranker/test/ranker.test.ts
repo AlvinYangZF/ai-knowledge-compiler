@@ -108,4 +108,44 @@ describe("rankSearchResults", () => {
     expect(ranked[0].component_scores.confidence).toBe(0.7);
     expect(ranked[0].flags).toEqual([]);
   });
+
+  it("flags pages with recent major contradictions", () => {
+    const ranked = rankSearchResults({
+      rawResults: [
+        result("page_recentmajor", 0.9),
+        result("page_oldmajor000", 0.8),
+        result("page_minor000000", 0.7),
+      ],
+      confidenceState: new Map([
+        [
+          "page_recentmajor" as PageId,
+          {
+            score: 0.6,
+            lastEventAt: "2026-05-01T00:00:00.000Z",
+            recentMajorContradictedAt: "2026-05-01T00:00:00.000Z",
+          },
+        ],
+        [
+          "page_oldmajor000" as PageId,
+          {
+            score: 0.6,
+            lastEventAt: "2026-01-01T00:00:00.000Z",
+            recentMajorContradictedAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        [
+          "page_minor000000" as PageId,
+          {
+            score: 0.6,
+            lastEventAt: "2026-05-01T00:00:00.000Z",
+          },
+        ],
+      ]),
+      now: new Date("2026-05-16T00:00:00.000Z"),
+    });
+
+    expect(ranked[0].flags).toContain("RECENTLY_CONTRADICTED");
+    expect(ranked[1].flags).not.toContain("RECENTLY_CONTRADICTED");
+    expect(ranked[2].flags).not.toContain("RECENTLY_CONTRADICTED");
+  });
 });

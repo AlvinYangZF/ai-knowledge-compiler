@@ -128,11 +128,20 @@ function rankConfidenceStateForResults(
     results.map((result) => result.page_id),
   );
   for (const result of results) {
-    if (states.has(result.page_id)) {
-      continue;
-    }
     const events = loadConfidenceEvents(vaultDir, result.path, result.page_id);
     if (events.length === 0) {
+      continue;
+    }
+    const latestLedgerEventAt = [...events]
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+      .at(-1)?.timestamp;
+    const projected = states.get(result.page_id);
+    if (
+      projected &&
+      latestLedgerEventAt &&
+      projected.lastEventAt &&
+      projected.lastEventAt >= latestLedgerEventAt
+    ) {
       continue;
     }
     const state = computeConfidenceState(events);
@@ -141,6 +150,7 @@ function rankConfidenceStateForResults(
       supersededBy: state.supersededBy,
       lastVerifiedAt: state.lastVerifiedAt,
       lastEventAt: state.lastEventAt,
+      recentMajorContradictedAt: latestMajorContradictionAt(events),
     });
   }
   return states;
@@ -162,6 +172,9 @@ function loadProjectedRankConfidenceState(
         supersededBy: state.supersededBy,
         lastVerifiedAt: state.lastVerifiedAt,
         lastEventAt: state.lastEventAt,
+        recentMajorContradictedAt: latestMajorContradictionAt(
+          projection.getEvents(pageId),
+        ),
       });
     }
     return states;
@@ -170,6 +183,16 @@ function loadProjectedRankConfidenceState(
   } finally {
     projection.close();
   }
+}
+
+function latestMajorContradictionAt(
+  events: ReturnType<typeof loadConfidenceEvents>,
+): string | undefined {
+  return events
+    .filter(
+      (event) => event.kind === "contradicted_by" && event.severity === "major",
+    )
+    .sort((a, b) => b.timestamp.localeCompare(a.timestamp))[0]?.timestamp;
 }
 
 export async function startHttpMcpServer(opts: {
