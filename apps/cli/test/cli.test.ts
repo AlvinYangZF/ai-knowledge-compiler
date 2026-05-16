@@ -558,7 +558,7 @@ describe("akb CLI", () => {
       ),
     );
     expect(report.last_verified_at).toBe(events.at(-1).timestamp);
-    expect(report.explanation.verification_boost).toBe(0.15);
+    expect(report.explanation.verification_boost).toBe(0.02);
   });
 
   it("reports low-confidence pages during verify dry-run without writing events", () => {

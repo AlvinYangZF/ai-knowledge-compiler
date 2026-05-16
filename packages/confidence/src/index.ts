@@ -205,6 +205,8 @@ export function computeConfidenceState(
   let lastVerifiedAt: string | undefined;
   let supersededBy: PageId | undefined;
   let manualBase = base;
+  const lastVerificationResetByActorType = new Map<string, string>();
+  let decayAnchorAt = events.at(-1)?.timestamp ?? now.toISOString();
 
   for (const event of events) {
     if (event.pageId !== pageId) {
@@ -216,20 +218,40 @@ export function computeConfidenceState(
     } else if (event.kind === "source_removed") {
       sourceWeights.delete(event.sourceId);
     } else if (event.kind === "verified") {
-      lastVerifiedAt = event.timestamp;
-      verificationBoost = 0.15;
+      const weight = verificationRuleFor(event);
+      if (daysBetween(event.timestamp, now) <= 30) {
+        verificationBoost += weight.boost;
+      }
+      const previousReset = lastVerificationResetByActorType.get(
+        weight.actorType,
+      );
+      if (
+        previousReset === undefined ||
+        daysBetween(previousReset, new Date(event.timestamp)) >=
+          weight.resetWindowDays
+      ) {
+        lastVerifiedAt = event.timestamp;
+        decayAnchorAt = event.timestamp;
+        lastVerificationResetByActorType.set(weight.actorType, event.timestamp);
+      }
     } else if (event.kind === "contradicted_by") {
+      decayAnchorAt = event.timestamp;
       contradictionCount += 1;
       contradictionPenalty += event.severity === "major" ? 0.35 : 0.1;
     } else if (event.kind === "superseded_by") {
+      decayAnchorAt = event.timestamp;
       supersededBy = event.supersederPageId;
       contradictionPenalty += 0.6;
     } else if (event.kind === "manual_override") {
+      decayAnchorAt = event.timestamp;
       manualBase = event.newBase;
+    } else {
+      decayAnchorAt = event.timestamp;
     }
   }
 
   contradictionPenalty = Math.min(0.6, contradictionPenalty);
+  verificationBoost = Math.min(0.25, verificationBoost);
   const sourceStrength =
     1 -
     Math.exp(
@@ -237,7 +259,11 @@ export function computeConfidenceState(
         1.5,
     );
   const lastEventAt = events.at(-1)?.timestamp ?? now.toISOString();
-  const timeDecay = computeTimeDecay(lastEventAt, now, opts.pageType ?? "note");
+  const timeDecay = computeTimeDecay(
+    decayAnchorAt,
+    now,
+    opts.pageType ?? "note",
+  );
   const score = clamp01(
     manualBase +
       sourceStrength -
@@ -467,6 +493,56 @@ function decayProfile(pageType: string): {
     default:
       return { halfLifeDays: 120, ceiling: 0.3 };
   }
+}
+
+function verificationRuleFor(
+  event: Extract<ConfidenceEvent, { kind: "verified" }>,
+): { actorType: string; boost: number; resetWindowDays: number } {
+  const actorId = event.actorId ?? "";
+  if (actorId.startsWith("human:")) {
+    return { actorType: "human", boost: 0.05, resetWindowDays: 0 };
+  }
+  if (actorId === "ci:github-actions") {
+    return {
+      actorType: "ci:github-actions",
+      boost: 0.03,
+      resetWindowDays: 14,
+    };
+  }
+  if (actorId.startsWith("ci:")) {
+    return { actorType: "ci:other", boost: 0.02, resetWindowDays: 14 };
+  }
+  if (actorId === "agent:claude-code") {
+    return {
+      actorType: "agent:claude-code",
+      boost: 0.02,
+      resetWindowDays: 7,
+    };
+  }
+  if (actorId.startsWith("agent:")) {
+    return { actorType: "agent:other", boost: 0.01, resetWindowDays: 7 };
+  }
+  if (actorId === "runbook-exec") {
+    return { actorType: "runbook-exec", boost: 0.04, resetWindowDays: 0 };
+  }
+  if (actorId === "test:integration") {
+    return { actorType: "test:integration", boost: 0.04, resetWindowDays: 0 };
+  }
+  if (actorId === "test:unit") {
+    return { actorType: "test:unit", boost: 0.02, resetWindowDays: 14 };
+  }
+  if (event.verifierType === "agent") {
+    return { actorType: "agent:other", boost: 0.01, resetWindowDays: 7 };
+  }
+  return { actorType: "unpatterned", boost: 0.01, resetWindowDays: 7 };
+}
+
+function daysBetween(from: string, to: Date): number {
+  const fromTime = new Date(from).getTime();
+  if (!Number.isFinite(fromTime)) {
+    return 0;
+  }
+  return Math.max(0, (to.getTime() - fromTime) / (24 * 60 * 60 * 1000));
 }
 
 function clamp01(value: number): number {
