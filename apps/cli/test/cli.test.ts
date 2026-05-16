@@ -53,6 +53,9 @@ describe("akb CLI", () => {
     expect(readFileSync(join(vault, ".gitignore"), "utf8")).toContain(
       ".akb/index.db",
     );
+    expect(readFileSync(join(vault, ".gitignore"), "utf8")).toContain(
+      ".akb/lint/",
+    );
     expect(existsSync(join(vault, "pages", ".gitkeep"))).toBe(true);
   });
 
@@ -899,6 +902,86 @@ describe("akb CLI", () => {
     expect(output).toContain("Confidence issues");
     expect(output).toContain("page_lintweak0001");
     expect(output).toContain("low-confidence");
+    expect(existsSync(join(vault, ".akb", "lint", "low-confidence.md"))).toBe(
+      true,
+    );
+  });
+
+  it("lint reports orphan pages and writes suggestion reports", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const linked = join(dir, "linked.md");
+    const hub = join(dir, "hub.md");
+    const orphan = join(dir, "orphan.md");
+    const selfLinked = join(dir, "self-linked.md");
+    writeFileSync(
+      linked,
+      [
+        "---",
+        "id: page_linked000001",
+        "title: Linked Page",
+        "---",
+        "# Linked Page",
+        "",
+        "This page links back to [[Hub Page]].",
+      ].join("\n"),
+    );
+    writeFileSync(
+      hub,
+      [
+        "---",
+        "id: page_hub000000001",
+        "title: Hub Page",
+        "---",
+        "# Hub Page",
+        "",
+        "This page links to [[Linked Page]].",
+      ].join("\n"),
+    );
+    writeFileSync(
+      orphan,
+      [
+        "---",
+        "id: page_orphan000001",
+        "title: Orphan Page",
+        "---",
+        "# Orphan Page",
+        "",
+        "This page has no incoming or outgoing wiki links.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      selfLinked,
+      [
+        "---",
+        "id: page_selflink0001",
+        "title: Self Linked",
+        "---",
+        "# Self Linked",
+        "",
+        "This page only links to [[Self Linked]].",
+      ].join("\n"),
+    );
+    runCli(["ingest", linked, "--no-commit"], vault);
+    runCli(["ingest", hub, "--no-commit"], vault);
+    runCli(["ingest", orphan, "--no-commit"], vault);
+    runCli(["ingest", selfLinked, "--no-commit"], vault);
+
+    const output = runCli(["lint"], vault);
+    const orphanReport = readFileSync(
+      join(vault, ".akb", "lint", "orphan-pages.md"),
+      "utf8",
+    );
+    const suggestions = readFileSync(
+      join(vault, ".akb", "lint", "suggestions.md"),
+      "utf8",
+    );
+
+    expect(output).toContain("orphan pages");
+    expect(orphanReport).toContain("page_orphan000001");
+    expect(orphanReport).toContain("page_selflink0001");
+    expect(orphanReport).not.toContain("page_hub000000001");
+    expect(suggestions).toContain("page_orphan000001");
   });
 
   it("lint fails on broken wikilinks and supersession cycles", () => {

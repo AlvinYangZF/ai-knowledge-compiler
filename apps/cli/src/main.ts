@@ -86,6 +86,7 @@ interface ProjectionRebuildOptions {
 interface LintReport {
   lowConfidence: Array<{ page: Page; score: number }>;
   stale: Array<{ page: Page; lastVerifiedAt: string }>;
+  orphanPages: Page[];
   brokenWikiLinks: Array<{ page: Page; target: string }>;
   supersessionCycles: PageId[][];
 }
@@ -309,7 +310,7 @@ async function initCommand(name: string): Promise<void> {
   writeFileSync(join(vaultDir, "pages", ".gitkeep"), "");
   writeFileSync(
     join(vaultDir, ".gitignore"),
-    ".akb/index.db\n.akb/index.db-*\n",
+    ".akb/index.db\n.akb/index.db-*\n.akb/lint/\n",
   );
   writeFileSync(
     join(vaultDir, "README.md"),
@@ -622,6 +623,7 @@ async function lintCommand(): Promise<void> {
   const vaultDir = process.cwd();
   assertVault(vaultDir);
   const report = buildLintReport(vaultDir);
+  writeLintReports(vaultDir, report);
   printLintReport(report);
   if (
     report.brokenWikiLinks.length > 0 ||
@@ -649,6 +651,13 @@ function buildLintReport(vaultDir: string): LintReport {
   const lowConfidence: LintReport["lowConfidence"] = [];
   const stale: LintReport["stale"] = [];
   const brokenWikiLinks: LintReport["brokenWikiLinks"] = [];
+  const outgoingCounts = new Map<PageId, number>(
+    pages.map((item) => [item.page.id, 0]),
+  );
+  const incomingCounts = new Map<PageId, number>(
+    pages.map((item) => [item.page.id, 0]),
+  );
+  const targetToPageId = pageTargetLookup(pages.map((item) => item.page));
 
   for (const item of pages) {
     const state = confidence.get(item.page.id);
@@ -658,16 +667,36 @@ function buildLintReport(vaultDir: string): LintReport {
     if (state?.lastVerifiedAt && isOlderThanDays(state.lastVerifiedAt, 180)) {
       stale.push({ page: item.page, lastVerifiedAt: state.lastVerifiedAt });
     }
-    for (const target of extractWikiLinks(item.body)) {
+    const links = extractWikiLinks(item.body);
+    for (const target of links) {
       if (!lookup.has(normalizeWikiTarget(target))) {
         brokenWikiLinks.push({ page: item.page, target });
+      } else {
+        const targetPageId = targetToPageId.get(normalizeWikiTarget(target));
+        if (targetPageId && targetPageId !== item.page.id) {
+          outgoingCounts.set(
+            item.page.id,
+            (outgoingCounts.get(item.page.id) ?? 0) + 1,
+          );
+          incomingCounts.set(
+            targetPageId,
+            (incomingCounts.get(targetPageId) ?? 0) + 1,
+          );
+        }
       }
     }
   }
+  const orphanPages = pages
+    .filter((item) => {
+      const outgoing = outgoingCounts.get(item.page.id) ?? 0;
+      return outgoing === 0 && (incomingCounts.get(item.page.id) ?? 0) === 0;
+    })
+    .map((item) => item.page);
 
   return {
     lowConfidence,
     stale,
+    orphanPages,
     brokenWikiLinks,
     supersessionCycles: findSupersessionCycles(pages.map((item) => item.page)),
   };
@@ -689,6 +718,16 @@ function printLintReport(report: LintReport): void {
     );
   }
 
+  console.log("Structural issues:");
+  if (report.orphanPages.length === 0) {
+    console.log("  no orphan pages");
+  } else {
+    console.log(`  warn ${report.orphanPages.length} orphan pages`);
+    for (const page of report.orphanPages) {
+      console.log(`  warn orphan ${page.id} ${page.path}`);
+    }
+  }
+
   console.log("Broken wiki links:");
   if (report.brokenWikiLinks.length === 0) {
     console.log("  none");
@@ -704,6 +743,75 @@ function printLintReport(report: LintReport): void {
   for (const cycle of report.supersessionCycles) {
     console.log(`  error ${cycle.join(" -> ")}`);
   }
+}
+
+function writeLintReports(vaultDir: string, report: LintReport): void {
+  const lintDir = join(vaultDir, ".akb", "lint");
+  mkdirSync(lintDir, { recursive: true });
+  writeFileSync(
+    join(lintDir, "low-confidence.md"),
+    renderLintTable(
+      "Low Confidence",
+      ["Page", "Path", "Score", "Suggestion"],
+      report.lowConfidence.map((issue) => [
+        issue.page.id,
+        issue.page.path,
+        issue.score.toFixed(4),
+        "consider supersede or re-verify",
+      ]),
+    ),
+  );
+  writeFileSync(
+    join(lintDir, "orphan-pages.md"),
+    renderLintTable(
+      "Orphan Pages",
+      ["Page", "Path", "Suggestion"],
+      report.orphanPages.map((page) => [
+        page.id,
+        page.path,
+        "add wiki links or verify this page is intentionally standalone",
+      ]),
+    ),
+  );
+  writeFileSync(join(lintDir, "suggestions.md"), renderLintSuggestions(report));
+}
+
+function renderLintTable(
+  title: string,
+  columns: string[],
+  rows: string[][],
+): string {
+  const header = `# ${title}\n\n`;
+  if (rows.length === 0) {
+    return `${header}No issues found.\n`;
+  }
+  return [
+    header.trimEnd(),
+    "",
+    `| ${columns.join(" | ")} |`,
+    `| ${columns.map(() => "---").join(" | ")} |`,
+    ...rows.map((row) => `| ${row.join(" | ")} |`),
+    "",
+  ].join("\n");
+}
+
+function renderLintSuggestions(report: LintReport): string {
+  const lines = ["# Lint Suggestions", ""];
+  for (const issue of report.lowConfidence) {
+    lines.push(
+      `- ${issue.page.id} (${issue.score.toFixed(4)}): consider supersede or re-verify.`,
+    );
+  }
+  for (const page of report.orphanPages) {
+    lines.push(
+      `- ${page.id}: add incoming/outgoing wiki links or mark it intentionally standalone.`,
+    );
+  }
+  if (lines.length === 2) {
+    lines.push("No suggestions.");
+  }
+  lines.push("");
+  return lines.join("\n");
 }
 
 async function decayCommand(options: DecayOptions): Promise<void> {
@@ -1782,19 +1890,33 @@ function scanVaultPages(
 function pageLookup(pages: Page[]): Set<string> {
   const lookup = new Set<string>();
   for (const page of pages) {
-    for (const value of [
-      page.id,
-      page.title,
-      page.path,
-      page.path.replace(/^pages\//, ""),
-      page.path.replace(/^pages\//, "").replace(/\.md$/, ""),
-      basename(page.path, ".md"),
-      ...toStringArray(page.frontmatter.aliases),
-    ]) {
-      lookup.add(normalizeWikiTarget(value));
+    for (const target of pageTargets(page)) {
+      lookup.add(target);
     }
   }
   return lookup;
+}
+
+function pageTargetLookup(pages: Page[]): Map<string, PageId> {
+  const lookup = new Map<string, PageId>();
+  for (const page of pages) {
+    for (const target of pageTargets(page)) {
+      lookup.set(target, page.id);
+    }
+  }
+  return lookup;
+}
+
+function pageTargets(page: Page): string[] {
+  return [
+    page.id,
+    page.title,
+    page.path,
+    page.path.replace(/^pages\//, ""),
+    page.path.replace(/^pages\//, "").replace(/\.md$/, ""),
+    basename(page.path, ".md"),
+    ...toStringArray(page.frontmatter.aliases),
+  ].map((value) => normalizeWikiTarget(value));
 }
 
 function extractWikiLinks(body: string): string[] {
