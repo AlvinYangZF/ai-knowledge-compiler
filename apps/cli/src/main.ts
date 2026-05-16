@@ -147,7 +147,7 @@ interface LintOptions {
 
 interface LintReport {
   lowConfidence: Array<{ page: Page; score: number }>;
-  stale: Array<{ page: Page; lastVerifiedAt: string }>;
+  stale: Array<{ page: Page; lastVerifiedAt: string; ciGate: boolean }>;
   unresolvedContradictions: Array<{
     page: Page;
     contradictionCount: number;
@@ -1328,6 +1328,7 @@ async function lintCommand(options: LintOptions): Promise<void> {
   printLintReport(report);
   if (
     report.unresolvedContradictions.length > 0 ||
+    report.stale.some((issue) => issue.ciGate) ||
     report.brokenWikiLinks.length > 0 ||
     report.supersessionCycles.length > 0
   ) {
@@ -1388,13 +1389,25 @@ function buildLintReport(vaultDir: string, now?: Date): LintReport {
     if (state && state.score < 0.5) {
       lowConfidence.push({ page: item.page, score: state.score });
     }
-    if (
+    const events = loadConfidenceEvents(vaultDir, item.page.path, item.page.id);
+    const lastVerifiedAt =
+      state?.lastVerifiedAt ?? firstConfidenceEvidenceAt(events);
+    const staleCiGate =
+      isDecisionPage(item.page) &&
+      typeof lastVerifiedAt === "string" &&
+      isAtLeastDaysOld(lastVerifiedAt, 100, now);
+    if (staleCiGate) {
+      stale.push({ page: item.page, lastVerifiedAt, ciGate: true });
+    } else if (
       state?.lastVerifiedAt &&
       isOlderThanDays(state.lastVerifiedAt, 180, now)
     ) {
-      stale.push({ page: item.page, lastVerifiedAt: state.lastVerifiedAt });
+      stale.push({
+        page: item.page,
+        lastVerifiedAt: state.lastVerifiedAt,
+        ciGate: false,
+      });
     }
-    const events = loadConfidenceEvents(vaultDir, item.page.path, item.page.id);
     if (events.length > 0) {
       const activeContradictionCount = countActiveContradictions(events);
       if (activeContradictionCount > 0) {
@@ -1469,6 +1482,18 @@ function buildLintReport(vaultDir: string, now?: Date): LintReport {
   };
 }
 
+function isDecisionPage(page: Page): boolean {
+  const type = page.frontmatter.type;
+  return typeof type === "string" && type.toLowerCase() === "decision";
+}
+
+function firstConfidenceEvidenceAt(
+  events: ConfidenceEvent[],
+): string | undefined {
+  return [...events].sort((a, b) => a.timestamp.localeCompare(b.timestamp))[0]
+    ?.timestamp;
+}
+
 function countActiveContradictions(events: ConfidenceEvent[]): number {
   let activeContradictions = 0;
   for (const event of [...events].sort((a, b) =>
@@ -1498,9 +1523,15 @@ function printLintReport(report: LintReport): void {
     );
   }
   for (const issue of report.stale) {
-    console.log(
-      `  warn stale ${issue.page.id} ${issue.page.path} last_verified_at=${issue.lastVerifiedAt}`,
-    );
+    if (issue.ciGate) {
+      console.log(
+        `  error stale-ci-gate ${issue.page.id} ${issue.page.path} last_verified_at=${issue.lastVerifiedAt}`,
+      );
+    } else {
+      console.log(
+        `  warn stale ${issue.page.id} ${issue.page.path} last_verified_at=${issue.lastVerifiedAt}`,
+      );
+    }
   }
   for (const issue of report.unresolvedContradictions) {
     console.log(
@@ -1576,7 +1607,9 @@ function writeLintReports(vaultDir: string, report: LintReport): void {
         issue.page.id,
         issue.page.path,
         issue.lastVerifiedAt,
-        "re-verify or supersede this page",
+        issue.ciGate
+          ? "CI gate: re-verify this ADR before merging"
+          : "re-verify or supersede this page",
       ]),
     ),
   );
@@ -1665,7 +1698,9 @@ function renderLintSuggestions(report: LintReport): string {
   }
   for (const issue of report.stale) {
     lines.push(
-      `- ${issue.page.id}: re-verify stale page last verified at ${issue.lastVerifiedAt}.`,
+      issue.ciGate
+        ? `- ${issue.page.id}: CI gate requires ADR re-verification; last verified at ${issue.lastVerifiedAt}.`
+        : `- ${issue.page.id}: re-verify stale page last verified at ${issue.lastVerifiedAt}.`,
     );
   }
   for (const page of report.orphanPages) {
@@ -3354,6 +3389,18 @@ function isOlderThanDays(
     return false;
   }
   return now.getTime() - time > days * 24 * 60 * 60 * 1000;
+}
+
+function isAtLeastDaysOld(
+  timestamp: string,
+  days: number,
+  now = new Date(),
+): boolean {
+  const time = new Date(timestamp).getTime();
+  if (!Number.isFinite(time)) {
+    return false;
+  }
+  return now.getTime() - time >= days * 24 * 60 * 60 * 1000;
 }
 
 function pageFromFile(

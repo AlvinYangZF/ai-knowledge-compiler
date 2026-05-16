@@ -1444,6 +1444,120 @@ describe("akb CLI", () => {
     expect(staleReport).toContain("page_lintdecay001");
   });
 
+  it("lint fails CI gate for ADRs unverified for 100 days", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "old-decision.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_lintadr00001",
+        "title: Old Decision",
+        "type: decision",
+        "---",
+        "# Old Decision",
+        "",
+        "This architecture decision needs periodic confirmation.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+    writeFileSync(
+      join(vault, "pages", ".page_lintadr00001.ledger.jsonl"),
+      [
+        JSON.stringify({
+          id: "evt_lintadr00001",
+          kind: "source_added",
+          pageId: "page_lintadr00001",
+          timestamp: "2026-01-01T00:00:00.000Z",
+          actor: "system",
+          actorId: "akb-test",
+          sourceId: "src_lintadr00001",
+          sourceWeight: 0.8,
+        }),
+        JSON.stringify({
+          id: "evt_lintadr00002",
+          kind: "verified",
+          pageId: "page_lintadr00001",
+          timestamp: "2026-01-01T00:00:00.000Z",
+          actor: "human",
+          actorId: "reviewer",
+          verifierType: "human",
+        }),
+        "",
+      ].join("\n"),
+    );
+    runCli(["projection", "rebuild", "--confidence"], vault);
+
+    const failure = runCliFailure(
+      ["lint", "--now", "2026-04-12T00:00:00.000Z"],
+      vault,
+    );
+    const staleReport = readFileSync(
+      join(vault, ".akb", "lint", "stale.md"),
+      "utf8",
+    );
+
+    expect(failure).toContain("error stale-ci-gate");
+    expect(failure).toContain("page_lintadr00001");
+    expect(staleReport).toContain("CI gate");
+  });
+
+  it("lint CI gate uses first evidence for never-verified ADRs", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "never-verified-decision.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_lintadr00002",
+        "title: Never Verified Decision",
+        "type: decision",
+        "---",
+        "# Never Verified Decision",
+        "",
+        "This architecture decision has no verification event.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+    writeFileSync(
+      join(vault, "pages", ".page_lintadr00002.ledger.jsonl"),
+      [
+        JSON.stringify({
+          id: "evt_lintadr00003",
+          kind: "source_added",
+          pageId: "page_lintadr00002",
+          timestamp: "2026-01-01T00:00:00.000Z",
+          actor: "system",
+          actorId: "akb-test",
+          sourceId: "src_lintadr00002",
+          sourceWeight: 0.8,
+        }),
+        JSON.stringify({
+          id: "evt_lintadr00004",
+          kind: "decay_checkpoint",
+          pageId: "page_lintadr00002",
+          timestamp: "2026-04-10T00:00:00.000Z",
+          actor: "system",
+          actorId: "akb-decay",
+          daysSinceLastEvent: 99,
+          appliedDecay: 0.1,
+        }),
+        "",
+      ].join("\n"),
+    );
+    runCli(["projection", "rebuild", "--confidence"], vault);
+
+    const failure = runCliFailure(
+      ["lint", "--now", "2026-04-11T00:00:00.000Z"],
+      vault,
+    );
+
+    expect(failure).toContain("error stale-ci-gate");
+    expect(failure).toContain("page_lintadr00002");
+  });
+
   it("lint reports orphan pages and writes suggestion reports", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
