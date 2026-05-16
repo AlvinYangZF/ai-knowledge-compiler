@@ -1233,6 +1233,103 @@ describe("akb CLI", () => {
     expect(reverse).toContain("page_compile00001");
   });
 
+  it("runs compile eval golden gates", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const fixtureDir = join(vault, ".akb", "eval", "fixtures");
+    mkdirSync(fixtureDir, { recursive: true });
+    const existing = join(fixtureDir, "eval-gc.md");
+    const incoming = join(fixtureDir, "eval-gc-update.md");
+    writeFileSync(
+      existing,
+      [
+        "---",
+        "id: page_evalcompile1",
+        "title: Eval GC Strategy",
+        "aliases:",
+        "  - garbage collection",
+        "---",
+        "# Eval GC Strategy",
+        "",
+        "GC uses fixed thresholds.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      incoming,
+      [
+        "---",
+        "id: page_evalcompile2",
+        "title: Eval Adaptive GC",
+        "tags:",
+        "  - garbage collection",
+        "---",
+        "# Eval Adaptive GC",
+        "",
+        "Adaptive garbage collection updates threshold policy.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(vault, ".akb", "eval", "compile-golden.yaml"),
+      [
+        'version: "1.0"',
+        "items:",
+        "  - id: c001",
+        '    description: "adaptive GC should extend existing GC page"',
+        "    setup:",
+        "      existingPages:",
+        "        - fixtures/eval-gc.md",
+        "      newSource: fixtures/eval-gc-update.md",
+        "    expect:",
+        "      relations:",
+        "        - againstPage: page_evalcompile1",
+        "          relation: extend",
+        "      mustNotCreatePage: true",
+      ].join("\n"),
+    );
+
+    const output = runCli(
+      [
+        "eval",
+        "compile",
+        "--set",
+        ".akb/eval/compile-golden.yaml",
+        "--output",
+        ".akb/eval/compile-report.json",
+      ],
+      vault,
+    );
+    const report = JSON.parse(
+      readFileSync(join(vault, ".akb", "eval", "compile-report.json"), "utf8"),
+    );
+    expect(output).toContain("Compile eval: 1 items");
+    expect(output).toContain("relation accuracy: 1/1");
+    expect(report.relation_accuracy).toBe(1);
+    expect(report.target_accuracy).toBe(1);
+
+    writeFileSync(
+      join(vault, ".akb", "eval", "compile-golden.yaml"),
+      [
+        'version: "1.0"',
+        "items:",
+        "  - id: c001",
+        "    setup:",
+        "      existingPages:",
+        "        - fixtures/eval-gc.md",
+        "      newSource: fixtures/eval-gc-update.md",
+        "    expect:",
+        "      relations:",
+        "        - againstPage: page_evalcompile1",
+        "          relation: supersede",
+      ].join("\n"),
+    );
+    const failure = runCliFailure(
+      ["eval", "compile", "--set", ".akb/eval/compile-golden.yaml"],
+      vault,
+    );
+    expect(failure).toContain("FAILED");
+    expect(failure).toContain("expected supersede");
+  });
+
   it("rejects duplicate compile and invalid patches without partial writes", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);

@@ -11,7 +11,10 @@ import {
 } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { buildHeuristicCompilePatch } from "@akb/compile";
+import {
+  buildHeuristicCompilePatch,
+  type CompilePageInput,
+} from "@akb/compile";
 import {
   appendConfidenceEvent,
   type ConfidenceEvent,
@@ -53,6 +56,40 @@ interface SearchOptions {
 interface EvalOptions {
   set?: string;
   output?: string;
+}
+
+interface EvalCompileOptions {
+  set?: string;
+  output?: string;
+}
+
+interface CompileGoldenItem {
+  id: string;
+  description?: string;
+  setup: {
+    existingPages: string[];
+    newSource: string;
+  };
+  expect: {
+    relations: Array<{
+      againstPage?: string;
+      relation?: string;
+      relationIn?: string[];
+    }>;
+    mustCreatePage?: boolean;
+    mustNotCreatePage?: boolean;
+    mustNotDeleteContent?: boolean;
+  };
+}
+
+interface CompileEvalFailure {
+  id: string;
+  source: string;
+  againstPage?: string;
+  expectedRelation: string | string[];
+  actualRelation?: string;
+  actualTargetPage?: string;
+  kind: "relation" | "target" | "create_page" | "delete_content";
 }
 
 interface VerifyOptions {
@@ -158,7 +195,10 @@ type PatchChange =
       confidenceImpact: Record<string, unknown>;
     };
 
+let currentArgv = process.argv;
+
 export async function run(argv = process.argv): Promise<void> {
+  currentArgv = argv;
   const program = new Command();
   program
     .name("akb")
@@ -190,11 +230,16 @@ export async function run(argv = process.argv): Promise<void> {
     .option("--format <format>", "text or json", parseFormat, "text")
     .option("--include-superseded", "include historical superseded pages")
     .action(searchCommand);
-  program
+  const evalCmd = program
     .command("eval")
     .option("--set <path>", "golden set path")
     .option("--output <path>", "write JSON report")
     .action(evalCommand);
+  evalCmd
+    .command("compile")
+    .option("--set <path>", "compile golden set path")
+    .option("--output <path>", "write JSON report")
+    .action(evalCompileCommand);
   program.command("lint").action(lintCommand);
   program
     .command("decay")
@@ -618,6 +663,265 @@ async function evalCommand(options: EvalOptions): Promise<void> {
   } finally {
     index.close();
   }
+}
+
+function evalCompileCommand(options: EvalCompileOptions): void {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const setOption = options.set ?? cliOptionValue("--set");
+  const outputOption = options.output ?? cliOptionValue("--output");
+  const goldenPath = resolve(
+    vaultDir,
+    setOption ?? ".akb/eval/compile-golden.yaml",
+  );
+  const items = loadCompileGoldenItems(goldenPath);
+  const failures: CompileEvalFailure[] = [];
+  let relationChecks = 0;
+  let relationPasses = 0;
+  let targetChecks = 0;
+  let targetPasses = 0;
+
+  for (const item of items) {
+    const patch = buildCompileEvalPatch(vaultDir, goldenPath, item);
+    const changes = patch.changes ?? [];
+    for (const expected of item.expect.relations) {
+      relationChecks += 1;
+      const expectedRelations =
+        expected.relationIn ?? (expected.relation ? [expected.relation] : []);
+      const relationMatched = changes.find(
+        (change) =>
+          "relation" in change && expectedRelations.includes(change.relation),
+      );
+      if (relationMatched) {
+        relationPasses += 1;
+      } else {
+        const actual = changes.find((change) => "relation" in change);
+        failures.push({
+          id: item.id,
+          source: item.setup.newSource,
+          againstPage: expected.againstPage,
+          expectedRelation:
+            expected.relationIn ?? expected.relation ?? "<missing>",
+          actualRelation:
+            actual && "relation" in actual ? actual.relation : undefined,
+          actualTargetPage:
+            actual && "pageId" in actual ? actual.pageId : undefined,
+          kind: "relation",
+        });
+      }
+
+      if (expected.againstPage) {
+        targetChecks += 1;
+        const candidates = changes.filter(
+          (change) =>
+            "pageId" in change && change.pageId === expected.againstPage,
+        );
+        if (candidates.length > 0) {
+          targetPasses += 1;
+        } else {
+          const actual = changes.find((change) => "pageId" in change);
+          failures.push({
+            id: item.id,
+            source: item.setup.newSource,
+            againstPage: expected.againstPage,
+            expectedRelation:
+              expected.relationIn ?? expected.relation ?? "<missing>",
+            actualRelation:
+              actual && "relation" in actual ? actual.relation : undefined,
+            actualTargetPage:
+              actual && "pageId" in actual ? actual.pageId : undefined,
+            kind: "target",
+          });
+        }
+      }
+    }
+    const createsPage = changes.some((change) => changeCreatesPage(change));
+    if (item.expect.mustCreatePage && !createsPage) {
+      failures.push({
+        id: item.id,
+        source: item.setup.newSource,
+        expectedRelation: "new page",
+        kind: "create_page",
+      });
+    }
+    if (item.expect.mustNotCreatePage && createsPage) {
+      failures.push({
+        id: item.id,
+        source: item.setup.newSource,
+        expectedRelation: "no new page",
+        actualRelation: "new",
+        kind: "create_page",
+      });
+    }
+    if (
+      item.expect.mustNotDeleteContent &&
+      changes.some(
+        (change) =>
+          "operation" in change && String(change.operation).includes("delete"),
+      )
+    ) {
+      failures.push({
+        id: item.id,
+        source: item.setup.newSource,
+        expectedRelation: "no deleted content",
+        kind: "delete_content",
+      });
+    }
+  }
+
+  const failedItemIds = new Set(failures.map((failure) => failure.id));
+  const report = {
+    total: items.length,
+    relation_checks: relationChecks,
+    relation_passes: relationPasses,
+    target_checks: targetChecks,
+    target_passes: targetPasses,
+    passed: items.length - failedItemIds.size,
+    failed: failedItemIds.size,
+    failure_count: failures.length,
+    relation_accuracy:
+      relationChecks === 0 ? 1 : relationPasses / relationChecks,
+    target_accuracy: targetChecks === 0 ? 1 : targetPasses / targetChecks,
+    failures,
+  };
+  if (outputOption) {
+    writeFileSync(
+      resolve(vaultDir, outputOption),
+      `${JSON.stringify(report, null, 2)}\n`,
+    );
+  }
+
+  console.log(`Compile eval: ${items.length} items`);
+  console.log(`  relation accuracy: ${relationPasses}/${relationChecks}`);
+  console.log(`  target accuracy:   ${targetPasses}/${targetChecks}`);
+  if (failures.length > 0) {
+    console.log("");
+    console.log("FAILED:");
+    for (const failure of failures) {
+      console.log(
+        `  ${failure.id} source=${failure.source}: expected ${Array.isArray(failure.expectedRelation) ? failure.expectedRelation.join(" or ") : failure.expectedRelation}${failure.againstPage ? ` -> ${failure.againstPage}` : ""}, got ${failure.actualRelation ?? "none"}${failure.actualTargetPage ? ` -> ${failure.actualTargetPage}` : ""}`,
+      );
+    }
+    process.exitCode = 1;
+  }
+}
+
+function loadCompileGoldenItems(path: string): CompileGoldenItem[] {
+  const parsed = parseYaml(readFileSync(path, "utf8")) as {
+    version?: string;
+    items?: unknown[];
+  };
+  if (parsed.version !== "1.0" || !Array.isArray(parsed.items)) {
+    throw new Error(`Invalid compile golden set: ${path}`);
+  }
+  return parsed.items.map((item, index) => {
+    if (!isRecord(item)) {
+      throw new Error(`Invalid compile golden item at index ${index}`);
+    }
+    const id = stringField(item, "id");
+    const setup = recordField(item, "setup");
+    const expect = recordField(item, "expect");
+    const relations = arrayField(expect, "relations").map(
+      (relation, relationIndex) => {
+        if (!isRecord(relation)) {
+          throw new Error(
+            `Invalid compile golden relation at ${index}.${relationIndex}`,
+          );
+        }
+        const relationValue =
+          typeof relation.relation === "string" ? relation.relation : undefined;
+        const relationIn = Array.isArray(relation.relationIn)
+          ? relation.relationIn.filter(
+              (value): value is string => typeof value === "string",
+            )
+          : undefined;
+        if (!relationValue && (!relationIn || relationIn.length === 0)) {
+          throw new Error(
+            `Invalid compile golden relation at ${index}.${relationIndex}`,
+          );
+        }
+        return {
+          againstPage:
+            typeof relation.againstPage === "string"
+              ? relation.againstPage
+              : undefined,
+          relation: relationValue,
+          relationIn,
+        };
+      },
+    );
+    return {
+      id,
+      description:
+        typeof item.description === "string" ? item.description : undefined,
+      setup: {
+        existingPages: Array.isArray(setup.existingPages)
+          ? setup.existingPages.filter(
+              (value): value is string => typeof value === "string",
+            )
+          : [],
+        newSource: stringField(setup, "newSource"),
+      },
+      expect: {
+        relations,
+        mustCreatePage:
+          typeof expect.mustCreatePage === "boolean"
+            ? expect.mustCreatePage
+            : undefined,
+        mustNotCreatePage:
+          typeof expect.mustNotCreatePage === "boolean"
+            ? expect.mustNotCreatePage
+            : undefined,
+        mustNotDeleteContent:
+          typeof expect.mustNotDeleteContent === "boolean"
+            ? expect.mustNotDeleteContent
+            : undefined,
+      },
+    };
+  });
+}
+
+function buildCompileEvalPatch(
+  vaultDir: string,
+  goldenPath: string,
+  item: CompileGoldenItem,
+): PatchDocument {
+  const source = compileEvalPageInput(
+    vaultDir,
+    goldenPath,
+    item.setup.newSource,
+  );
+  const candidates =
+    item.setup.existingPages.length > 0
+      ? item.setup.existingPages.map((ref) =>
+          compileEvalPageInput(vaultDir, goldenPath, ref),
+        )
+      : scanVaultPages(vaultDir).filter(
+          (candidate) => candidate.page.id !== source.page.id,
+        );
+  return buildHeuristicCompilePatch({
+    source,
+    candidates,
+    deepseekApiKey: process.env.DEEPSEEK_API_KEY,
+  }) as PatchDocument;
+}
+
+function compileEvalPageInput(
+  vaultDir: string,
+  goldenPath: string,
+  ref: string,
+): CompilePageInput {
+  const goldenRelative = resolve(dirname(goldenPath), ref);
+  const vaultRelative = resolve(vaultDir, ref);
+  const file = existsSync(goldenRelative)
+    ? goldenRelative
+    : existsSync(vaultRelative)
+      ? vaultRelative
+      : resolvePageFile(vaultDir, ref);
+  if (!file) {
+    throw new Error(`Compile eval page not found: ${ref}`);
+  }
+  return pageFromFile(vaultDir, file);
 }
 
 async function lintCommand(): Promise<void> {
@@ -2490,6 +2794,15 @@ function normalizedCompilePatch(patch: PatchDocument): string {
   });
 }
 
+function changeCreatesPage(change: PatchChange): boolean {
+  const raw = change as unknown as Record<string, unknown>;
+  return (
+    raw.type === "create" ||
+    typeof raw.newPageId === "string" ||
+    ("operation" in change && change.relation === "new")
+  );
+}
+
 function normalizeVolatileCompileText(value: string): string {
   return value.replace(/compiledAt="[^"]+"/g, 'compiledAt="<timestamp>"');
 }
@@ -2601,6 +2914,42 @@ function ledgerPathForPageLocal(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringField(value: Record<string, unknown>, field: string): string {
+  const fieldValue = value[field];
+  if (typeof fieldValue !== "string" || fieldValue.length === 0) {
+    throw new Error(`Invalid or missing string field: ${field}`);
+  }
+  return fieldValue;
+}
+
+function recordField(
+  value: Record<string, unknown>,
+  field: string,
+): Record<string, unknown> {
+  const fieldValue = value[field];
+  if (!isRecord(fieldValue)) {
+    throw new Error(`Invalid or missing object field: ${field}`);
+  }
+  return fieldValue;
+}
+
+function arrayField(value: Record<string, unknown>, field: string): unknown[] {
+  const fieldValue = value[field];
+  if (!Array.isArray(fieldValue)) {
+    throw new Error(`Invalid or missing array field: ${field}`);
+  }
+  return fieldValue;
+}
+
+function cliOptionValue(name: string): string | undefined {
+  const index = currentArgv.indexOf(name);
+  if (index === -1) {
+    return undefined;
+  }
+  const value = currentArgv[index + 1];
+  return value && !value.startsWith("--") ? value : undefined;
 }
 
 function isValidPageId(value: unknown): value is PageId {
