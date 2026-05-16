@@ -31,6 +31,8 @@ export const PageFrontmatterSchema = z
     imported_at: z.string().optional(),
     source_path: z.string().optional(),
     source_hash: z.string().optional(),
+    source_type: z.string().min(1).optional(),
+    source_url: z.string().optional(),
   })
   .passthrough();
 
@@ -73,6 +75,19 @@ export const ConfigSchema = z.object({
     host: z.string().min(1),
     port: z.number().int().positive(),
   }),
+  sources: z
+    .object({
+      authority_domains: z.array(z.string().min(1)).default([]),
+    })
+    .optional(),
+  llm: z
+    .object({
+      provider: z.string().min(1).default("deepseek"),
+      base_url: z.string().min(1).default("https://api.deepseek.com"),
+      model: z.string().min(1).default("deepseek-v4-flash"),
+      api_key_env: z.string().min(1).default("DEEPSEEK_API_KEY"),
+    })
+    .optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

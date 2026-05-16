@@ -11,6 +11,7 @@ export interface BuildCompilePatchOptions {
   source: CompilePageInput;
   candidates: CompilePageInput[];
   model?: string;
+  apiKeyEnv?: string;
   deepseekApiKey?: string;
   now?: Date;
 }
@@ -46,7 +47,7 @@ export interface CompilePatchDocument {
   compileMeta: {
     provider: "deepseek" | "heuristic";
     modelId: string;
-    apiKeyEnv: "DEEPSEEK_API_KEY";
+    apiKeyEnv: string;
     promptHashes: {
       segment: string;
       locate: string;
@@ -334,7 +335,7 @@ export function buildHeuristicCompilePatch(
     compileMeta: {
       provider: "heuristic",
       modelId: model,
-      apiKeyEnv: "DEEPSEEK_API_KEY",
+      apiKeyEnv: opts.apiKeyEnv ?? "DEEPSEEK_API_KEY",
       promptHashes: Object.fromEntries(
         PIPELINE_STAGES.map((stage) => [
           stage,
@@ -354,7 +355,7 @@ export function buildHeuristicCompilePatch(
       degraded,
       degradedReason: opts.deepseekApiKey
         ? "DeepSeek provider not implemented; used heuristic fallback"
-        : "DEEPSEEK_API_KEY not set",
+        : `${opts.apiKeyEnv ?? "DEEPSEEK_API_KEY"} not set`,
       temperature: 0,
       createdAt: timestamp,
     },

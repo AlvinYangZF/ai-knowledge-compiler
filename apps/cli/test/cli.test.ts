@@ -216,6 +216,123 @@ describe("akb CLI", () => {
     expect(report.explanation.source_strength).toBeGreaterThan(0);
   });
 
+  it("uses source type and authority config for migrated source weights", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    writeFileSync(
+      join(vault, ".akb", "config.yaml"),
+      [
+        'version: "0.0"',
+        "workspace:",
+        '  name: "vault"',
+        '  vault_dir: "."',
+        "index:",
+        '  engine: "sqlite-fts5"',
+        '  path: ".akb/index.db"',
+        "mcp:",
+        '  host: "127.0.0.1"',
+        "  port: 8765",
+        "sources:",
+        "  authority_domains:",
+        '    - "*.usenix.org"',
+        "",
+      ].join("\n"),
+    );
+    const authority = join(dir, "authority.md");
+    const chat = join(dir, "chat.md");
+    const unknown = join(dir, "unknown.md");
+    const nonAuthority = join(dir, "non-authority.md");
+    writeFileSync(
+      authority,
+      [
+        "---",
+        "id: page_authweight01",
+        "title: Authority Source",
+        "source_type: webpage",
+        "source_url: www.usenix.org/conference/fast26/paper",
+        "---",
+        "# Authority Source",
+        "",
+        "Known authority webpage source.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      chat,
+      [
+        "---",
+        "id: page_chatweight01",
+        "title: Chat Source",
+        "source_type: chat",
+        "---",
+        "# Chat Source",
+        "",
+        "Chat source.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      unknown,
+      [
+        "---",
+        "id: page_unknownsrc01",
+        "title: Unknown Source Type",
+        "source_type: confluence",
+        "---",
+        "# Unknown Source Type",
+        "",
+        "Unknown source type should not break old vaults.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      nonAuthority,
+      [
+        "---",
+        "id: page_weblow000001",
+        "title: Low Authority Webpage",
+        "source_type: webpage",
+        "source_url: https://example.com/post",
+        "---",
+        "# Low Authority Webpage",
+        "",
+        "Unknown webpage source.",
+      ].join("\n"),
+    );
+    runCli(["ingest", authority, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", chat, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", unknown, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", nonAuthority, "--no-commit", "--no-compile"], vault);
+
+    runCli(["migrate", "to-v0.1"], vault);
+    const authorityEvent = JSON.parse(
+      readFileSync(
+        join(vault, "pages", ".page_authweight01.ledger.jsonl"),
+        "utf8",
+      ).trim(),
+    );
+    const chatEvent = JSON.parse(
+      readFileSync(
+        join(vault, "pages", ".page_chatweight01.ledger.jsonl"),
+        "utf8",
+      ).trim(),
+    );
+    const unknownEvent = JSON.parse(
+      readFileSync(
+        join(vault, "pages", ".page_unknownsrc01.ledger.jsonl"),
+        "utf8",
+      ).trim(),
+    );
+    const nonAuthorityEvent = JSON.parse(
+      readFileSync(
+        join(vault, "pages", ".page_weblow000001.ledger.jsonl"),
+        "utf8",
+      ).trim(),
+    );
+
+    expect(authorityEvent.sourceWeight).toBe(0.6);
+    expect(chatEvent.sourceWeight).toBe(0.4);
+    expect(unknownEvent.sourceWeight).toBe(0.8);
+    expect(nonAuthorityEvent.sourceWeight).toBe(0.3);
+  });
+
   it("recomputes confidence state by replaying the JSONL ledger", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
@@ -1536,6 +1653,54 @@ describe("akb CLI", () => {
       vault,
     );
     expect(reverse).toContain("page_compile00001");
+  });
+
+  it("uses llm config for compile metadata", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    writeFileSync(
+      join(vault, ".akb", "config.yaml"),
+      [
+        'version: "0.0"',
+        "workspace:",
+        '  name: "vault"',
+        '  vault_dir: "."',
+        "index:",
+        '  engine: "sqlite-fts5"',
+        '  path: ".akb/index.db"',
+        "mcp:",
+        '  host: "127.0.0.1"',
+        "  port: 8765",
+        "llm:",
+        '  model: "deepseek-v4-pro"',
+        '  api_key_env: "AKB_TEST_DEEPSEEK_KEY"',
+        "",
+      ].join("\n"),
+    );
+    const source = join(dir, "compile-config.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_compilecfg01",
+        "title: Compile Config",
+        "---",
+        "# Compile Config",
+        "",
+        "Standalone compile config source.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+
+    runCli(["compile", "--source", "page_compilecfg01"], vault);
+    const patch = readFileSync(
+      join(vault, ".akb", "patches", "patch_page_compilecfg01.yaml"),
+      "utf8",
+    );
+
+    expect(patch).toContain("modelId: deepseek-v4-pro");
+    expect(patch).toContain("apiKeyEnv: AKB_TEST_DEEPSEEK_KEY");
+    expect(patch).toContain("degradedReason: AKB_TEST_DEEPSEEK_KEY not set");
   });
 
   it("applies heuristic contradiction and supersede compile patches", () => {

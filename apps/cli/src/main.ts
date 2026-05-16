@@ -25,7 +25,13 @@ import {
   loadConfidenceEvents,
   parseConfidenceEvent,
 } from "@akb/confidence";
-import type { Page, PageFrontmatter, PageId, SearchResult } from "@akb/core";
+import type {
+  Config,
+  Page,
+  PageFrontmatter,
+  PageId,
+  SearchResult,
+} from "@akb/core";
 import { ConfigSchema, PageFrontmatterSchema, PageIdSchema } from "@akb/core";
 import { loadGoldenSet, runEval } from "@akb/eval-harness";
 import { commitFiles, initVault } from "@akb/git-store";
@@ -1790,10 +1796,7 @@ async function migrateToV01Command(options: MigrateOptions): Promise<void> {
       actor: "system",
       actorId: "akb-migrate",
       sourceId: stableId("src", sourceKey),
-      sourceWeight:
-        item.page.frontmatter.source_hash || item.page.frontmatter.source_path
-          ? 0.8
-          : 0.5,
+      sourceWeight: sourceWeightForPage(vaultDir, item.page),
     });
     const ledgerPath = appendConfidenceEvent(
       vaultDir,
@@ -1823,6 +1826,80 @@ async function migrateToV01Command(options: MigrateOptions): Promise<void> {
   console.log(
     `Migrated ${written.length} page${written.length === 1 ? "" : "s"} to v0.1 confidence ledgers (${skipped} skipped).`,
   );
+}
+
+const sourceTypeWeights: Record<string, number> = {
+  markdown: 1,
+  git_commit: 0.9,
+  code: 0.9,
+  github_pr: 0.8,
+  github_issue: 0.6,
+  meeting: 0.7,
+  pdf_academic: 0.8,
+  pdf_vendor: 0.5,
+  webpage: 0.3,
+  chat: 0.4,
+};
+
+function sourceWeightForPage(vaultDir: string, page: Page): number {
+  const sourceType = page.frontmatter.source_type;
+  if (sourceType && sourceType in sourceTypeWeights) {
+    const baseWeight = sourceTypeWeights[sourceType];
+    if (
+      sourceType === "webpage" &&
+      isAuthoritySource(vaultDir, page.frontmatter.source_url)
+    ) {
+      return Math.min(1, baseWeight + 0.3);
+    }
+    return baseWeight;
+  }
+  return page.frontmatter.source_hash || page.frontmatter.source_path
+    ? 0.8
+    : 0.5;
+}
+
+function isAuthoritySource(
+  vaultDir: string,
+  sourceUrl: string | undefined,
+): boolean {
+  if (!sourceUrl) {
+    return false;
+  }
+  const patterns = readAuthorityDomainPatterns(vaultDir);
+  if (patterns.length === 0) {
+    return false;
+  }
+  const candidates = authorityCandidates(sourceUrl);
+  return patterns.some((pattern) =>
+    candidates.some((candidate) => wildcardMatch(pattern, candidate)),
+  );
+}
+
+function readAuthorityDomainPatterns(vaultDir: string): string[] {
+  return readVaultConfig(vaultDir).sources?.authority_domains ?? [];
+}
+
+function authorityCandidates(sourceUrl: string): string[] {
+  const candidateUrl = sourceUrl.includes("://")
+    ? sourceUrl
+    : `https://${sourceUrl}`;
+  try {
+    const url = new URL(candidateUrl);
+    return [
+      url.hostname.toLowerCase(),
+      `${url.hostname}${url.pathname}`.toLowerCase(),
+    ];
+  } catch {
+    return [sourceUrl.toLowerCase()];
+  }
+}
+
+function wildcardMatch(pattern: string, value: string): boolean {
+  const escaped = pattern
+    .toLowerCase()
+    .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`).test(value);
 }
 
 async function confidenceShowCommand(
@@ -2136,6 +2213,7 @@ function roundForReport(value: number): number {
 async function compileCommand(options: CompileOptions): Promise<void> {
   const vaultDir = process.cwd();
   assertVault(vaultDir);
+  const config = readVaultConfig(vaultDir);
   const sourceRefs = options.allPending
     ? pendingCompileSources(vaultDir)
     : options.source
@@ -2146,7 +2224,10 @@ async function compileCommand(options: CompileOptions): Promise<void> {
   }
 
   for (const sourceRef of sourceRefs) {
-    const patch = buildCompilePatch(vaultDir, sourceRef, options.model);
+    const patch = buildCompilePatch(vaultDir, sourceRef, {
+      model: options.model ?? config.llm?.model,
+      apiKeyEnv: config.llm?.api_key_env,
+    });
     if (options.dryRun) {
       console.log(
         `Dry run ${patch.source?.pageId ?? sourceRef}: ${patch.changes?.length ?? 0} change${patch.changes?.length === 1 ? "" : "s"}.`,
@@ -2194,11 +2275,13 @@ function compileReplayCommand(patchId: string): void {
   if (!patch.source?.pageId) {
     throw new Error(`Patch has no source page id: ${patchId}`);
   }
-  const replayed = buildCompilePatch(
-    vaultDir,
-    patch.source.pageId,
-    String(patch.compileMeta?.modelId ?? "heuristic-v0.1"),
-  );
+  const replayed = buildCompilePatch(vaultDir, patch.source.pageId, {
+    model: String(patch.compileMeta?.modelId ?? "heuristic-v0.1"),
+    apiKeyEnv:
+      typeof patch.compileMeta?.apiKeyEnv === "string"
+        ? patch.compileMeta.apiKeyEnv
+        : "DEEPSEEK_API_KEY",
+  });
   if (normalizedCompilePatch(patch) !== normalizedCompilePatch(replayed)) {
     throw new Error(`Replay differed for ${patch.id}`);
   }
@@ -2444,6 +2527,11 @@ function assertVault(dir: string): void {
   ) {
     throw new Error(`Not an akb vault: ${dir}`);
   }
+}
+
+function readVaultConfig(vaultDir: string): Config {
+  const configPath = join(vaultDir, ".akb", "config.yaml");
+  return ConfigSchema.parse(parseYaml(readFileSync(configPath, "utf8")));
 }
 
 function markdownFiles(path: string, recursive = true): string[] {
@@ -2942,18 +3030,21 @@ function compileDisabledPath(vaultDir: string): string {
 function buildCompilePatch(
   vaultDir: string,
   sourceRef: string,
-  model = "heuristic-v0.1",
+  options: { model?: string; apiKeyEnv?: string } = {},
 ): PatchDocument {
   const sourceFile = resolvePageFile(vaultDir, sourceRef);
   if (!sourceFile) {
     throw new Error(`Compile source not found: ${sourceRef}`);
   }
+  const model = options.model ?? "heuristic-v0.1";
+  const apiKeyEnv = options.apiKeyEnv ?? "DEEPSEEK_API_KEY";
   const source = pageFromFile(vaultDir, sourceFile);
   return buildHeuristicCompilePatch({
     source,
     candidates: scanVaultPages(vaultDir),
     model,
-    deepseekApiKey: process.env.DEEPSEEK_API_KEY,
+    apiKeyEnv,
+    deepseekApiKey: process.env[apiKeyEnv],
   }) as PatchDocument;
 }
 
