@@ -33,6 +33,7 @@ export const ConfidenceEventSchema = z
       kind: z.literal("source_added"),
       sourceId: SourceIdSchema,
       sourceWeight: z.number().min(0).max(1),
+      sourceKey: z.string().min(1).optional(),
     }),
     EventBaseSchema.extend({
       kind: z.literal("source_removed"),

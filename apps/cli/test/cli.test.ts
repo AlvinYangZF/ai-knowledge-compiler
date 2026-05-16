@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ConfidenceProjection } from "@akb/confidence";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const cli = join(import.meta.dirname, "../src/main.ts");
@@ -258,8 +259,9 @@ describe("akb CLI", () => {
 
     const migrateOutput = runCli(["migrate", "to-v0.1"], vault);
     const ledgerPath = join(vault, "pages", ".page_migrate00010.ledger.jsonl");
-    const ledger = readFileSync(ledgerPath, "utf8").trim();
-    const event = JSON.parse(ledger);
+    const event = JSON.parse(
+      readFileSync(ledgerPath, "utf8").trim().split("\n")[0],
+    );
 
     expect(migrateOutput).toContain("Migrated 1 page");
     expect(event.kind).toBe("source_added");
@@ -277,6 +279,96 @@ describe("akb CLI", () => {
     expect(report.source_count).toBe(1);
     expect(report.score).toBeGreaterThan(0);
     expect(report.explanation.source_strength).toBeGreaterThan(0);
+    expect(existsSync(join(vault, ".akb", "migration-report.md"))).toBe(true);
+    expect(
+      readFileSync(join(vault, ".akb", "migration-report.md"), "utf8"),
+    ).toContain("page_migrate00010");
+  });
+
+  it("migration records unknown source keys, decay checkpoints, and projection state", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(vault, "pages", "unknown-old.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_migunknown01",
+        "title: Unknown Old Source",
+        "type: runbook",
+        'created_at: "2024-01-01"',
+        'last_verified_at: "2024-01-02"',
+        "---",
+        "# Unknown Old Source",
+        "",
+        "This old page should receive migration decay metadata.",
+      ].join("\n"),
+    );
+    runCli(["index", "--rebuild"], vault);
+
+    const output = runCli(["migrate", "to-v0.1", "--no-commit"], vault);
+    const ledger = readFileSync(
+      join(vault, "pages", ".page_migunknown01.ledger.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const report = readFileSync(
+      join(vault, ".akb", "migration-report.md"),
+      "utf8",
+    );
+    const ranked = JSON.parse(
+      runCli(["search", "migration decay", "--format", "json"], vault),
+    );
+
+    expect(output).toContain("decay checkpoint");
+    expect(ledger[0].kind).toBe("source_added");
+    expect(ledger[0].sourceKey).toBe("src_unknown_page_migunknown01");
+    expect(report).toContain("src_unknown_page_migunknown01");
+    expect(ledger.some((event) => event.kind === "verified")).toBe(true);
+    expect(ledger.some((event) => event.kind === "decay_checkpoint")).toBe(
+      true,
+    );
+    const projection = new ConfidenceProjection({
+      dbPath: join(vault, ".akb", "index.db"),
+      readonly: true,
+    });
+    try {
+      const projectedEvents = projection.getEvents(
+        "page_migunknown01" as never,
+      );
+      const projectedState = projection
+        .getStates(["page_migunknown01" as never])
+        .get("page_migunknown01" as never);
+      expect(projectedEvents).toHaveLength(ledger.length);
+      expect(projectedState?.score).toBeLessThan(0.7);
+      expect(ranked.results[0].component_scores.confidence).toBe(
+        projectedState?.score,
+      );
+    } finally {
+      projection.close();
+    }
+
+    const reportBeforeRerun = readFileSync(
+      join(vault, ".akb", "migration-report.md"),
+      "utf8",
+    );
+    const ledgerBeforeRerun = readFileSync(
+      join(vault, "pages", ".page_migunknown01.ledger.jsonl"),
+      "utf8",
+    );
+    const secondOutput = runCli(["migrate", "to-v0.1", "--no-commit"], vault);
+    expect(secondOutput).toContain("0 pages");
+    expect(
+      readFileSync(join(vault, ".akb", "migration-report.md"), "utf8"),
+    ).toBe(reportBeforeRerun);
+    expect(
+      readFileSync(
+        join(vault, "pages", ".page_migunknown01.ledger.jsonl"),
+        "utf8",
+      ),
+    ).toBe(ledgerBeforeRerun);
   });
 
   it("uses source type and authority config for migrated source weights", () => {
@@ -369,25 +461,33 @@ describe("akb CLI", () => {
       readFileSync(
         join(vault, "pages", ".page_authweight01.ledger.jsonl"),
         "utf8",
-      ).trim(),
+      )
+        .trim()
+        .split("\n")[0],
     );
     const chatEvent = JSON.parse(
       readFileSync(
         join(vault, "pages", ".page_chatweight01.ledger.jsonl"),
         "utf8",
-      ).trim(),
+      )
+        .trim()
+        .split("\n")[0],
     );
     const unknownEvent = JSON.parse(
       readFileSync(
         join(vault, "pages", ".page_unknownsrc01.ledger.jsonl"),
         "utf8",
-      ).trim(),
+      )
+        .trim()
+        .split("\n")[0],
     );
     const nonAuthorityEvent = JSON.parse(
       readFileSync(
         join(vault, "pages", ".page_weblow000001.ledger.jsonl"),
         "utf8",
-      ).trim(),
+      )
+        .trim()
+        .split("\n")[0],
     );
 
     expect(authorityEvent.sourceWeight).toBe(0.6);

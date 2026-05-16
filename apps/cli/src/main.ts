@@ -2092,7 +2092,16 @@ async function migrateToV01Command(options: MigrateOptions): Promise<void> {
   assertVault(vaultDir);
   const pages = scanVaultPages(vaultDir);
   const written: string[] = [];
+  const migratedRows: Array<{
+    pageId: PageId;
+    path: string;
+    sourceKey: string;
+    score: number;
+    events: number;
+  }> = [];
   let skipped = 0;
+  let decayCheckpoints = 0;
+  const now = new Date();
 
   for (const item of pages) {
     const existing = loadConfidenceEvents(
@@ -2108,7 +2117,7 @@ async function migrateToV01Command(options: MigrateOptions): Promise<void> {
     const sourceKey =
       item.page.frontmatter.source_hash ??
       item.page.frontmatter.source_path ??
-      String(item.page.id);
+      `src_unknown_${item.page.id}`;
     const timestamp = normalizeEventTimestamp(
       item.page.frontmatter.imported_at ?? item.page.frontmatter.created_at,
     );
@@ -2120,6 +2129,7 @@ async function migrateToV01Command(options: MigrateOptions): Promise<void> {
       actor: "system",
       actorId: "akb-migrate",
       sourceId: stableId("src", sourceKey),
+      sourceKey,
       sourceWeight: sourceWeightForPage(vaultDir, item.page),
     });
     const ledgerPath = appendConfidenceEvent(
@@ -2141,17 +2151,180 @@ async function migrateToV01Command(options: MigrateOptions): Promise<void> {
         verifierType: "human",
         verifierId: humanActorId(),
       });
-      appendConfidenceEvent(vaultDir, item.page.path, verified);
+      written.push(
+        toPosix(
+          relative(
+            vaultDir,
+            appendConfidenceEvent(vaultDir, item.page.path, verified),
+          ),
+        ),
+      );
     }
+    if (appendDecayCheckpointIfDue(vaultDir, item, now)) {
+      decayCheckpoints += 1;
+      written.push(
+        toPosix(
+          relative(
+            vaultDir,
+            ledgerPathForPageLocal(vaultDir, item.page.path, item.page.id),
+          ),
+        ),
+      );
+    }
+    const events = loadConfidenceEvents(vaultDir, item.page.path, item.page.id);
+    const state = computeConfidenceState(events, {
+      now,
+      pageType:
+        typeof item.page.frontmatter.type === "string"
+          ? item.page.frontmatter.type
+          : undefined,
+    });
+    migratedRows.push({
+      pageId: item.page.id,
+      path: item.page.path,
+      sourceKey,
+      score: state.score,
+      events: events.length,
+    });
   }
 
+  if (
+    migratedRows.length > 0 ||
+    !existsSync(join(vaultDir, ".akb", "migration-report.md"))
+  ) {
+    const reportPath = join(vaultDir, ".akb", "migration-report.md");
+    writeFileSync(reportPath, migrationReportMarkdown(migratedRows, skipped));
+    written.push(toPosix(relative(vaultDir, reportPath)));
+  }
+  rebuildConfidenceProjection(vaultDir, scanVaultPages(vaultDir), now);
+
   if (written.length > 0 && options.commit !== false) {
-    await commitFiles(vaultDir, written, "migrate confidence ledgers");
+    await commitFiles(
+      vaultDir,
+      [...new Set(written)],
+      "migrate confidence ledgers",
+    );
   }
 
   console.log(
-    `Migrated ${written.length} page${written.length === 1 ? "" : "s"} to v0.1 confidence ledgers (${skipped} skipped).`,
+    `Migrated ${migratedRows.length} page${migratedRows.length === 1 ? "" : "s"} to v0.1 confidence ledgers (${skipped} skipped, ${decayCheckpoints} decay checkpoint${decayCheckpoints === 1 ? "" : "s"}).`,
   );
+}
+
+function appendDecayCheckpointIfDue(
+  vaultDir: string,
+  item: { page: Page; body?: string; bodyStartLine?: number },
+  now: Date,
+): boolean {
+  const events = loadConfidenceEvents(vaultDir, item.page.path, item.page.id);
+  if (events.length === 0) {
+    return false;
+  }
+  const before = computeConfidenceState(events, {
+    now: new Date(events.at(-1)?.timestamp ?? now.toISOString()),
+    pageType:
+      typeof item.page.frontmatter.type === "string"
+        ? item.page.frontmatter.type
+        : undefined,
+  });
+  const after = computeConfidenceState(events, {
+    now,
+    pageType:
+      typeof item.page.frontmatter.type === "string"
+        ? item.page.frontmatter.type
+        : undefined,
+  });
+  const periodicDue = shouldWriteDecayCheckpoint(events, now);
+  const thresholdCrossed = crossedConfidenceThreshold(
+    before.score,
+    after.score,
+  );
+  if (!periodicDue && !thresholdCrossed) {
+    return false;
+  }
+  const lastEventAt = events.at(-1)?.timestamp ?? now.toISOString();
+  appendConfidenceEvent(
+    vaultDir,
+    item.page.path,
+    parseConfidenceEvent({
+      id: stableId("evt", `${item.page.id}:decay:${now.toISOString()}`),
+      kind: "decay_checkpoint",
+      pageId: item.page.id,
+      timestamp: now.toISOString(),
+      actor: "system",
+      actorId: "akb-decay",
+      daysSinceLastEvent: daysBetweenIso(lastEventAt, now),
+      appliedDecay: Math.max(0, before.score - after.score),
+    }),
+  );
+  return true;
+}
+
+function rebuildConfidenceProjection(
+  vaultDir: string,
+  pages: ReturnType<typeof scanVaultPages>,
+  now = new Date(),
+): void {
+  const projection = new ConfidenceProjection({
+    dbPath: join(vaultDir, ".akb", "index.db"),
+  });
+  try {
+    projection.rebuild(
+      pages.flatMap((item) => {
+        const events = loadConfidenceEvents(
+          vaultDir,
+          item.page.path,
+          item.page.id,
+        );
+        if (events.length === 0) {
+          return [];
+        }
+        return [
+          {
+            pageId: item.page.id,
+            events,
+            state: computeConfidenceState(events, {
+              now,
+              pageType:
+                typeof item.page.frontmatter.type === "string"
+                  ? item.page.frontmatter.type
+                  : undefined,
+            }),
+          },
+        ];
+      }),
+    );
+  } finally {
+    projection.close();
+  }
+}
+
+function migrationReportMarkdown(
+  rows: Array<{
+    pageId: PageId;
+    path: string;
+    sourceKey: string;
+    score: number;
+    events: number;
+  }>,
+  skipped: number,
+): string {
+  const lines = [
+    "# akb v0.1 Migration Report",
+    "",
+    `Migrated pages: ${rows.length}`,
+    `Skipped pages: ${skipped}`,
+    "",
+    "| page_id | path | source key | events | score |",
+    "| --- | --- | --- | ---: | ---: |",
+  ];
+  for (const row of rows) {
+    lines.push(
+      `| ${row.pageId} | ${row.path} | ${row.sourceKey} | ${row.events} | ${row.score.toFixed(4)} |`,
+    );
+  }
+  lines.push("");
+  return lines.join("\n");
 }
 
 function confidenceStateForPage(
