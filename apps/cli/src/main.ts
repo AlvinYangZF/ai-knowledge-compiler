@@ -4,6 +4,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -18,7 +19,7 @@ import {
   parseConfidenceEvent,
 } from "@akb/confidence";
 import type { Page, PageFrontmatter, PageId, SearchResult } from "@akb/core";
-import { ConfigSchema, PageFrontmatterSchema } from "@akb/core";
+import { ConfigSchema, PageFrontmatterSchema, PageIdSchema } from "@akb/core";
 import { loadGoldenSet, runEval } from "@akb/eval-harness";
 import { commitFiles, initVault } from "@akb/git-store";
 import { ensureFrontmatter, parseMarkdown } from "@akb/markdown-engine";
@@ -26,13 +27,14 @@ import { serveMcp } from "@akb/mcp-server";
 import { type RankConfidenceState, rankSearchResults } from "@akb/ranker";
 import { SearchIndex } from "@akb/search-engine";
 import { Command, InvalidArgumentError } from "commander";
-import { stringify as stringifyYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 interface IngestOptions {
   tag?: string[];
   force?: boolean;
   commit?: boolean;
   recursive?: boolean;
+  compile?: boolean;
 }
 
 interface IndexOptions {
@@ -76,6 +78,79 @@ interface ProjectionRebuildOptions {
   all?: boolean;
 }
 
+interface LintReport {
+  lowConfidence: Array<{ page: Page; score: number }>;
+  stale: Array<{ page: Page; lastVerifiedAt: string }>;
+  brokenWikiLinks: Array<{ page: Page; target: string }>;
+  supersessionCycles: PageId[][];
+}
+
+interface DecayOptions {
+  run?: boolean;
+  now?: string;
+  commit?: boolean;
+}
+
+interface WebhookCiSuccessOptions {
+  actorId?: string;
+  changedFile?: string[];
+  changedFilesList?: string;
+  evidence?: string;
+  prNumber?: string;
+  commit?: boolean;
+}
+
+interface WatchOptions {
+  once?: boolean;
+  commit?: boolean;
+}
+
+interface CompileOptions {
+  source?: string;
+  allPending?: boolean;
+  dryRun?: boolean;
+  model?: string;
+}
+
+interface PatchApplyOptions {
+  commit?: boolean;
+}
+
+interface PatchDocument {
+  id: string;
+  status: "proposed" | "applied" | "rejected";
+  source?: { sourceId?: string; pageId?: string; ingestPath?: string };
+  compileMeta?: Record<string, unknown>;
+  changes?: PatchChange[];
+  lineage?: {
+    units?: Array<{
+      id: string;
+      sourcePageId?: string;
+      sourceChunkIds?: string[];
+      kind?: string;
+    }>;
+    derivedChunks?: Array<Record<string, unknown>>;
+  };
+}
+
+type PatchChange =
+  | {
+      type: "modify";
+      pageId: string;
+      operation: "append_section";
+      relation: string;
+      classifyConfidence: number;
+      reasoning: string;
+      content: string;
+      confidenceImpact?: Record<string, unknown>;
+    }
+  | {
+      type: "confidence_only";
+      pageId: string;
+      relation: "duplicate";
+      confidenceImpact: Record<string, unknown>;
+    };
+
 export async function run(argv = process.argv): Promise<void> {
   const program = new Command();
   program
@@ -88,6 +163,8 @@ export async function run(argv = process.argv): Promise<void> {
     .argument("<path>")
     .option("--tag <tag>", "add a tag to imported pages", collect, [])
     .option("--force", "overwrite existing page file")
+    .option("--compile", "compile imported pages into reviewable patches")
+    .option("--no-compile", "skip compile after ingest")
     .option("--no-commit", "skip git commit")
     .option("--recursive", "recursively ingest markdown files from directories")
     .option(
@@ -111,6 +188,28 @@ export async function run(argv = process.argv): Promise<void> {
     .option("--set <path>", "golden set path")
     .option("--output <path>", "write JSON report")
     .action(evalCommand);
+  program.command("lint").action(lintCommand);
+  program
+    .command("decay")
+    .option("--run", "write sparse decay checkpoints")
+    .option("--now <timestamp>", "clock timestamp for deterministic runs")
+    .option("--no-commit", "skip git commit")
+    .action(decayCommand);
+  const webhook = program.command("webhook");
+  webhook
+    .command("ci-success")
+    .option("--actor-id <id>", "external actor id")
+    .option("--changed-file <path>", "changed file path", collect, [])
+    .option("--changed-files-list <path>", "file containing changed paths")
+    .option("--evidence <value>", "external evidence URL or id")
+    .option("--pr-number <number>", "pull request number for CI evidence")
+    .option("--no-commit", "skip git commit")
+    .action(webhookCiSuccessCommand);
+  program
+    .command("watch")
+    .option("--once", "process runtime signal files once and exit")
+    .option("--no-commit", "skip git commit")
+    .action(watchCommand);
   program
     .command("verify")
     .argument("<page-or-glob>")
@@ -146,6 +245,28 @@ export async function run(argv = process.argv): Promise<void> {
     .option("--confidence", "rebuild confidence ledger projection")
     .option("--all", "rebuild all supported projections")
     .action(projectionRebuildCommand);
+  const compile = program.command("compile");
+  compile
+    .option("--source <page-id-or-path>", "source page to compile")
+    .option("--all-pending", "compile all sources without existing patches")
+    .option("--dry-run", "show candidate changes without writing a patch")
+    .option("--model <model>", "compile model id")
+    .action(compileCommand);
+  compile.command("status").action(compileStatusCommand);
+  compile.command("replay").argument("<patch-id>").action(compileReplayCommand);
+  const patch = program.command("patch");
+  patch.command("list").action(patchListCommand);
+  patch.command("show").argument("<patch-id>").action(patchShowCommand);
+  patch
+    .command("apply")
+    .argument("<patch-id>")
+    .option("--no-commit", "skip git commit")
+    .action(patchApplyCommand);
+  program
+    .command("lineage")
+    .argument("[chunk-or-page]")
+    .option("--reverse <source-id>", "show pages influenced by source")
+    .action(lineageCommand);
   const mcp = program.command("mcp");
   mcp
     .command("serve")
@@ -168,6 +289,10 @@ async function initCommand(name: string): Promise<void> {
   }
 
   mkdirSync(join(vaultDir, ".akb", "eval"), { recursive: true });
+  mkdirSync(join(vaultDir, ".akb", "patches", "applied"), { recursive: true });
+  mkdirSync(join(vaultDir, ".akb", "patches", "rejected"), {
+    recursive: true,
+  });
   mkdirSync(join(vaultDir, "pages"), { recursive: true });
   writeFileSync(join(vaultDir, "pages", ".gitkeep"), "");
   writeFileSync(
@@ -267,6 +392,11 @@ async function ingestCommand(
   console.log(
     `Ingested ${written.length} page${written.length === 1 ? "" : "s"}.`,
   );
+  if (options.compile === true) {
+    for (const path of written) {
+      await compileCommand({ source: path });
+    }
+  }
 }
 
 async function indexCommand(options: IndexOptions): Promise<void> {
@@ -369,11 +499,20 @@ function rankConfidenceStateForResults(
     results.map((result) => result.page_id),
   );
   for (const result of results) {
-    if (states.has(result.page_id)) {
-      continue;
-    }
     const events = loadConfidenceEvents(vaultDir, result.path, result.page_id);
     if (events.length === 0) {
+      continue;
+    }
+    const latestLedgerEventAt = [...events]
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+      .at(-1)?.timestamp;
+    const projected = states.get(result.page_id);
+    if (
+      projected &&
+      latestLedgerEventAt &&
+      projected.lastEventAt &&
+      projected.lastEventAt >= latestLedgerEventAt
+    ) {
       continue;
     }
     const state = computeConfidenceState(events);
@@ -451,6 +590,266 @@ async function evalCommand(options: EvalOptions): Promise<void> {
   } finally {
     index.close();
   }
+}
+
+async function lintCommand(): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const report = buildLintReport(vaultDir);
+  printLintReport(report);
+  if (
+    report.brokenWikiLinks.length > 0 ||
+    report.supersessionCycles.length > 0
+  ) {
+    process.exitCode = 1;
+  }
+}
+
+function buildLintReport(vaultDir: string): LintReport {
+  const pages = scanVaultPages(vaultDir);
+  const lookup = pageLookup(pages.map((item) => item.page));
+  const confidence = rankConfidenceStateForResults(
+    vaultDir,
+    pages.map((item) => ({
+      page_id: item.page.id,
+      path: item.page.path,
+      title: item.page.title,
+      score: 0,
+      snippet: "",
+      citation: { line_start: 1, line_end: 1 },
+    })),
+  );
+
+  const lowConfidence: LintReport["lowConfidence"] = [];
+  const stale: LintReport["stale"] = [];
+  const brokenWikiLinks: LintReport["brokenWikiLinks"] = [];
+
+  for (const item of pages) {
+    const state = confidence.get(item.page.id);
+    if (state && state.score < 0.5) {
+      lowConfidence.push({ page: item.page, score: state.score });
+    }
+    if (state?.lastVerifiedAt && isOlderThanDays(state.lastVerifiedAt, 180)) {
+      stale.push({ page: item.page, lastVerifiedAt: state.lastVerifiedAt });
+    }
+    for (const target of extractWikiLinks(item.body)) {
+      if (!lookup.has(normalizeWikiTarget(target))) {
+        brokenWikiLinks.push({ page: item.page, target });
+      }
+    }
+  }
+
+  return {
+    lowConfidence,
+    stale,
+    brokenWikiLinks,
+    supersessionCycles: findSupersessionCycles(pages.map((item) => item.page)),
+  };
+}
+
+function printLintReport(report: LintReport): void {
+  console.log("Confidence issues:");
+  if (report.lowConfidence.length === 0 && report.stale.length === 0) {
+    console.log("  none");
+  }
+  for (const issue of report.lowConfidence) {
+    console.log(
+      `  warn low-confidence ${issue.page.id} ${issue.page.path} score=${issue.score.toFixed(4)}`,
+    );
+  }
+  for (const issue of report.stale) {
+    console.log(
+      `  warn stale ${issue.page.id} ${issue.page.path} last_verified_at=${issue.lastVerifiedAt}`,
+    );
+  }
+
+  console.log("Broken wiki links:");
+  if (report.brokenWikiLinks.length === 0) {
+    console.log("  none");
+  }
+  for (const issue of report.brokenWikiLinks) {
+    console.log(`  error ${issue.page.id} -> [[${issue.target}]]`);
+  }
+
+  console.log("Supersession cycles:");
+  if (report.supersessionCycles.length === 0) {
+    console.log("  none");
+  }
+  for (const cycle of report.supersessionCycles) {
+    console.log(`  error ${cycle.join(" -> ")}`);
+  }
+}
+
+async function decayCommand(options: DecayOptions): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  if (!options.run) {
+    throw new Error("Use --run to write decay checkpoints");
+  }
+  const now = options.now ? new Date(options.now) : new Date();
+  if (!Number.isFinite(now.getTime())) {
+    throw new Error(`Invalid --now timestamp: ${options.now}`);
+  }
+
+  const written = new Set<string>();
+  for (const item of scanVaultPages(vaultDir)) {
+    const events = loadConfidenceEvents(vaultDir, item.page.path, item.page.id);
+    if (events.length === 0) {
+      continue;
+    }
+    const before = computeConfidenceState(events, {
+      now: new Date(events.at(-1)?.timestamp ?? now.toISOString()),
+      pageType:
+        typeof item.page.frontmatter.type === "string"
+          ? item.page.frontmatter.type
+          : undefined,
+    });
+    const after = computeConfidenceState(events, {
+      now,
+      pageType:
+        typeof item.page.frontmatter.type === "string"
+          ? item.page.frontmatter.type
+          : undefined,
+    });
+    const periodicDue = shouldWriteDecayCheckpoint(events, now);
+    const thresholdCrossed = crossedConfidenceThreshold(
+      before.score,
+      after.score,
+    );
+    if (!periodicDue && !thresholdCrossed) {
+      continue;
+    }
+    const lastEventAt = events.at(-1)?.timestamp ?? now.toISOString();
+    const event = parseConfidenceEvent({
+      id: stableId("evt", `${item.page.id}:decay:${now.toISOString()}`),
+      kind: "decay_checkpoint",
+      pageId: item.page.id,
+      timestamp: now.toISOString(),
+      actor: "system",
+      actorId: "akb-decay",
+      daysSinceLastEvent: daysBetweenIso(lastEventAt, now),
+      appliedDecay: Math.max(0, before.score - after.score),
+    });
+    written.add(
+      toPosix(
+        relative(
+          vaultDir,
+          appendConfidenceEvent(vaultDir, item.page.path, event),
+        ),
+      ),
+    );
+  }
+
+  if (written.size > 0 && options.commit !== false) {
+    await commitFiles(vaultDir, [...written], "record confidence decay");
+  }
+  console.log(
+    `Wrote ${written.size} decay checkpoint${written.size === 1 ? "" : "s"}.`,
+  );
+}
+
+async function webhookCiSuccessCommand(
+  options: WebhookCiSuccessOptions,
+): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const actorId = options.actorId ?? "ci:github-actions";
+  const evidence = options.evidence ?? options.prNumber;
+  if (!evidence) {
+    throw new Error("Runtime signals require --evidence or --pr-number");
+  }
+  const changedFiles = new Set(options.changedFile ?? []);
+  if (options.changedFilesList) {
+    for (const line of readFileSync(
+      resolve(vaultDir, options.changedFilesList),
+      "utf8",
+    ).split(/\r?\n/)) {
+      if (line.trim()) {
+        changedFiles.add(line.trim());
+      }
+    }
+  }
+  if (changedFiles.size === 0) {
+    throw new Error("Runtime signals require at least one changed file");
+  }
+
+  const targets = scanVaultPages(vaultDir).filter((item) =>
+    toStringArray(item.page.frontmatter.references).some((reference) =>
+      changedFiles.has(reference),
+    ),
+  );
+  if (targets.length === 0) {
+    throw new Error("Runtime signal did not match any pages");
+  }
+  const written = writeRuntimeVerifiedEvents(vaultDir, targets, {
+    actorId,
+    evidence,
+    signalKind: "ci_success",
+  });
+  if (written.length > 0 && options.commit !== false) {
+    await commitFiles(vaultDir, written, "record runtime verification");
+  }
+  console.log(
+    `Recorded ${written.length} runtime verification${written.length === 1 ? "" : "s"}.`,
+  );
+}
+
+async function watchCommand(options: WatchOptions): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  if (!options.once) {
+    throw new Error("This minimal watcher supports --once");
+  }
+  const signalDir = join(vaultDir, ".akb", "runtime-signals");
+  if (!existsSync(signalDir)) {
+    console.log("Processed 0 runtime signals.");
+    return;
+  }
+
+  let processed = 0;
+  const written = new Set<string>();
+  for (const file of readdirSync(signalDir).sort()) {
+    if (!file.endsWith(".json")) {
+      continue;
+    }
+    const path = join(signalDir, file);
+    const signal = JSON.parse(readFileSync(path, "utf8")) as {
+      kind?: string;
+      page_ids?: string[];
+      actor_id?: string;
+      evidence?: string;
+    };
+    if (!signal.actor_id || !signal.evidence) {
+      throw new Error(`Runtime signal ${file} requires actor_id and evidence`);
+    }
+    if (!Array.isArray(signal.page_ids) || signal.page_ids.length === 0) {
+      throw new Error(`Runtime signal ${file} requires page_ids`);
+    }
+    const targets = signal.page_ids.map((pageId) => {
+      const pageFile = resolvePageFile(vaultDir, pageId);
+      if (!pageFile) {
+        throw new Error(
+          `Runtime signal ${file} references unknown page ${pageId}`,
+        );
+      }
+      return pageFromFile(vaultDir, pageFile);
+    });
+    for (const writtenPath of writeRuntimeVerifiedEvents(vaultDir, targets, {
+      actorId: signal.actor_id,
+      evidence: signal.evidence,
+      signalKind: signal.kind ?? "runtime_signal",
+    })) {
+      written.add(writtenPath);
+    }
+    rmSync(path);
+    processed += 1;
+  }
+  if (written.size > 0 && options.commit !== false) {
+    await commitFiles(vaultDir, [...written], "record runtime signals");
+  }
+  console.log(
+    `Processed ${processed} runtime signal${processed === 1 ? "" : "s"}.`,
+  );
 }
 
 async function projectionRebuildCommand(
@@ -773,6 +1172,199 @@ async function confidenceShowCommand(
   console.log(`  last event: ${state.lastEventAt}`);
 }
 
+async function compileCommand(options: CompileOptions): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const sourceRefs = options.allPending
+    ? pendingCompileSources(vaultDir)
+    : options.source
+      ? [options.source]
+      : [];
+  if (sourceRefs.length === 0) {
+    throw new Error("Choose --source <page> or --all-pending");
+  }
+
+  for (const sourceRef of sourceRefs) {
+    const patch = buildCompilePatch(vaultDir, sourceRef, options.model);
+    if (options.dryRun) {
+      console.log(
+        `Dry run ${patch.source?.pageId ?? sourceRef}: ${patch.changes?.length ?? 0} change${patch.changes?.length === 1 ? "" : "s"}.`,
+      );
+      continue;
+    }
+    if (patchExists(vaultDir, patch.id)) {
+      throw new Error(`Patch already exists: ${patch.id}`);
+    }
+    const patchPath = patchPathFor(vaultDir, patch.id, "proposed");
+    mkdirSync(dirname(patchPath), { recursive: true });
+    writeFileSync(patchPath, stringifyYaml(patch));
+    console.log(`Compiled ${patch.source?.pageId ?? sourceRef} -> ${patch.id}`);
+    for (const change of patch.changes ?? []) {
+      console.log(`  - ${change.type} ${change.pageId} (${change.relation})`);
+    }
+  }
+}
+
+function compileStatusCommand(): void {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const proposed = listPatchFiles(vaultDir, "proposed").length;
+  const applied = listPatchFiles(vaultDir, "applied").length;
+  const rejected = listPatchFiles(vaultDir, "rejected").length;
+  const compiled = proposed + applied + rejected;
+  console.log("Sources:");
+  console.log(`  compiled:        ${compiled}`);
+  console.log(`  pending:         ${pendingCompileSources(vaultDir).length}`);
+  console.log("  degraded:        0");
+  console.log("  compile-disabled: 0");
+}
+
+function compileReplayCommand(patchId: string): void {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const patch = readPatch(vaultDir, patchId);
+  if (!patch.source?.pageId) {
+    throw new Error(`Patch has no source page id: ${patchId}`);
+  }
+  const replayed = buildCompilePatch(
+    vaultDir,
+    patch.source.pageId,
+    String(patch.compileMeta?.modelId ?? "heuristic-v0.1"),
+  );
+  if (normalizedCompilePatch(patch) !== normalizedCompilePatch(replayed)) {
+    throw new Error(`Replay differed for ${patch.id}`);
+  }
+  console.log(`Replay matched ${patch.id}.`);
+}
+
+function patchListCommand(): void {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  for (const status of ["proposed", "applied", "rejected"] as const) {
+    for (const file of listPatchFiles(vaultDir, status)) {
+      const patch = parsePatchDocument(parseYaml(readFileSync(file, "utf8")));
+      console.log(`${patch.id} ${status}`);
+    }
+  }
+}
+
+function patchShowCommand(patchId: string): void {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const patch = readPatch(vaultDir, patchId);
+  console.log(stringifyYaml(patch).trimEnd());
+}
+
+async function patchApplyCommand(
+  patchId: string,
+  options: PatchApplyOptions,
+): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const patch = readPatch(vaultDir, patchId, "proposed");
+  validatePatchForApply(vaultDir, patch);
+  const written = new Set<string>();
+  for (const change of patch.changes ?? []) {
+    if (change.type === "modify") {
+      const file = resolvePageFile(vaultDir, change.pageId);
+      if (!file) {
+        throw new Error(`Patch target page not found: ${change.pageId}`);
+      }
+      const parsed = pageFromFile(vaultDir, file);
+      writeMarkdownFile(
+        file,
+        parsed.page.frontmatter,
+        `${parsed.body.trimEnd()}\n\n${change.content.trimEnd()}`,
+      );
+      written.add(parsed.page.path);
+      appendPatchConfidenceEvent(vaultDir, parsed.page, change, patch);
+      written.add(
+        toPosix(
+          relative(
+            vaultDir,
+            ledgerPathForPageLocal(vaultDir, parsed.page.path, parsed.page.id),
+          ),
+        ),
+      );
+      const updated = pageFromFile(vaultDir, file);
+      const index = new SearchIndex({
+        dbPath: join(vaultDir, ".akb", "index.db"),
+      });
+      try {
+        index.upsertPage(updated.page, updated.body, {
+          bodyStartLine: updated.bodyStartLine,
+        });
+      } finally {
+        index.close();
+      }
+    } else if (change.type === "confidence_only") {
+      const file = resolvePageFile(vaultDir, change.pageId);
+      if (!file) {
+        throw new Error(`Patch target page not found: ${change.pageId}`);
+      }
+      const { page } = pageFromFile(vaultDir, file);
+      appendPatchConfidenceEvent(vaultDir, page, change, patch);
+      written.add(
+        toPosix(
+          relative(
+            vaultDir,
+            ledgerPathForPageLocal(vaultDir, page.path, page.id),
+          ),
+        ),
+      );
+    }
+  }
+  patch.status = "applied";
+  const proposedPath = patchPathFor(vaultDir, patch.id, "proposed");
+  const appliedPath = patchPathFor(vaultDir, patch.id, "applied");
+  mkdirSync(dirname(appliedPath), { recursive: true });
+  writeFileSync(proposedPath, stringifyYaml(patch));
+  renameSync(proposedPath, appliedPath);
+  written.add(toPosix(relative(vaultDir, appliedPath)));
+  if (options.commit !== false) {
+    await commitFiles(vaultDir, [...written], `apply ${patch.id}`);
+  }
+  console.log(`Applied ${patch.id}.`);
+}
+
+function lineageCommand(
+  target: string | undefined,
+  options: { reverse?: string },
+): void {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const source = options.reverse;
+  const patches = loadAllPatches(vaultDir);
+  if (source) {
+    console.log(`${source} influenced:`);
+    for (const patch of patches) {
+      if (
+        patch.source?.pageId !== source &&
+        patch.source?.sourceId !== source
+      ) {
+        continue;
+      }
+      for (const change of patch.changes ?? []) {
+        console.log(`  ${change.pageId} (${change.relation}) via ${patch.id}`);
+      }
+    }
+    return;
+  }
+  if (!target) {
+    throw new Error("Choose a page/chunk or --reverse <source>");
+  }
+  console.log(`${target}:`);
+  for (const patch of patches) {
+    for (const change of patch.changes ?? []) {
+      if (change.pageId === target || `${change.pageId}:c0` === target) {
+        console.log(
+          `  derived from ${patch.source?.pageId ?? patch.source?.sourceId ?? "unknown"} via ${patch.id}`,
+        );
+      }
+    }
+  }
+}
+
 function assertVault(dir: string): void {
   if (
     !existsSync(join(dir, ".akb", "config.yaml")) ||
@@ -869,6 +1461,93 @@ function scanVaultPages(
   return markdownFiles(join(vaultDir, "pages")).map((file) =>
     pageFromFile(vaultDir, file),
   );
+}
+
+function pageLookup(pages: Page[]): Set<string> {
+  const lookup = new Set<string>();
+  for (const page of pages) {
+    for (const value of [
+      page.id,
+      page.title,
+      page.path,
+      page.path.replace(/^pages\//, ""),
+      page.path.replace(/^pages\//, "").replace(/\.md$/, ""),
+      basename(page.path, ".md"),
+      ...toStringArray(page.frontmatter.aliases),
+    ]) {
+      lookup.add(normalizeWikiTarget(value));
+    }
+  }
+  return lookup;
+}
+
+function extractWikiLinks(body: string): string[] {
+  const links: string[] = [];
+  const pattern = /\[\[([^\]]+)]]/g;
+  for (const match of body.matchAll(pattern)) {
+    const target = match[1]?.split("|")[0]?.split("#")[0]?.trim();
+    if (target) {
+      links.push(target);
+    }
+  }
+  return links;
+}
+
+function normalizeWikiTarget(value: string): string {
+  return value.trim().replace(/\\/g, "/").replace(/\.md$/, "").toLowerCase();
+}
+
+function toStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function findSupersessionCycles(pages: Page[]): PageId[][] {
+  const edges = new Map<PageId, PageId>();
+  const pageIds = new Set(pages.map((page) => page.id));
+  for (const page of pages) {
+    const supersedes = page.frontmatter.supersedes;
+    if (typeof supersedes === "string" && pageIds.has(supersedes as PageId)) {
+      edges.set(page.id, supersedes as PageId);
+    }
+  }
+
+  const cycles: PageId[][] = [];
+  const seen = new Set<PageId>();
+  for (const start of edges.keys()) {
+    if (seen.has(start)) {
+      continue;
+    }
+    const path: PageId[] = [];
+    const indexByPage = new Map<PageId, number>();
+    let current: PageId | undefined = start;
+    while (current) {
+      if (indexByPage.has(current)) {
+        const cycle = path.slice(indexByPage.get(current));
+        cycles.push([...cycle, current]);
+        break;
+      }
+      if (seen.has(current)) {
+        break;
+      }
+      indexByPage.set(current, path.length);
+      path.push(current);
+      current = edges.get(current);
+    }
+    for (const pageId of path) {
+      seen.add(pageId);
+    }
+  }
+  return cycles;
+}
+
+function isOlderThanDays(timestamp: string, days: number): boolean {
+  const time = new Date(timestamp).getTime();
+  if (!Number.isFinite(time)) {
+    return false;
+  }
+  return Date.now() - time > days * 24 * 60 * 60 * 1000;
 }
 
 function pageFromFile(
@@ -1014,6 +1693,490 @@ function stableId(prefix: "evt" | "src", input: string): string {
   }
   const suffix = Math.abs(hash).toString(36).padStart(12, "0").slice(0, 12);
   return `${prefix}_${suffix}`;
+}
+
+function shouldWriteDecayCheckpoint(
+  events: ReturnType<typeof loadConfidenceEvents>,
+  now: Date,
+): boolean {
+  const lastDecay = [...events]
+    .reverse()
+    .find((event) => event.kind === "decay_checkpoint");
+  if (!lastDecay) {
+    return true;
+  }
+  return daysBetweenIso(lastDecay.timestamp, now) >= 14;
+}
+
+function crossedConfidenceThreshold(before: number, after: number): boolean {
+  return [0.7, 0.5, 0.3].some(
+    (threshold) => before >= threshold && after < threshold,
+  );
+}
+
+function daysBetweenIso(timestamp: string, now: Date): number {
+  const time = new Date(timestamp).getTime();
+  if (!Number.isFinite(time)) {
+    return 0;
+  }
+  return Math.max(0, (now.getTime() - time) / (24 * 60 * 60 * 1000));
+}
+
+function writeRuntimeVerifiedEvents(
+  vaultDir: string,
+  targets: Array<{ page: Page; body: string; bodyStartLine: number }>,
+  opts: { actorId: string; evidence: string; signalKind: string },
+): string[] {
+  const timestamp = new Date().toISOString();
+  const written: string[] = [];
+  for (const target of targets) {
+    const event = parseConfidenceEvent({
+      id: stableId(
+        "evt",
+        `${target.page.id}:${opts.signalKind}:${opts.actorId}:${opts.evidence}:${timestamp}`,
+      ),
+      kind: "verified",
+      pageId: target.page.id,
+      timestamp,
+      actor: "system",
+      actorId: opts.actorId,
+      verifierType: "agent",
+      verifierId: opts.actorId,
+      reason: `${opts.signalKind}: ${opts.evidence}`,
+    });
+    written.push(
+      toPosix(
+        relative(
+          vaultDir,
+          appendConfidenceEvent(vaultDir, target.page.path, event),
+        ),
+      ),
+    );
+  }
+  return written;
+}
+
+function pendingCompileSources(vaultDir: string): string[] {
+  const patchedSources = new Set(
+    loadAllPatches(vaultDir)
+      .map((patch) => patch.source?.pageId)
+      .filter((value): value is string => typeof value === "string"),
+  );
+  return scanVaultPages(vaultDir)
+    .map((item) => item.page.id)
+    .filter((pageId) => !patchedSources.has(pageId));
+}
+
+function buildCompilePatch(
+  vaultDir: string,
+  sourceRef: string,
+  model = "heuristic-v0.1",
+): PatchDocument {
+  const sourceFile = resolvePageFile(vaultDir, sourceRef);
+  if (!sourceFile) {
+    throw new Error(`Compile source not found: ${sourceRef}`);
+  }
+  const source = pageFromFile(vaultDir, sourceFile);
+  const candidates = scanVaultPages(vaultDir)
+    .filter((item) => item.page.id !== source.page.id)
+    .map((item) => ({
+      item,
+      score: lexicalRelatedness(source, item),
+    }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score);
+  const target = candidates[0]?.item;
+  const patchId = `patch_${source.page.id}`;
+  const timestamp = new Date().toISOString();
+  const changes: PatchChange[] = [];
+  if (target) {
+    changes.push({
+      type: "modify",
+      pageId: target.page.id,
+      operation: "append_section",
+      relation: "extend",
+      classifyConfidence: 0.7,
+      reasoning: `${source.page.title} shares terms with ${target.page.title}`,
+      content: [
+        `## ${source.page.title} (compiled)`,
+        "",
+        `<!-- akb:derived source=${source.page.id}:c0 method=extend patch=${patchId} -->`,
+        source.body.trim(),
+      ].join("\n"),
+      confidenceImpact: {
+        kind: "source_added",
+        sourceWeight: 0.8,
+      },
+    });
+  } else {
+    changes.push({
+      type: "confidence_only",
+      pageId: source.page.id,
+      relation: "duplicate",
+      confidenceImpact: {
+        kind: "source_added",
+        sourceWeight: 0.7,
+      },
+    });
+  }
+  return {
+    id: patchId,
+    status: "proposed",
+    source: {
+      sourceId: stableId("src", source.page.id),
+      pageId: source.page.id,
+      ingestPath: source.page.path,
+    },
+    compileMeta: {
+      provider: "heuristic",
+      modelId: model,
+      promptHashes: {
+        segment: stablePromptHash("segment/heuristic-v0.1"),
+        classify: stablePromptHash("classify/heuristic-v0.1"),
+        synthesize: stablePromptHash("synthesize/heuristic-v0.1"),
+      },
+      pipelineVersion: "compile/0.1",
+      segmentCount: 1,
+      llmCallCount: 0,
+      elapsedMs: 0,
+      degraded: !process.env.DEEPSEEK_API_KEY,
+      createdAt: timestamp,
+    },
+    changes,
+    lineage: {
+      units: [
+        {
+          id: `${source.page.id}:su0`,
+          sourcePageId: source.page.id,
+          sourceChunkIds: [`${source.page.id}:c0`],
+          kind: "claim_cluster",
+        },
+      ],
+      derivedChunks: target
+        ? [
+            {
+              chunkId: `${target.page.id}:compiled:${source.page.id}`,
+              derivedFrom: {
+                sourceUnitIds: [`${source.page.id}:su0`],
+                sourceChunkIds: [`${source.page.id}:c0`],
+                method: "extend",
+                promptHash: stablePromptHash("synthesize/heuristic-v0.1"),
+                modelId: model,
+              },
+            },
+          ]
+        : [],
+    },
+  };
+}
+
+function lexicalRelatedness(
+  source: { page: Page; body: string },
+  target: { page: Page; body: string },
+): number {
+  const sourceTerms = termsForPage(source.page, source.body);
+  const targetTerms = termsForPage(target.page, target.body);
+  let score = 0;
+  for (const term of sourceTerms) {
+    if (targetTerms.has(term)) {
+      score += 1;
+    }
+  }
+  return score;
+}
+
+function termsForPage(page: Page, body: string): Set<string> {
+  return new Set(
+    [
+      page.title,
+      ...toStringArray(page.frontmatter.aliases),
+      ...toStringArray(page.frontmatter.tags),
+      body,
+    ]
+      .join(" ")
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((term) => term.length > 3),
+  );
+}
+
+function stablePromptHash(input: string): string {
+  return `sha256:${stableId("src", input).slice("src_".length)}`;
+}
+
+function patchPathFor(
+  vaultDir: string,
+  patchId: string,
+  status: "proposed" | "applied" | "rejected",
+): string {
+  if (status === "proposed") {
+    return join(vaultDir, ".akb", "patches", `${patchId}.yaml`);
+  }
+  return join(vaultDir, ".akb", "patches", status, `${patchId}.yaml`);
+}
+
+function listPatchFiles(
+  vaultDir: string,
+  status: "proposed" | "applied" | "rejected",
+): string[] {
+  const dir =
+    status === "proposed"
+      ? join(vaultDir, ".akb", "patches")
+      : join(vaultDir, ".akb", "patches", status);
+  if (!existsSync(dir)) {
+    return [];
+  }
+  return readdirSync(dir)
+    .filter((file) => file.endsWith(".yaml"))
+    .map((file) => join(dir, file))
+    .filter((file) => statSync(file).isFile())
+    .sort();
+}
+
+function readPatch(
+  vaultDir: string,
+  patchId: string,
+  status?: "proposed" | "applied" | "rejected",
+): PatchDocument {
+  const statuses = status
+    ? [status]
+    : (["proposed", "applied", "rejected"] as const);
+  for (const candidateStatus of statuses) {
+    const path = patchPathFor(vaultDir, patchId, candidateStatus);
+    if (existsSync(path)) {
+      return parsePatchDocument(parseYaml(readFileSync(path, "utf8")));
+    }
+  }
+  throw new Error(`Patch not found: ${patchId}`);
+}
+
+function loadAllPatches(vaultDir: string): PatchDocument[] {
+  return (["proposed", "applied", "rejected"] as const).flatMap((status) =>
+    listPatchFiles(vaultDir, status).map((file) =>
+      parsePatchDocument(parseYaml(readFileSync(file, "utf8"))),
+    ),
+  );
+}
+
+function patchExists(vaultDir: string, patchId: string): boolean {
+  return (["proposed", "applied", "rejected"] as const).some((status) =>
+    existsSync(patchPathFor(vaultDir, patchId, status)),
+  );
+}
+
+function parsePatchDocument(value: unknown): PatchDocument {
+  if (!isRecord(value)) {
+    throw new Error("Invalid patch: expected YAML object");
+  }
+  if (typeof value.id !== "string" || !/^patch_[a-z0-9_]+$/i.test(value.id)) {
+    throw new Error("Invalid patch: invalid id");
+  }
+  if (
+    value.status !== "proposed" &&
+    value.status !== "applied" &&
+    value.status !== "rejected"
+  ) {
+    throw new Error("Invalid patch: invalid status");
+  }
+  if (value.source !== undefined && !isRecord(value.source)) {
+    throw new Error("Invalid patch: source must be an object");
+  }
+  if (
+    isRecord(value.source) &&
+    typeof value.source.pageId === "string" &&
+    !isValidPageId(value.source.pageId)
+  ) {
+    throw new Error("Invalid patch: invalid source pageId");
+  }
+  if (!Array.isArray(value.changes)) {
+    throw new Error("Invalid patch: changes must be an array");
+  }
+  for (const change of value.changes) {
+    parsePatchChange(change);
+  }
+  return value as unknown as PatchDocument;
+}
+
+function parsePatchChange(change: unknown): PatchChange {
+  if (!isRecord(change)) {
+    throw new Error("Invalid patch: change must be an object");
+  }
+  if (!isValidPageId(change.pageId)) {
+    throw new Error("Invalid patch: invalid change pageId");
+  }
+  if (change.type === "modify") {
+    if (change.operation !== "append_section") {
+      throw new Error("Invalid patch: unsupported modify operation");
+    }
+    if (typeof change.relation !== "string" || change.relation.length === 0) {
+      throw new Error("Invalid patch: missing relation");
+    }
+    if (typeof change.content !== "string") {
+      throw new Error("Invalid patch: modify content must be a string");
+    }
+    if (
+      typeof change.classifyConfidence !== "number" ||
+      change.classifyConfidence < 0 ||
+      change.classifyConfidence > 1
+    ) {
+      throw new Error("Invalid patch: classifyConfidence must be 0-1");
+    }
+    if (typeof change.reasoning !== "string") {
+      throw new Error("Invalid patch: reasoning must be a string");
+    }
+    return change as PatchChange;
+  }
+  if (change.type === "confidence_only") {
+    if (change.relation !== "duplicate") {
+      throw new Error(
+        "Invalid patch: confidence_only relation must be duplicate",
+      );
+    }
+    if (!isRecord(change.confidenceImpact)) {
+      throw new Error("Invalid patch: confidence_only requires impact");
+    }
+    return change as PatchChange;
+  }
+  throw new Error("Invalid patch: unsupported change type");
+}
+
+function validatePatchForApply(vaultDir: string, patch: PatchDocument): void {
+  if (patch.status !== "proposed") {
+    throw new Error(`Invalid patch: ${patch.id} is not proposed`);
+  }
+  for (const change of patch.changes ?? []) {
+    if (!resolvePageFile(vaultDir, change.pageId)) {
+      throw new Error(`Invalid patch: target page not found ${change.pageId}`);
+    }
+  }
+  for (const unit of patch.lineage?.units ?? []) {
+    if (unit.sourcePageId && !isValidPageId(unit.sourcePageId)) {
+      throw new Error("Invalid patch: invalid lineage sourcePageId");
+    }
+    for (const chunkId of unit.sourceChunkIds ?? []) {
+      const pageId = chunkId.split(":")[0];
+      if (!isValidPageId(pageId) || !resolvePageFile(vaultDir, pageId)) {
+        throw new Error(`Invalid patch: unresolved lineage source ${chunkId}`);
+      }
+    }
+  }
+}
+
+function normalizedCompilePatch(patch: PatchDocument): string {
+  return JSON.stringify({
+    source: patch.source,
+    compileMeta: {
+      ...patch.compileMeta,
+      createdAt: undefined,
+      elapsedMs: undefined,
+    },
+    changes: patch.changes,
+    lineage: patch.lineage,
+  });
+}
+
+function appendPatchConfidenceEvent(
+  vaultDir: string,
+  page: Page,
+  change: PatchChange,
+  patch: PatchDocument,
+): void {
+  const impact = change.confidenceImpact ?? {};
+  const timestamp = new Date().toISOString();
+  const sourceId =
+    typeof patch.source?.sourceId === "string"
+      ? patch.source.sourceId
+      : stableId("src", patch.id);
+  if (impact.kind === "source_added" || change.relation === "duplicate") {
+    appendConfidenceEvent(
+      vaultDir,
+      page.path,
+      parseConfidenceEvent({
+        id: stableId("evt", `${patch.id}:${page.id}:source_added:${timestamp}`),
+        kind: "source_added",
+        pageId: page.id,
+        timestamp,
+        actor: "system",
+        actorId: "akb-patch",
+        sourceId,
+        sourceWeight:
+          typeof impact.sourceWeight === "number" ? impact.sourceWeight : 0.7,
+      }),
+    );
+  } else if (impact.kind === "contradicted_by") {
+    appendConfidenceEvent(
+      vaultDir,
+      page.path,
+      parseConfidenceEvent({
+        id: stableId(
+          "evt",
+          `${patch.id}:${page.id}:contradicted_by:${timestamp}`,
+        ),
+        kind: "contradicted_by",
+        pageId: page.id,
+        timestamp,
+        actor: "system",
+        actorId: "akb-patch",
+        bySourceId: sourceId,
+        severity: impact.severity === "major" ? "major" : "minor",
+      }),
+    );
+  } else if (
+    impact.kind === "superseded_by" &&
+    isValidPageId(impact.supersederPageId)
+  ) {
+    appendConfidenceEvent(
+      vaultDir,
+      page.path,
+      parseConfidenceEvent({
+        id: stableId(
+          "evt",
+          `${patch.id}:${page.id}:superseded_by:${timestamp}`,
+        ),
+        kind: "superseded_by",
+        pageId: page.id,
+        timestamp,
+        actor: "system",
+        actorId: "akb-patch",
+        supersederPageId: impact.supersederPageId,
+        reason: typeof impact.reason === "string" ? impact.reason : undefined,
+      }),
+    );
+  } else if (
+    impact.kind === "supersedes" &&
+    isValidPageId(impact.supersededPageId)
+  ) {
+    appendConfidenceEvent(
+      vaultDir,
+      page.path,
+      parseConfidenceEvent({
+        id: stableId("evt", `${patch.id}:${page.id}:supersedes:${timestamp}`),
+        kind: "supersedes",
+        pageId: page.id,
+        timestamp,
+        actor: "system",
+        actorId: "akb-patch",
+        supersededPageId: impact.supersededPageId,
+        reason: typeof impact.reason === "string" ? impact.reason : undefined,
+      }),
+    );
+  }
+}
+
+function ledgerPathForPageLocal(
+  vaultDir: string,
+  pagePath: string,
+  pageId: PageId | string,
+): string {
+  return join(vaultDir, dirname(pagePath), `.${pageId}.ledger.jsonl`);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isValidPageId(value: unknown): value is PageId {
+  return PageIdSchema.safeParse(value).success;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {

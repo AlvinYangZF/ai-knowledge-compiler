@@ -11,7 +11,19 @@ export const PageFrontmatterSchema = z
   .object({
     id: PageIdSchema,
     title: z.string().min(1),
-    type: z.enum(["note", "concept", "design"]).optional(),
+    type: z
+      .enum([
+        "note",
+        "concept",
+        "design",
+        "decision",
+        "architecture",
+        "module",
+        "runbook",
+        "meeting",
+        "api",
+      ])
+      .optional(),
     tags: z.array(z.string()).default([]),
     aliases: z.array(z.string()).default([]),
     created_at: z.string().optional(),

@@ -175,7 +175,7 @@ Claude Code MCP 配置示例：
 
 ### v0.1 — 知识不腐烂 + 知识自己长在一起（~3-4 个月）
 
-- **Confidence Ledger**（~21 天）—— append-only 事件流、时间衰减、来源权重、supersession 链、confidence-aware retrieval、runtime verification。当前已实现 JSONL ledger、基础 score materialization、SQLite confidence projection、`akb projection rebuild --confidence`、verify/supersede CLI，以及 `packages/ranker` 对 CLI/MCP 搜索结果做 confidence-aware rerank。详见 [docs/v0.1-confidence-ledger.md](docs/v0.1-confidence-ledger.md)
+- **Confidence Ledger**（~21 天）—— append-only 事件流、时间衰减、来源权重、supersession 链、confidence-aware retrieval、runtime verification。当前已实现 JSONL ledger、基础 score materialization、SQLite confidence projection、`akb projection rebuild --confidence`、verify/supersede/lint CLI，以及 `packages/ranker` 对 CLI/MCP 搜索结果做 confidence-aware rerank。详见 [docs/v0.1-confidence-ledger.md](docs/v0.1-confidence-ledger.md)
 - **LLM Compile**（~27 天）—— 5 阶段 pipeline、关系判定、patch-as-proposal、chunk lineage、replay。详见 [docs/v0.1-llm-compile.md](docs/v0.1-llm-compile.md)
 - Patch workflow、vector search、hybrid retrieval、`akb ask`
 
