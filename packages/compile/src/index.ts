@@ -92,7 +92,7 @@ export type CompilePatchChange =
   | {
       type: "modify";
       pageId: string;
-      operation: "append_section" | "replace_section";
+      operation: "append_section" | "replace_section" | "insert_after_section";
       targetSection?: string;
       relation: "extend" | "merge" | "contradict";
       classifyConfidence: number;
@@ -755,7 +755,8 @@ function parsePatchChanges(
     if (change.type === "modify") {
       if (
         change.operation !== "append_section" &&
-        change.operation !== "replace_section"
+        change.operation !== "replace_section" &&
+        change.operation !== "insert_after_section"
       ) {
         return [];
       }
@@ -767,12 +768,18 @@ function parsePatchChanges(
         typeof change.targetSection === "string" &&
         change.targetSection.trim().length > 0
           ? change.targetSection
-          : undefined;
+          : change.operation === "insert_after_section" &&
+              typeof change.targetSection === "string" &&
+              change.targetSection.trim().length > 0
+            ? change.targetSection
+            : undefined;
       const content = typeof change.content === "string" ? change.content : "";
       if (
         !pageId ||
         !isLineageMarkedContent(content) ||
-        (change.operation === "replace_section" && !targetSection)
+        ((change.operation === "replace_section" ||
+          change.operation === "insert_after_section") &&
+          !targetSection)
       ) {
         return [];
       }
@@ -783,7 +790,9 @@ function parsePatchChanges(
           operation:
             change.operation === "replace_section"
               ? "replace_section"
-              : "append_section",
+              : change.operation === "insert_after_section"
+                ? "insert_after_section"
+                : "append_section",
           targetSection,
           relation:
             change.relation === "merge" ||
@@ -915,7 +924,11 @@ function targetChunkIdForChange(
   change: Extract<CompilePatchChange, { type: "modify" }>,
   targetChunks: Array<{ id: string; text?: string }>,
 ): string {
-  if (change.operation === "replace_section" && change.targetSection) {
+  if (
+    (change.operation === "replace_section" ||
+      change.operation === "insert_after_section") &&
+    change.targetSection
+  ) {
     const target = normalizeHeading(change.targetSection);
     const chunk = targetChunks.find((item) =>
       item.text

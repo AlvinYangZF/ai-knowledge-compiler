@@ -2644,6 +2644,182 @@ describe("akb CLI", () => {
     expect(updated).not.toContain("Real old section.");
   });
 
+  it("applies contradiction patches after the target section without removing claims", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "insert-target.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_insertsec001",
+        "title: Insert Target",
+        "---",
+        "# Insert Target",
+        "",
+        "## Trigger Conditions",
+        "",
+        "Original claim remains.",
+        "",
+        "## Later Section",
+        "",
+        "Later content remains.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+    writeFileSync(
+      join(vault, ".akb", "patches", "patch_insert_after.yaml"),
+      [
+        "id: patch_insert_after",
+        "status: proposed",
+        "changes:",
+        "  - type: modify",
+        "    pageId: page_insertsec001",
+        "    operation: insert_after_section",
+        "    targetSection: Trigger Conditions",
+        "    relation: contradict",
+        "    classifyConfidence: 0.8",
+        "    reasoning: conflict after target",
+        "    content: |",
+        "      > [!contradiction] Conflicting source",
+        "      > <!-- akb:derived source=page_insertsec001:c1 method=contradict patch=patch_insert_after -->",
+        "      > New source disagrees.",
+        "    confidenceImpact:",
+        "      kind: contradicted_by",
+        "      severity: major",
+      ].join("\n"),
+    );
+
+    runCli(["patch", "apply", "patch_insert_after", "--no-commit"], vault);
+    const updated = readFileSync(
+      join(vault, "pages", "insert-target.md"),
+      "utf8",
+    );
+
+    expect(updated).toMatch(
+      /Original claim remains\.\n\n> \[!contradiction\] Conflicting source\n> <!-- akb:derived/,
+    );
+    expect(updated).toContain("## Later Section");
+    expect(updated).toContain("Later content remains.");
+    expect(
+      readFileSync(
+        join(vault, "pages", ".page_insertsec001.ledger.jsonl"),
+        "utf8",
+      ),
+    ).toContain('"kind":"contradicted_by"');
+  });
+
+  it("rejects invalid confidence impact before writing modify content", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "bad-impact.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_badimpact001",
+        "title: Bad Impact",
+        "---",
+        "# Bad Impact",
+        "",
+        "Original body.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+    const before = readFileSync(join(vault, "pages", "bad-impact.md"), "utf8");
+    writeFileSync(
+      join(vault, ".akb", "patches", "patch_bad_impact.yaml"),
+      [
+        "id: patch_bad_impact",
+        "status: proposed",
+        "changes:",
+        "  - type: modify",
+        "    pageId: page_badimpact001",
+        "    operation: append_section",
+        "    relation: extend",
+        "    classifyConfidence: 0.8",
+        "    reasoning: invalid confidence impact",
+        "    content: |",
+        "      ## Should Not Land",
+        "      <!-- akb:derived source=page_badimpact001:c0 method=extend patch=patch_bad_impact -->",
+        "      This must not apply.",
+        "    confidenceImpact:",
+        "      kind: source_added",
+        "      sourceWeight: 2",
+      ].join("\n"),
+    );
+
+    const failure = runCliFailure(
+      ["patch", "apply", "patch_bad_impact", "--no-commit"],
+      vault,
+    );
+
+    expect(failure).toContain("Invalid patch");
+    expect(readFileSync(join(vault, "pages", "bad-impact.md"), "utf8")).toBe(
+      before,
+    );
+  });
+
+  it("keeps mixed fence markers from exposing fake insertion targets", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "mixed-fence.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_mixedfence01",
+        "title: Mixed Fence",
+        "---",
+        "# Mixed Fence",
+        "",
+        "~~~",
+        "```",
+        "## Fake Target",
+        "```",
+        "~~~",
+        "",
+        "## Real Target",
+        "",
+        "Real body.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+    const before = readFileSync(join(vault, "pages", "mixed-fence.md"), "utf8");
+    writeFileSync(
+      join(vault, ".akb", "patches", "patch_mixed_fence.yaml"),
+      [
+        "id: patch_mixed_fence",
+        "status: proposed",
+        "changes:",
+        "  - type: modify",
+        "    pageId: page_mixedfence01",
+        "    operation: insert_after_section",
+        "    targetSection: Fake Target",
+        "    relation: contradict",
+        "    classifyConfidence: 0.8",
+        "    reasoning: fake target in fence",
+        "    content: |",
+        "      > [!contradiction] Should not land",
+        "      > <!-- akb:derived source=page_mixedfence01:c0 method=contradict patch=patch_mixed_fence -->",
+        "      > This must not apply.",
+        "    confidenceImpact:",
+        "      kind: contradicted_by",
+        "      severity: major",
+      ].join("\n"),
+    );
+
+    const failure = runCliFailure(
+      ["patch", "apply", "patch_mixed_fence", "--no-commit"],
+      vault,
+    );
+
+    expect(failure).toContain("target section not found");
+    expect(readFileSync(join(vault, "pages", "mixed-fence.md"), "utf8")).toBe(
+      before,
+    );
+  });
+
   it("rejects unsafe or inconsistent create patches before writing pages", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);

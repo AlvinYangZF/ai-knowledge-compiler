@@ -212,7 +212,7 @@ type PatchChange =
   | {
       type: "modify";
       pageId: string;
-      operation: "append_section" | "replace_section";
+      operation: "append_section" | "replace_section" | "insert_after_section";
       targetSection?: string;
       relation: string;
       classifyConfidence: number;
@@ -2547,7 +2547,13 @@ async function patchApplyCommand(
               String(change.targetSection ?? ""),
               change.content,
             )
-          : `${parsed.body.trimEnd()}\n\n${change.content.trimEnd()}`;
+          : change.operation === "insert_after_section"
+            ? insertAfterMarkdownSection(
+                parsed.body,
+                String(change.targetSection ?? ""),
+                change.content,
+              )
+            : `${parsed.body.trimEnd()}\n\n${change.content.trimEnd()}`;
       writeMarkdownFile(file, parsed.page.frontmatter, nextBody);
       written.add(parsed.page.path);
       appendPatchConfidenceEvent(vaultDir, parsed.page, change, patch);
@@ -3398,16 +3404,20 @@ function parsePatchChange(change: unknown): PatchChange {
     }
     if (
       change.operation !== "append_section" &&
-      change.operation !== "replace_section"
+      change.operation !== "replace_section" &&
+      change.operation !== "insert_after_section"
     ) {
       throw new Error("Invalid patch: unsupported modify operation");
     }
     if (
-      change.operation === "replace_section" &&
+      (change.operation === "replace_section" ||
+        change.operation === "insert_after_section") &&
       (typeof change.targetSection !== "string" ||
         change.targetSection.trim().length === 0)
     ) {
-      throw new Error("Invalid patch: replace_section requires targetSection");
+      throw new Error(
+        "Invalid patch: section operation requires targetSection",
+      );
     }
     if (typeof change.relation !== "string" || change.relation.length === 0) {
       throw new Error("Invalid patch: missing relation");
@@ -3558,9 +3568,11 @@ function validatePatchForApply(vaultDir: string, patch: PatchDocument): void {
       throw new Error(`Invalid patch: target page not found ${change.pageId}`);
     }
     if (change.type === "modify") {
+      validatePatchConfidenceImpact(change.confidenceImpact);
       const parsed = pageFromFile(vaultDir, targetFile);
       if (
-        change.operation === "replace_section" &&
+        (change.operation === "replace_section" ||
+          change.operation === "insert_after_section") &&
         findMarkdownSection(parsed.body, change.targetSection).start === -1
       ) {
         throw new Error(
@@ -3590,6 +3602,45 @@ function validatePatchForApply(vaultDir: string, patch: PatchDocument): void {
       }
     }
   }
+}
+
+function validatePatchConfidenceImpact(
+  impact: Record<string, unknown> | undefined,
+): void {
+  if (impact === undefined) {
+    return;
+  }
+  if (impact.kind === "source_added") {
+    if (
+      typeof impact.sourceWeight !== "number" ||
+      impact.sourceWeight < 0 ||
+      impact.sourceWeight > 1
+    ) {
+      throw new Error("Invalid patch: sourceWeight must be 0-1");
+    }
+    return;
+  }
+  if (impact.kind === "contradicted_by") {
+    if (impact.severity !== "minor" && impact.severity !== "major") {
+      throw new Error(
+        "Invalid patch: contradiction severity must be minor or major",
+      );
+    }
+    return;
+  }
+  if (impact.kind === "superseded_by") {
+    if (!isValidPageId(impact.supersederPageId)) {
+      throw new Error("Invalid patch: invalid supersederPageId");
+    }
+    return;
+  }
+  if (impact.kind === "supersedes") {
+    if (!isValidPageId(impact.supersededPageId)) {
+      throw new Error("Invalid patch: invalid supersededPageId");
+    }
+    return;
+  }
+  throw new Error("Invalid patch: unsupported confidenceImpact kind");
 }
 
 function extractDerivedSources(content: string): string[] {
@@ -3628,6 +3679,29 @@ function replaceMarkdownSection(
   ].join("\n");
 }
 
+function insertAfterMarkdownSection(
+  body: string,
+  targetSection: string,
+  insertion: string,
+): string {
+  const lines = body.split("\n");
+  const { start, end } = findMarkdownSection(body, targetSection);
+  if (start === -1) {
+    throw new Error(`Invalid patch: target section not found ${targetSection}`);
+  }
+  const before = lines.slice(0, end);
+  while (before.length > 0 && before.at(-1)?.trim() === "") {
+    before.pop();
+  }
+  return [
+    ...before,
+    "",
+    ...insertion.trimEnd().split("\n"),
+    "",
+    ...lines.slice(end),
+  ].join("\n");
+}
+
 function findMarkdownSection(
   body: string,
   targetSection: string | undefined,
@@ -3637,15 +3711,24 @@ function findMarkdownSection(
   }
   const lines = body.split("\n");
   const target = normalizeSectionTitle(targetSection);
-  let fenced = false;
+  let fenceMarker: "`" | "~" | undefined;
+  let fenceLength = 0;
   let start = -1;
   let level = 0;
   for (let index = 0; index < lines.length; index += 1) {
-    if (/^\s*(```|~~~)/.test(lines[index])) {
-      fenced = !fenced;
+    const fence = lines[index].match(/^\s*(```+|~~~+)/);
+    if (fence) {
+      const marker = fence[1][0] as "`" | "~";
+      if (!fenceMarker) {
+        fenceMarker = marker;
+        fenceLength = fence[1].length;
+      } else if (marker === fenceMarker && fence[1].length >= fenceLength) {
+        fenceMarker = undefined;
+        fenceLength = 0;
+      }
       continue;
     }
-    if (fenced) {
+    if (fenceMarker) {
       continue;
     }
     const match = lines[index].match(/^(#{1,6})\s+(.+?)\s*$/);
