@@ -2691,6 +2691,9 @@ const sourceTypeWeights: Record<string, number> = {
 
 function sourceWeightForPage(vaultDir: string, page: Page): number {
   const sourceType = page.frontmatter.source_type;
+  if (sourceType === "pdf") {
+    return pdfSourceWeight(page);
+  }
   if (sourceType && sourceType in sourceTypeWeights) {
     const baseWeight = sourceTypeWeights[sourceType];
     if (
@@ -2704,6 +2707,19 @@ function sourceWeightForPage(vaultDir: string, page: Page): number {
   return page.frontmatter.source_hash || page.frontmatter.source_path
     ? 0.8
     : 0.5;
+}
+
+function pdfSourceWeight(page: Page): number {
+  const subtype = page.frontmatter.source_subtype;
+  if (subtype === "academic") {
+    return sourceTypeWeights.pdf_academic;
+  }
+  if (subtype === "vendor" || subtype === "vendor_whitepaper") {
+    return sourceTypeWeights.pdf_vendor;
+  }
+  return page.frontmatter.source_hash || page.frontmatter.source_path
+    ? 0.8
+    : sourceTypeWeights.pdf_vendor;
 }
 
 function isAuthoritySource(

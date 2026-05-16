@@ -32,6 +32,7 @@ export const PageFrontmatterSchema = z
     source_path: z.string().optional(),
     source_hash: z.string().optional(),
     source_type: z.string().min(1).optional(),
+    source_subtype: z.string().min(1).optional(),
     source_url: z.string().optional(),
   })
   .passthrough();

@@ -709,6 +709,11 @@ describe("akb CLI", () => {
     const chat = join(dir, "chat.md");
     const unknown = join(dir, "unknown.md");
     const nonAuthority = join(dir, "non-authority.md");
+    const academicPdf = join(dir, "academic-pdf.md");
+    const vendorPdf = join(dir, "vendor-pdf.md");
+    const vendorAliasPdf = join(dir, "vendor-alias-pdf.md");
+    const plainPdf = join(dir, "plain-pdf.md");
+    const legacyAcademicPdf = join(dir, "legacy-academic-pdf.md");
     writeFileSync(
       authority,
       [
@@ -763,10 +768,83 @@ describe("akb CLI", () => {
         "Unknown webpage source.",
       ].join("\n"),
     );
+    writeFileSync(
+      academicPdf,
+      [
+        "---",
+        "id: page_pdfacademic1",
+        "title: Academic PDF",
+        "source_type: pdf",
+        "source_subtype: academic",
+        "---",
+        "# Academic PDF",
+        "",
+        "Academic PDF source.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      vendorPdf,
+      [
+        "---",
+        "id: page_pdfvendor001",
+        "title: Vendor PDF",
+        "source_type: pdf",
+        "source_subtype: vendor_whitepaper",
+        "---",
+        "# Vendor PDF",
+        "",
+        "Vendor PDF source.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      vendorAliasPdf,
+      [
+        "---",
+        "id: page_pdfvendor002",
+        "title: Vendor Alias PDF",
+        "source_type: pdf",
+        "source_subtype: vendor",
+        "---",
+        "# Vendor Alias PDF",
+        "",
+        "Vendor alias PDF source.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      plainPdf,
+      [
+        "---",
+        "id: page_pdfplain0001",
+        "title: Plain PDF",
+        "source_type: pdf",
+        "---",
+        "# Plain PDF",
+        "",
+        "Plain PDF source keeps sourced fallback weight.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      legacyAcademicPdf,
+      [
+        "---",
+        "id: page_pdflegacy001",
+        "title: Legacy Academic PDF",
+        "source_type: pdf_academic",
+        "---",
+        "# Legacy Academic PDF",
+        "",
+        "Legacy academic PDF source.",
+      ].join("\n"),
+    );
     runCli(["ingest", authority, "--no-commit", "--no-compile"], vault);
     runCli(["ingest", chat, "--no-commit", "--no-compile"], vault);
     runCli(["ingest", unknown, "--no-commit", "--no-compile"], vault);
     runCli(["ingest", nonAuthority, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", academicPdf, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", vendorPdf, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", vendorAliasPdf, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", plainPdf, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", legacyAcademicPdf, "--no-commit", "--no-compile"], vault);
 
     runCli(["migrate", "to-v0.1"], vault);
     const authorityEvent = JSON.parse(
@@ -801,11 +879,56 @@ describe("akb CLI", () => {
         .trim()
         .split("\n")[0],
     );
+    const academicPdfEvent = JSON.parse(
+      readFileSync(
+        join(vault, "pages", ".page_pdfacademic1.ledger.jsonl"),
+        "utf8",
+      )
+        .trim()
+        .split("\n")[0],
+    );
+    const vendorPdfEvent = JSON.parse(
+      readFileSync(
+        join(vault, "pages", ".page_pdfvendor001.ledger.jsonl"),
+        "utf8",
+      )
+        .trim()
+        .split("\n")[0],
+    );
+    const vendorAliasPdfEvent = JSON.parse(
+      readFileSync(
+        join(vault, "pages", ".page_pdfvendor002.ledger.jsonl"),
+        "utf8",
+      )
+        .trim()
+        .split("\n")[0],
+    );
+    const plainPdfEvent = JSON.parse(
+      readFileSync(
+        join(vault, "pages", ".page_pdfplain0001.ledger.jsonl"),
+        "utf8",
+      )
+        .trim()
+        .split("\n")[0],
+    );
+    const legacyAcademicPdfEvent = JSON.parse(
+      readFileSync(
+        join(vault, "pages", ".page_pdflegacy001.ledger.jsonl"),
+        "utf8",
+      )
+        .trim()
+        .split("\n")[0],
+    );
 
     expect(authorityEvent.sourceWeight).toBe(0.6);
     expect(chatEvent.sourceWeight).toBe(0.4);
     expect(unknownEvent.sourceWeight).toBe(0.8);
     expect(nonAuthorityEvent.sourceWeight).toBe(0.3);
+    expect(academicPdfEvent.sourceWeight).toBe(0.8);
+    expect(vendorPdfEvent.sourceWeight).toBe(0.5);
+    expect(vendorAliasPdfEvent.sourceWeight).toBe(0.5);
+    expect(plainPdfEvent.sourceWeight).toBe(0.8);
+    expect(legacyAcademicPdfEvent.sourceWeight).toBe(0.8);
   });
 
   it("recomputes confidence state by replaying the JSONL ledger", () => {
