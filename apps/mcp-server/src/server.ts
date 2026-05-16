@@ -44,20 +44,26 @@ export function createAkbMcpServer(cwd = process.cwd()): McpServer {
     "search_knowledge",
     {
       description:
-        "Search the local knowledge vault using BM25. Returns page snippets with citation info (page_id + line range).",
+        "Search the local knowledge vault using BM25 or hybrid BM25+sparse-vector retrieval. Returns page snippets with citation info (page_id + line range), confidence ranking fields, and flags such as NEEDS_REVIEW, RECENTLY_CONTRADICTED, STALE, or SUPERSEDED.",
       inputSchema: {
         query: z
           .string()
           .describe("Search query in natural language or keywords."),
         top_k: z.number().int().min(1).max(20).default(5),
+        retrieval_mode: z.enum(["bm25", "hybrid"]).default("bm25"),
         include_superseded: z.boolean().default(false),
       },
     },
-    async ({ query, top_k, include_superseded }) => {
+    async ({ query, top_k, retrieval_mode, include_superseded }) => {
       const started = performance.now();
-      const rawResults = index.search(query, {
-        topK: Math.max(top_k * 10, 50),
-      });
+      const rawResults =
+        retrieval_mode === "hybrid"
+          ? index.hybridSearch(query, {
+              topK: Math.max(top_k * 10, 50),
+            })
+          : index.search(query, {
+              topK: Math.max(top_k * 10, 50),
+            });
       const results = rankSearchResults({
         rawResults,
         confidenceState: rankConfidenceStateForResults(cwd, rawResults),
@@ -65,6 +71,7 @@ export function createAkbMcpServer(cwd = process.cwd()): McpServer {
       }).slice(0, top_k);
       const payload = {
         query,
+        retrieval_mode,
         results,
         elapsed_ms: Math.round(performance.now() - started),
       };

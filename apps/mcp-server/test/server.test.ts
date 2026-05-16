@@ -74,6 +74,10 @@ describe("akb MCP server", () => {
     const tools = await client.listTools();
     const names = tools.tools.map((tool) => tool.name).sort();
     expect(names).toEqual(["get_page", "search_knowledge"]);
+    const searchTool = tools.tools.find(
+      (tool) => tool.name === "search_knowledge",
+    );
+    expect(searchTool?.inputSchema.required).not.toContain("retrieval_mode");
 
     const search = await client.callTool({
       name: "search_knowledge",
@@ -148,6 +152,41 @@ describe("akb MCP server", () => {
       expect(payload.results[0]).toHaveProperty("final_score");
       expect(payload.results[0]).toHaveProperty("component_scores.confidence");
       expect(payload.results[0].flags).toContain("NEEDS_REVIEW");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("supports hybrid retrieval through search_knowledge", async () => {
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const server = createAkbMcpServer(dir);
+    const client = new Client({ name: "akb-test-client", version: "0.0.0" });
+
+    try {
+      await Promise.all([
+        server.connect(serverTransport),
+        client.connect(clientTransport),
+      ]);
+      const search = await client.callTool({
+        name: "search_knowledge",
+        arguments: {
+          query: "citation data",
+          top_k: 1,
+          retrieval_mode: "hybrid",
+        },
+      });
+      const payload = JSON.parse(
+        search.content[0].type === "text" ? search.content[0].text : "",
+      );
+
+      expect(payload.retrieval_mode).toBe("hybrid");
+      expect(payload.results[0].page_id).toBe("page_mcp000000000");
+      expect(payload.results[0].hybrid_score).toBeGreaterThan(0);
+      expect(payload.results[0].vector_score).toBeGreaterThan(0);
+      expect(payload.results[0]).toHaveProperty("final_score");
+      expect(payload.results[0]).toHaveProperty("component_scores.confidence");
     } finally {
       await client.close();
       await server.close();
