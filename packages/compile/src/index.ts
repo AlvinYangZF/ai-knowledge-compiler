@@ -227,7 +227,12 @@ export function buildHeuristicCompilePatch(
         String(a.item.page.id).localeCompare(String(b.item.page.id)) ||
         a.item.page.path.localeCompare(b.item.page.path),
     );
-  const target = candidates[0]?.item;
+  const target =
+    candidates.find((candidate) => explicitRelation(source, candidate.item))
+      ?.item ??
+    candidates.find((candidate) => isDuplicateContent(source, candidate.item))
+      ?.item ??
+    candidates[0]?.item;
   const patchId = `patch_${source.page.id}`;
   const synthesizePromptHash = stablePromptHash("synthesize/heuristic-v0.1");
   const targetChunkId = target
@@ -241,7 +246,17 @@ export function buildHeuristicCompilePatch(
 
   if (target) {
     const relation = heuristicRelation(source, target);
-    if (relation === "supersede") {
+    if (relation === "duplicate") {
+      changes.push({
+        type: "confidence_only",
+        pageId: target.page.id,
+        relation: "duplicate",
+        confidenceImpact: {
+          kind: "source_added",
+          sourceWeight: 0.7,
+        },
+      });
+    } else if (relation === "supersede") {
       const newPageId = stablePageId(
         `${source.page.id}:supersedes:${target.page.id}`,
       );
@@ -369,29 +384,30 @@ export function buildHeuristicCompilePatch(
           kind: "claim_cluster",
         },
       ],
-      derivedChunks: target
-        ? [
-            {
-              chunkId:
-                changes[0]?.type === "create"
-                  ? `${changes[0].newPageId}:c0`
-                  : targetChunkId,
-              derivedFrom: {
-                sourceUnitIds: [`${source.page.id}:su0`],
-                sourceChunkIds: [`${source.page.id}:c0`],
-                method:
-                  changes[0]?.relation === "supersede"
-                    ? "supersede"
-                    : changes[0]?.relation === "contradict"
-                      ? "contradict"
-                      : "extend",
-                promptHash: synthesizePromptHash,
-                modelId: model,
-                compiledAt: timestamp,
+      derivedChunks:
+        target && changes[0]?.type !== "confidence_only"
+          ? [
+              {
+                chunkId:
+                  changes[0]?.type === "create"
+                    ? `${changes[0].newPageId}:c0`
+                    : targetChunkId,
+                derivedFrom: {
+                  sourceUnitIds: [`${source.page.id}:su0`],
+                  sourceChunkIds: [`${source.page.id}:c0`],
+                  method:
+                    changes[0]?.relation === "supersede"
+                      ? "supersede"
+                      : changes[0]?.relation === "contradict"
+                        ? "contradict"
+                        : "extend",
+                  promptHash: synthesizePromptHash,
+                  modelId: model,
+                  compiledAt: timestamp,
+                },
               },
-            },
-          ]
-        : [],
+            ]
+          : [],
     },
   };
 }
@@ -425,7 +441,21 @@ function explicitTitleMention(
 function heuristicRelation(
   source: CompilePageInput,
   target: CompilePageInput,
-): "extend" | "contradict" | "supersede" {
+): "extend" | "contradict" | "supersede" | "duplicate" {
+  const explicit = explicitRelation(source, target);
+  if (explicit) {
+    return explicit;
+  }
+  if (isDuplicateContent(source, target)) {
+    return "duplicate";
+  }
+  return "extend";
+}
+
+function explicitRelation(
+  source: CompilePageInput,
+  target: CompilePageInput,
+): "contradict" | "supersede" | undefined {
   const text = `${source.page.title}\n${source.body}`.toLowerCase();
   const targetTerms = termsForPage(target.page, target.body);
   const mentionsTarget =
@@ -443,7 +473,27 @@ function heuristicRelation(
   ) {
     return "contradict";
   }
-  return "extend";
+  return undefined;
+}
+
+function isDuplicateContent(
+  source: CompilePageInput,
+  target: CompilePageInput,
+): boolean {
+  const sourceFingerprint = contentFingerprint(source.body);
+  return (
+    sourceFingerprint.length > 0 &&
+    sourceFingerprint === contentFingerprint(target.body)
+  );
+}
+
+function contentFingerprint(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/^---[\s\S]*?---\s*/u, "")
+    .replace(/^# [^\n]*\n+/u, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 function stablePageId(input: string): string {

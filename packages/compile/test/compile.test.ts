@@ -84,6 +84,115 @@ describe("compile pipeline", () => {
     });
   });
 
+  it("emits confidence-only changes for duplicate target pages", () => {
+    const source = page(
+      "page_compilepkg11",
+      "Wear Leveling Copy",
+      "Wear leveling spreads erase cycles across blocks.",
+    );
+    const target = page(
+      "page_compilepkg12",
+      "Wear Leveling",
+      "Wear leveling spreads erase cycles across blocks.",
+    );
+
+    const patch = buildHeuristicCompilePatch({
+      source,
+      candidates: [target],
+      now: new Date("2026-05-16T00:00:00.000Z"),
+    });
+
+    expect(patch.changes[0]).toMatchObject({
+      type: "confidence_only",
+      pageId: "page_compilepkg12",
+      relation: "duplicate",
+      confidenceImpact: {
+        kind: "source_added",
+      },
+    });
+    expect(patch.lineage.derivedChunks).toEqual([]);
+  });
+
+  it("prefers exact duplicate targets over higher-scored related candidates", () => {
+    const source = page(
+      "page_compilepkg13",
+      "Wear Leveling Copy",
+      "Wear leveling spreads erase cycles across blocks.",
+    );
+    const mentioned = page(
+      "page_compilepkg14",
+      "Wear Leveling Copy",
+      "Wear leveling copy target has related wording but different content.",
+    );
+    const duplicate = page(
+      "page_compilepkg15",
+      "Wear Leveling",
+      "Wear leveling spreads erase cycles across blocks.",
+    );
+
+    const patch = buildHeuristicCompilePatch({
+      source,
+      candidates: [mentioned, duplicate],
+      now: new Date("2026-05-16T00:00:00.000Z"),
+    });
+
+    expect(patch.changes[0]).toMatchObject({
+      type: "confidence_only",
+      pageId: "page_compilepkg15",
+      relation: "duplicate",
+    });
+  });
+
+  it("does not collapse heading-only semantic differences into duplicates", () => {
+    const source = page(
+      "page_compilepkg16",
+      "Tradeoff Copy",
+      "# Pros\nFast\n# Cons\nSlow",
+    );
+    const target = page(
+      "page_compilepkg17",
+      "Tradeoff",
+      "# Cons\nFast\n# Pros\nSlow",
+    );
+
+    const patch = buildHeuristicCompilePatch({
+      source,
+      candidates: [target],
+      now: new Date("2026-05-16T00:00:00.000Z"),
+    });
+
+    expect(patch.changes[0]).toMatchObject({
+      type: "modify",
+      pageId: "page_compilepkg17",
+      relation: "extend",
+    });
+  });
+
+  it("keeps explicit conflict signals ahead of duplicate matching", () => {
+    const source = page(
+      "page_compilepkg18",
+      "GC Conflict",
+      "This contradicts Garbage Collection.\nGC uses adaptive threshold.",
+    );
+    const target = page(
+      "page_compilepkg19",
+      "Garbage Collection",
+      "GC uses adaptive threshold.",
+    );
+
+    const patch = buildHeuristicCompilePatch({
+      source,
+      candidates: [target],
+      now: new Date("2026-05-16T00:00:00.000Z"),
+    });
+
+    expect(patch.changes[0]).toMatchObject({
+      type: "modify",
+      pageId: "page_compilepkg19",
+      relation: "contradict",
+    });
+  });
+
   it("emits contradiction notes for explicit conflicting sources", () => {
     const source = page(
       "page_compilepkg04",

@@ -1703,6 +1703,59 @@ describe("akb CLI", () => {
     expect(patch).toContain("degradedReason: AKB_TEST_DEEPSEEK_KEY not set");
   });
 
+  it("applies duplicate compile patches without changing markdown", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const existing = join(dir, "wear.md");
+    const duplicate = join(dir, "wear-copy.md");
+    const body = "Wear leveling spreads erase cycles across blocks.";
+    writeFileSync(
+      existing,
+      [
+        "---",
+        "id: page_dupcompile01",
+        "title: Wear Leveling",
+        "---",
+        "# Wear Leveling",
+        "",
+        body,
+      ].join("\n"),
+    );
+    writeFileSync(
+      duplicate,
+      [
+        "---",
+        "id: page_dupcompile02",
+        "title: Wear Leveling Copy",
+        "---",
+        "# Wear Leveling Copy",
+        "",
+        body,
+      ].join("\n"),
+    );
+    runCli(["ingest", existing, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", duplicate, "--no-commit", "--no-compile"], vault);
+    const targetPath = join(vault, "pages", "wear.md");
+    const before = readFileSync(targetPath, "utf8");
+
+    runCli(["compile", "--source", "page_dupcompile02"], vault);
+    const patch = readFileSync(
+      join(vault, ".akb", "patches", "patch_page_dupcompile02.yaml"),
+      "utf8",
+    );
+    expect(patch).toContain("type: confidence_only");
+    expect(patch).toContain("pageId: page_dupcompile01");
+    expect(patch).toContain("relation: duplicate");
+
+    runCli(["patch", "apply", "patch_page_dupcompile02", "--no-commit"], vault);
+    expect(readFileSync(targetPath, "utf8")).toBe(before);
+    const ledger = readFileSync(
+      join(vault, "pages", ".page_dupcompile01.ledger.jsonl"),
+      "utf8",
+    );
+    expect(ledger).toContain('"kind":"source_added"');
+  });
+
   it("applies heuristic contradiction and supersede compile patches", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
