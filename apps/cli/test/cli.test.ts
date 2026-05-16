@@ -2148,6 +2148,131 @@ describe("akb CLI", () => {
     expect(output).toContain("target accuracy:   1/1");
   });
 
+  it("reports compile eval lineage integrity", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const fixtureDir = join(vault, ".akb", "eval", "fixtures");
+    mkdirSync(fixtureDir, { recursive: true });
+    writeFileSync(
+      join(fixtureDir, "gc-old.md"),
+      [
+        "---",
+        "id: page_evalbadlin01",
+        "title: Garbage Collection",
+        "---",
+        "# Garbage Collection",
+        "",
+        "GC uses fixed thresholds.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(fixtureDir, "gc-new.md"),
+      [
+        "---",
+        "id: page_evalbadlin02",
+        "title: Adaptive GC",
+        "---",
+        "# Adaptive GC",
+        "",
+        "Adaptive garbage collection updates threshold policy.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(vault, ".akb", "eval", "compile-golden.yaml"),
+      [
+        'version: "1.0"',
+        "items:",
+        "  - id: c_lineage",
+        "    setup:",
+        "      existingPages:",
+        "        - fixtures/gc-old.md",
+        "      newSource: fixtures/gc-new.md",
+        "    expect:",
+        "      relations:",
+        "        - againstPage: page_evalbadlin01",
+        "          relation: extend",
+      ].join("\n"),
+    );
+
+    const output = runCli(
+      [
+        "eval",
+        "compile",
+        "--set",
+        ".akb/eval/compile-golden.yaml",
+        "--output",
+        ".akb/eval/compile-report.json",
+      ],
+      vault,
+    );
+    const report = JSON.parse(
+      readFileSync(join(vault, ".akb", "eval", "compile-report.json"), "utf8"),
+    );
+
+    expect(output).toContain("lineage integrity: 1/1");
+    expect(report.schema_version).toBe("compile-eval/0.1");
+    expect(report.lineage_integrity).toBe(1);
+  });
+
+  it("validates compile eval lineage against scanned vault candidates", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const target = join(dir, "vault-target.md");
+    writeFileSync(
+      target,
+      [
+        "---",
+        "id: page_evalvault001",
+        "title: Vault Candidate",
+        "aliases:",
+        "  - garbage collection",
+        "---",
+        "# Vault Candidate",
+        "",
+        "GC uses fixed thresholds.",
+      ].join("\n"),
+    );
+    runCli(["ingest", target, "--no-commit", "--no-compile"], vault);
+    const fixtureDir = join(vault, ".akb", "eval", "fixtures");
+    mkdirSync(fixtureDir, { recursive: true });
+    writeFileSync(
+      join(fixtureDir, "gc-new.md"),
+      [
+        "---",
+        "id: page_evalvault002",
+        "title: Adaptive GC",
+        "tags:",
+        "  - garbage collection",
+        "---",
+        "# Adaptive GC",
+        "",
+        "Adaptive garbage collection updates threshold policy.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(vault, ".akb", "eval", "compile-golden.yaml"),
+      [
+        'version: "1.0"',
+        "items:",
+        "  - id: c_scanned_lineage",
+        "    setup:",
+        "      existingPages: []",
+        "      newSource: fixtures/gc-new.md",
+        "    expect:",
+        "      relations:",
+        "        - againstPage: page_evalvault001",
+        "          relation: extend",
+      ].join("\n"),
+    );
+
+    const output = runCli(
+      ["eval", "compile", "--set", ".akb/eval/compile-golden.yaml"],
+      vault,
+    );
+
+    expect(output).toContain("lineage integrity: 1/1");
+  });
+
   it("rejects duplicate compile and invalid patches without partial writes", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);

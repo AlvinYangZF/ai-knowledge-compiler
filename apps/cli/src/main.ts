@@ -103,6 +103,7 @@ interface CompileEvalFailure {
     | "target"
     | "create_page"
     | "delete_content"
+    | "lineage"
     | "relation_regression";
 }
 
@@ -767,10 +768,30 @@ function evalCompileCommand(options: EvalCompileOptions): void {
   let relationPasses = 0;
   let targetChecks = 0;
   let targetPasses = 0;
+  let lineageChecks = 0;
+  let lineagePasses = 0;
 
   for (const item of items) {
     const patch = buildCompileEvalPatch(vaultDir, goldenPath, item);
     const changes = patch.changes ?? [];
+    lineageChecks += 1;
+    const lineageFailures = validateCompileEvalLineage(
+      vaultDir,
+      goldenPath,
+      item,
+      patch,
+    );
+    if (lineageFailures.length === 0) {
+      lineagePasses += 1;
+    } else {
+      failures.push({
+        id: item.id,
+        source: item.setup.newSource,
+        expectedRelation: "complete lineage",
+        actualRelation: lineageFailures.join("; "),
+        kind: "lineage",
+      });
+    }
     for (const expected of item.expect.relations) {
       relationChecks += 1;
       const expectedRelations =
@@ -863,6 +884,8 @@ function evalCompileCommand(options: EvalCompileOptions): void {
   const relationAccuracy =
     relationChecks === 0 ? 1 : relationPasses / relationChecks;
   const targetAccuracy = targetChecks === 0 ? 1 : targetPasses / targetChecks;
+  const lineageIntegrity =
+    lineageChecks === 0 ? 1 : lineagePasses / lineageChecks;
   let baselineRelationAccuracy: number | undefined;
   let relationAccuracyRegression: number | undefined;
   if (baselineOption) {
@@ -883,16 +906,20 @@ function evalCompileCommand(options: EvalCompileOptions): void {
 
   const failedItemIds = new Set(failures.map((failure) => failure.id));
   const report = {
+    schema_version: "compile-eval/0.1",
     total: items.length,
     relation_checks: relationChecks,
     relation_passes: relationPasses,
     target_checks: targetChecks,
     target_passes: targetPasses,
+    lineage_checks: lineageChecks,
+    lineage_passes: lineagePasses,
     passed: items.length - failedItemIds.size,
     failed: failedItemIds.size,
     failure_count: failures.length,
     relation_accuracy: relationAccuracy,
     target_accuracy: targetAccuracy,
+    lineage_integrity: lineageIntegrity,
     baseline_relation_accuracy: baselineRelationAccuracy,
     relation_accuracy_regression: relationAccuracyRegression,
     max_relation_regression: baselineOption ? maxRelationRegression : undefined,
@@ -908,6 +935,7 @@ function evalCompileCommand(options: EvalCompileOptions): void {
   console.log(`Compile eval: ${items.length} items`);
   console.log(`  relation accuracy: ${relationPasses}/${relationChecks}`);
   console.log(`  target accuracy:   ${targetPasses}/${targetChecks}`);
+  console.log(`  lineage integrity: ${lineagePasses}/${lineageChecks}`);
   if (relationAccuracyRegression !== undefined) {
     console.log(
       `  relation accuracy regression: ${relationAccuracyRegression.toFixed(4)} (max ${maxRelationRegression.toFixed(4)})`,
@@ -1023,19 +1051,147 @@ function buildCompileEvalPatch(
     goldenPath,
     item.setup.newSource,
   );
-  const candidates =
-    item.setup.existingPages.length > 0
-      ? item.setup.existingPages.map((ref) =>
-          compileEvalPageInput(vaultDir, goldenPath, ref),
-        )
-      : scanVaultPages(vaultDir).filter(
-          (candidate) => candidate.page.id !== source.page.id,
-        );
+  const candidates = compileEvalCandidates(vaultDir, goldenPath, item, source);
   return buildHeuristicCompilePatch({
     source,
     candidates,
     deepseekApiKey: process.env.DEEPSEEK_API_KEY,
   }) as PatchDocument;
+}
+
+function compileEvalCandidates(
+  vaultDir: string,
+  goldenPath: string,
+  item: CompileGoldenItem,
+  source: CompilePageInput,
+): CompilePageInput[] {
+  return item.setup.existingPages.length > 0
+    ? item.setup.existingPages.map((ref) =>
+        compileEvalPageInput(vaultDir, goldenPath, ref),
+      )
+    : scanVaultPages(vaultDir).filter(
+        (candidate) => candidate.page.id !== source.page.id,
+      );
+}
+
+function validateCompileEvalLineage(
+  vaultDir: string,
+  goldenPath: string,
+  item: CompileGoldenItem,
+  patch: PatchDocument,
+): string[] {
+  const source = compileEvalPageInput(
+    vaultDir,
+    goldenPath,
+    item.setup.newSource,
+  );
+  const inputs = [
+    source,
+    ...compileEvalCandidates(vaultDir, goldenPath, item, source),
+  ];
+  const knownChunks = new Set<string>();
+  for (const input of inputs) {
+    for (const chunk of chunkByHeaders(input.page.id, input.body, {
+      bodyStartLine: input.bodyStartLine,
+    })) {
+      knownChunks.add(chunk.id);
+    }
+  }
+  const knownUnits = new Set(
+    (patch.lineage?.units ?? []).map((unit) => String(unit.id)),
+  );
+  const failures: string[] = [];
+  const markerSources = compileEvalDerivedSources(patch);
+  const hasContentChanges = (patch.changes ?? []).some(
+    (change) => "content" in change && typeof change.content === "string",
+  );
+  if (hasContentChanges && markerSources.length === 0) {
+    failures.push("derived content missing akb:derived marker");
+  }
+  if (markerSources.length > 0 && knownUnits.size === 0) {
+    failures.push("derived content missing lineage units");
+  }
+  if (
+    markerSources.length > 0 &&
+    (patch.lineage?.derivedChunks ?? []).length === 0
+  ) {
+    failures.push("derived content missing derivedChunks");
+  }
+  const derivedFromChunkIds = new Set<string>();
+  const derivedFromUnitIds = new Set<string>();
+  for (const unit of patch.lineage?.units ?? []) {
+    for (const chunkId of unit.sourceChunkIds ?? []) {
+      if (!knownChunks.has(chunkId)) {
+        failures.push(`unresolved lineage source ${chunkId}`);
+      }
+    }
+  }
+  for (const markerSource of markerSources) {
+    if (markerSource.includes(":c")) {
+      if (!knownChunks.has(markerSource)) {
+        failures.push(`unresolved derived source ${markerSource}`);
+      }
+    } else if (!knownUnits.has(markerSource)) {
+      failures.push(`unresolved derived source ${markerSource}`);
+    }
+  }
+  for (const derived of patch.lineage?.derivedChunks ?? []) {
+    const chunkId = typeof derived.chunkId === "string" ? derived.chunkId : "";
+    if (!isValidEvalDerivedChunkId(chunkId, patch)) {
+      failures.push(`invalid derived chunk target ${chunkId || "<missing>"}`);
+    }
+    if (!isRecord(derived.derivedFrom)) {
+      failures.push("derived chunk missing derivedFrom");
+      continue;
+    }
+    for (const chunkId of toStringArray(derived.derivedFrom.sourceChunkIds)) {
+      derivedFromChunkIds.add(chunkId);
+      if (!knownChunks.has(chunkId)) {
+        failures.push(`unresolved derived lineage chunk ${chunkId}`);
+      }
+    }
+    for (const unitId of toStringArray(derived.derivedFrom.sourceUnitIds)) {
+      derivedFromUnitIds.add(unitId);
+      if (!knownUnits.has(unitId)) {
+        failures.push(`unresolved derived lineage unit ${unitId}`);
+      }
+    }
+  }
+  for (const markerSource of markerSources) {
+    if (markerSource.includes(":c")) {
+      if (!derivedFromChunkIds.has(markerSource)) {
+        failures.push(`marker source missing from lineage ${markerSource}`);
+      }
+    } else if (!derivedFromUnitIds.has(markerSource)) {
+      failures.push(`marker source missing from lineage ${markerSource}`);
+    }
+  }
+  return [...new Set(failures)];
+}
+
+function isValidEvalDerivedChunkId(
+  chunkId: string,
+  patch: PatchDocument,
+): boolean {
+  if (!chunkId.includes(":c")) {
+    return false;
+  }
+  const pageId = chunkId.split(":")[0];
+  return (patch.changes ?? []).some(
+    (change) =>
+      compileChangeTargetPage(change) === pageId ||
+      (change.type === "create" && change.newPageId === pageId),
+  );
+}
+
+function compileEvalDerivedSources(patch: PatchDocument): string[] {
+  const sources: string[] = [];
+  for (const change of patch.changes ?? []) {
+    if ("content" in change && typeof change.content === "string") {
+      sources.push(...extractDerivedSources(change.content));
+    }
+  }
+  return sources;
 }
 
 function compileEvalPageInput(
