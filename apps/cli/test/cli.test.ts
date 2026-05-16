@@ -816,6 +816,52 @@ describe("akb CLI", () => {
     expect(ranked.results[0].component_scores.confidence).toBeLessThan(0.5);
   });
 
+  it("rebuilds all projections after deleting the index database", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "projection-all.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_projall00001",
+        "title: Projection All",
+        "---",
+        "# Projection All",
+        "",
+        "<!-- akb:derived source=page_projall00001:c0 method=summary -->",
+        "Projection all rebuild restores searchable derived content.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+    writeFileSync(
+      join(vault, "pages", ".page_projall00001.ledger.jsonl"),
+      `${JSON.stringify({
+        id: "evt_projall00001",
+        kind: "source_added",
+        pageId: "page_projall00001",
+        timestamp: "2026-05-01T12:00:00.000Z",
+        actor: "system",
+        actorId: "akb-test",
+        sourceId: "src_projall00001",
+        sourceWeight: 0.9,
+      })}\n`,
+    );
+    rmSync(join(vault, ".akb", "index.db"), { force: true });
+
+    const output = runCli(["projection", "rebuild", "--all"], vault);
+    const ranked = JSON.parse(
+      runCli(["search", "projection all", "--format", "json"], vault),
+    );
+    const lineage = runCli(["lineage", "page_projall00001"], vault);
+
+    expect(output).toContain("Rebuilt search projection");
+    expect(output).toContain("Rebuilt confidence projection");
+    expect(ranked.results[0].page_id).toBe("page_projall00001");
+    expect(ranked.results[0].component_scores.confidence).toBeGreaterThan(0.5);
+    expect(lineage).toContain("page_projall00001:c0");
+  });
+
   it("search flags recently major contradicted pages from JSONL fallback", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);

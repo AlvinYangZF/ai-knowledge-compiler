@@ -1491,6 +1491,19 @@ async function projectionRebuildCommand(
   }
 
   const pages = scanVaultPages(vaultDir);
+  if (options.all) {
+    const index = new SearchIndex({
+      dbPath: join(vaultDir, ".akb", "index.db"),
+    });
+    try {
+      const result = index.rebuild(pages);
+      console.log(
+        `Rebuilt search projection for ${result.totalPages} page${result.totalPages === 1 ? "" : "s"} and ${result.inserted} chunk set${result.inserted === 1 ? "" : "s"}.`,
+      );
+    } finally {
+      index.close();
+    }
+  }
   const projection = new ConfidenceProjection({
     dbPath: join(vaultDir, ".akb", "index.db"),
   });
