@@ -2873,6 +2873,108 @@ describe("akb CLI", () => {
     ).toBe(false);
   });
 
+  it("requires explicit review before applying low-confidence patches", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const target = join(dir, "review-target.md");
+    writeFileSync(
+      target,
+      [
+        "---",
+        "id: page_review000001",
+        "title: Review Target",
+        "---",
+        "# Review Target",
+        "",
+        "Low confidence patch target.",
+      ].join("\n"),
+    );
+    runCli(["ingest", target, "--no-commit", "--no-compile"], vault);
+    writeFileSync(
+      join(vault, ".akb", "patches", "patch_low_review.yaml"),
+      [
+        "id: patch_low_review",
+        "status: proposed",
+        "changes:",
+        "  - type: modify",
+        "    pageId: page_review000001",
+        "    operation: append_section",
+        "    relation: extend",
+        "    classifyConfidence: 0.49",
+        "    reasoning: uncertain low-confidence relation",
+        "    needsCloseReview: true",
+        "    content: |",
+        "      ## Low Confidence Addition",
+        "      Low confidence content.",
+        "    confidenceImpact:",
+        "      kind: source_added",
+        "      sourceWeight: 0.5",
+      ].join("\n"),
+    );
+
+    const shown = runCli(["patch", "show", "patch_low_review"], vault);
+    expect(shown).toContain("Close review required");
+    expect(shown).toContain("needsCloseReview: true");
+
+    const failure = runCliFailure(
+      ["patch", "apply", "patch_low_review", "--no-commit"],
+      vault,
+    );
+    expect(failure).toContain("requires --reviewed");
+    expect(
+      readFileSync(join(vault, "pages", "review-target.md"), "utf8"),
+    ).not.toContain("Low Confidence Addition");
+
+    runCli(
+      ["patch", "apply", "patch_low_review", "--reviewed", "--no-commit"],
+      vault,
+    );
+    expect(
+      readFileSync(join(vault, "pages", "review-target.md"), "utf8"),
+    ).toContain("Low Confidence Addition");
+  });
+
+  it("rejects non-finite patch classify confidence", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const target = join(dir, "nan-target.md");
+    writeFileSync(
+      target,
+      [
+        "---",
+        "id: page_nanpatch0001",
+        "title: NaN Patch Target",
+        "---",
+        "# NaN Patch Target",
+        "",
+        "Non-finite confidence target.",
+      ].join("\n"),
+    );
+    runCli(["ingest", target, "--no-commit", "--no-compile"], vault);
+    writeFileSync(
+      join(vault, ".akb", "patches", "patch_nan_conf.yaml"),
+      [
+        "id: patch_nan_conf",
+        "status: proposed",
+        "changes:",
+        "  - type: modify",
+        "    pageId: page_nanpatch0001",
+        "    operation: append_section",
+        "    relation: extend",
+        "    classifyConfidence: .nan",
+        "    reasoning: non-finite confidence",
+        "    content: bad",
+      ].join("\n"),
+    );
+
+    const failure = runCliFailure(
+      ["patch", "apply", "patch_nan_conf", "--no-commit"],
+      vault,
+    );
+
+    expect(failure).toContain("classifyConfidence must be 0-1");
+  });
+
   it("applies create patches and records supersede confidence events", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);

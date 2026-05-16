@@ -255,6 +255,71 @@ describe("compile pipeline", () => {
     });
   });
 
+  it("marks low-confidence DeepSeek classifications for close review", async () => {
+    const provider = {
+      model: "deepseek-v4-pro",
+      completeJson: async (call: { responseSchemaName: string }) => {
+        if (call.responseSchemaName === "segment") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              units: [
+                {
+                  id: "su_lowconf",
+                  sourceChunkIds: ["page_compilepkg33:c0"],
+                  text: "Ambiguous GC update.",
+                  kind: "claim_cluster",
+                },
+              ],
+            }),
+          };
+        }
+        if (call.responseSchemaName === "classify") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              relation: "extend",
+              confidence: 0.49,
+              reasoning: "Ambiguous relation.",
+            }),
+          };
+        }
+        return {
+          model: "deepseek-v4-pro",
+          content: JSON.stringify({
+            changes: [
+              {
+                type: "modify",
+                pageId: "page_compilepkg34",
+                operation: "append_section",
+                relation: "extend",
+                classifyConfidence: 0.8,
+                reasoning: "Ambiguous relation.",
+                content:
+                  '## Ambiguous GC Update\n\n<!-- akb:derived source=su_lowconf method=extend patch=patch_page_compilepkg33 promptHash="sha256:llm" modelId="deepseek-v4-pro" compiledAt="2026-05-16T00:00:00.000Z" -->\nAmbiguous GC update.',
+              },
+            ],
+          }),
+        };
+      },
+    };
+
+    const patch = await buildCompilePatch({
+      source: page("page_compilepkg33", "Ambiguous GC", "Ambiguous GC update."),
+      candidates: [
+        page("page_compilepkg34", "Garbage Collection", "GC target."),
+      ],
+      provider,
+      now: new Date("2026-05-16T00:00:00.000Z"),
+    });
+
+    expect(patch.compileMeta.provider).toBe("deepseek");
+    expect(patch.changes[0]).toMatchObject({
+      classifyConfidence: 0.49,
+      needsCloseReview: true,
+    });
+  });
+
   it("falls back when DeepSeek synthesized content lacks derived markers", async () => {
     const provider = {
       model: "deepseek-v4-pro",

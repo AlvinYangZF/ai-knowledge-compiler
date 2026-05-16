@@ -97,6 +97,7 @@ export type CompilePatchChange =
       relation: "extend" | "merge" | "contradict";
       classifyConfidence: number;
       reasoning: string;
+      needsCloseReview?: boolean;
       content: string;
       confidenceImpact: Record<string, unknown>;
     }
@@ -113,6 +114,7 @@ export type CompilePatchChange =
       relation: "new" | "supersede";
       classifyConfidence: number;
       reasoning: string;
+      needsCloseReview?: boolean;
       supersedes?: string;
       content: string;
       confidenceImpact?: Record<string, unknown>;
@@ -783,6 +785,13 @@ function parsePatchChanges(
       ) {
         return [];
       }
+      const classifyConfidence =
+        typeof change.classifyConfidence === "number"
+          ? Math.min(
+              parseConfidence(change.classifyConfidence),
+              context.classifyConfidence,
+            )
+          : context.classifyConfidence;
       return [
         {
           type: "modify",
@@ -804,14 +813,15 @@ function parsePatchChanges(
                   context.relation === "extend"
                 ? context.relation
                 : "extend",
-          classifyConfidence:
-            typeof change.classifyConfidence === "number"
-              ? parseConfidence(change.classifyConfidence)
-              : context.classifyConfidence,
+          classifyConfidence,
           reasoning:
             typeof change.reasoning === "string"
               ? change.reasoning
               : context.reasoning,
+          needsCloseReview:
+            change.needsCloseReview === true || classifyConfidence < 0.5
+              ? true
+              : undefined,
           content,
           confidenceImpact: isRecord(change.confidenceImpact)
             ? change.confidenceImpact
@@ -853,6 +863,13 @@ function parsePatchChanges(
       ) {
         return [];
       }
+      const classifyConfidence =
+        typeof change.classifyConfidence === "number"
+          ? Math.min(
+              parseConfidence(change.classifyConfidence),
+              context.classifyConfidence,
+            )
+          : context.classifyConfidence;
       return [
         {
           type: "create",
@@ -862,14 +879,15 @@ function parsePatchChanges(
               ? change.path
               : `pages/compiled/${slugify(context.source.page.title)}.md`,
           relation,
-          classifyConfidence:
-            typeof change.classifyConfidence === "number"
-              ? parseConfidence(change.classifyConfidence)
-              : context.classifyConfidence,
+          classifyConfidence,
           reasoning:
             typeof change.reasoning === "string"
               ? change.reasoning
               : context.reasoning,
+          needsCloseReview:
+            change.needsCloseReview === true || classifyConfidence < 0.5
+              ? true
+              : undefined,
           supersedes,
           content,
           confidenceImpact,

@@ -193,6 +193,7 @@ interface CompileOptions {
 
 interface PatchApplyOptions {
   commit?: boolean;
+  reviewed?: boolean;
 }
 
 interface PatchDocument {
@@ -221,6 +222,7 @@ type PatchChange =
       relation: string;
       classifyConfidence: number;
       reasoning: string;
+      needsCloseReview?: boolean;
       content: string;
       confidenceImpact?: Record<string, unknown>;
     }
@@ -237,6 +239,7 @@ type PatchChange =
       relation: "new" | "supersede";
       classifyConfidence: number;
       reasoning: string;
+      needsCloseReview?: boolean;
       supersedes?: string;
       content: string;
       confidenceImpact?: Record<string, unknown>;
@@ -395,6 +398,7 @@ export async function run(argv = process.argv): Promise<void> {
   patch
     .command("apply")
     .argument("<patch-id>")
+    .option("--reviewed", "confirm close review for low-confidence changes")
     .option("--no-commit", "skip git commit")
     .action(patchApplyCommand);
   program
@@ -2956,7 +2960,31 @@ function patchShowCommand(patchId: string): void {
   const vaultDir = process.cwd();
   assertVault(vaultDir);
   const patch = readPatch(vaultDir, patchId);
+  const closeReviewChanges = closeReviewChangeLabels(patch);
+  if (closeReviewChanges.length > 0) {
+    console.log(
+      `Close review required: ${closeReviewChanges.join(", ")}. Confirm with patch apply --reviewed after human review.`,
+    );
+  }
   console.log(stringifyYaml(patch).trimEnd());
+}
+
+function closeReviewChangeLabels(patch: PatchDocument): string[] {
+  return (patch.changes ?? [])
+    .filter((change) => changeNeedsCloseReview(change))
+    .map((change) => {
+      if (change.type === "create") {
+        return `${change.type}:${change.newPageId}`;
+      }
+      return `${change.type}:${change.pageId}`;
+    });
+}
+
+function changeNeedsCloseReview(change: PatchChange): boolean {
+  if (change.type === "confidence_only") {
+    return false;
+  }
+  return change.needsCloseReview === true || change.classifyConfidence < 0.5;
 }
 
 async function patchApplyCommand(
@@ -2967,6 +2995,12 @@ async function patchApplyCommand(
   assertVault(vaultDir);
   const patch = readPatch(vaultDir, patchId, "proposed");
   validatePatchForApply(vaultDir, patch);
+  const closeReviewChanges = closeReviewChangeLabels(patch);
+  if (closeReviewChanges.length > 0 && options.reviewed !== true) {
+    throw new Error(
+      `Patch ${patch.id} requires --reviewed after close review for low-confidence change(s): ${closeReviewChanges.join(", ")}`,
+    );
+  }
   const written = new Set<string>();
   for (const change of patch.changes ?? []) {
     if (change.type === "modify") {
@@ -3924,6 +3958,7 @@ function parsePatchChange(change: unknown): PatchChange {
     }
     if (
       typeof change.classifyConfidence !== "number" ||
+      !Number.isFinite(change.classifyConfidence) ||
       change.classifyConfidence < 0 ||
       change.classifyConfidence > 1
     ) {
@@ -3931,6 +3966,12 @@ function parsePatchChange(change: unknown): PatchChange {
     }
     if (typeof change.reasoning !== "string") {
       throw new Error("Invalid patch: reasoning must be a string");
+    }
+    if (
+      change.needsCloseReview !== undefined &&
+      typeof change.needsCloseReview !== "boolean"
+    ) {
+      throw new Error("Invalid patch: needsCloseReview must be a boolean");
     }
     return change as PatchChange;
   }
@@ -3963,6 +4004,7 @@ function parsePatchChange(change: unknown): PatchChange {
     }
     if (
       typeof change.classifyConfidence !== "number" ||
+      !Number.isFinite(change.classifyConfidence) ||
       change.classifyConfidence < 0 ||
       change.classifyConfidence > 1
     ) {
@@ -3973,6 +4015,12 @@ function parsePatchChange(change: unknown): PatchChange {
     }
     if (change.supersedes !== undefined && !isValidPageId(change.supersedes)) {
       throw new Error("Invalid patch: invalid supersedes pageId");
+    }
+    if (
+      change.needsCloseReview !== undefined &&
+      typeof change.needsCloseReview !== "boolean"
+    ) {
+      throw new Error("Invalid patch: needsCloseReview must be a boolean");
     }
     if (change.relation === "supersede" && !change.supersedes) {
       throw new Error("Invalid patch: supersede create requires supersedes");
