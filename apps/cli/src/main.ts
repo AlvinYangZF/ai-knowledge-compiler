@@ -323,6 +323,15 @@ export async function run(argv = process.argv): Promise<void> {
     .option("--pr-number <number>", "pull request number for CI evidence")
     .option("--no-commit", "skip git commit")
     .action(webhookCiSuccessCommand);
+  webhook
+    .command("ci-failure")
+    .option("--actor-id <id>", "external actor id")
+    .option("--changed-file <path>", "changed file path", collect, [])
+    .option("--changed-files-list <path>", "file containing changed paths")
+    .option("--evidence <value>", "external evidence URL or id")
+    .option("--pr-number <number>", "pull request number for CI evidence")
+    .option("--no-commit", "skip git commit")
+    .action(webhookCiFailureCommand);
   program
     .command("watch")
     .option("--once", "process runtime signal files once and exit")
@@ -1759,6 +1768,34 @@ async function decayCommand(options: DecayOptions): Promise<void> {
 async function webhookCiSuccessCommand(
   options: WebhookCiSuccessOptions,
 ): Promise<void> {
+  await webhookCiRuntimeSignalCommand(options, {
+    signalKind: "ci_success",
+    mode: "verified",
+    commitMessage: "record runtime verification",
+    outputNoun: "runtime verification",
+  });
+}
+
+async function webhookCiFailureCommand(
+  options: WebhookCiSuccessOptions,
+): Promise<void> {
+  await webhookCiRuntimeSignalCommand(options, {
+    signalKind: "ci_failure",
+    mode: "contradicted_by",
+    commitMessage: "record runtime contradiction",
+    outputNoun: "runtime contradiction",
+  });
+}
+
+async function webhookCiRuntimeSignalCommand(
+  options: WebhookCiSuccessOptions,
+  opts: {
+    signalKind: string;
+    mode: RuntimeSignalMode;
+    commitMessage: string;
+    outputNoun: string;
+  },
+): Promise<void> {
   const vaultDir = process.cwd();
   assertVault(vaultDir);
   const actorId = options.actorId ?? "ci:github-actions";
@@ -1789,16 +1826,17 @@ async function webhookCiSuccessCommand(
   if (targets.length === 0) {
     throw new Error("Runtime signal did not match any pages");
   }
-  const written = writeRuntimeVerifiedEvents(vaultDir, targets, {
+  const written = writeRuntimeConfidenceEvents(vaultDir, targets, {
     actorId,
     evidence,
-    signalKind: "ci_success",
+    signalKind: opts.signalKind,
+    mode: opts.mode,
   });
   if (written.length > 0 && options.commit !== false) {
-    await commitFiles(vaultDir, written, "record runtime verification");
+    await commitFiles(vaultDir, written, opts.commitMessage);
   }
   console.log(
-    `Recorded ${written.length} runtime verification${written.length === 1 ? "" : "s"}.`,
+    `Recorded ${written.length} ${opts.outputNoun}${written.length === 1 ? "" : "s"}.`,
   );
 }
 
@@ -1842,10 +1880,12 @@ async function watchCommand(options: WatchOptions): Promise<void> {
       }
       return pageFromFile(vaultDir, pageFile);
     });
-    for (const writtenPath of writeRuntimeVerifiedEvents(vaultDir, targets, {
+    const signalKind = signal.kind ?? "runtime_signal";
+    for (const writtenPath of writeRuntimeConfidenceEvents(vaultDir, targets, {
       actorId: signal.actor_id,
       evidence: signal.evidence,
-      signalKind: signal.kind ?? "runtime_signal",
+      signalKind,
+      mode: runtimeSignalMode(signalKind),
     })) {
       written.add(writtenPath);
     }
@@ -3520,28 +3560,70 @@ function daysBetweenIso(timestamp: string, now: Date): number {
   return Math.max(0, (now.getTime() - time) / (24 * 60 * 60 * 1000));
 }
 
-function writeRuntimeVerifiedEvents(
+type RuntimeSignalMode = "verified" | "contradicted_by";
+
+function runtimeSignalMode(kind: string): RuntimeSignalMode {
+  return /(?:failure|failed|error)$/i.test(kind)
+    ? "contradicted_by"
+    : "verified";
+}
+
+function runtimeContradictionSeverity(kind: string): "minor" | "major" {
+  if (/^ci_/i.test(kind)) {
+    return "minor";
+  }
+  if (/^test_|^runbook_/i.test(kind)) {
+    return "major";
+  }
+  return /(?:failure|failed|error)$/i.test(kind) ? "minor" : "major";
+}
+
+function writeRuntimeConfidenceEvents(
   vaultDir: string,
   targets: Array<{ page: Page; body: string; bodyStartLine: number }>,
-  opts: { actorId: string; evidence: string; signalKind: string },
+  opts: {
+    actorId: string;
+    evidence: string;
+    signalKind: string;
+    mode: RuntimeSignalMode;
+  },
 ): string[] {
   const timestamp = new Date().toISOString();
   const written: string[] = [];
   for (const target of targets) {
-    const event = parseConfidenceEvent({
-      id: stableId(
-        "evt",
-        `${target.page.id}:${opts.signalKind}:${opts.actorId}:${opts.evidence}:${timestamp}`,
-      ),
-      kind: "verified",
-      pageId: target.page.id,
-      timestamp,
-      actor: "system",
-      actorId: opts.actorId,
-      verifierType: "agent",
-      verifierId: opts.actorId,
-      reason: `${opts.signalKind}: ${opts.evidence}`,
-    });
+    const event =
+      opts.mode === "verified"
+        ? parseConfidenceEvent({
+            id: stableId(
+              "evt",
+              `${target.page.id}:${opts.signalKind}:${opts.actorId}:${opts.evidence}:${timestamp}`,
+            ),
+            kind: "verified",
+            pageId: target.page.id,
+            timestamp,
+            actor: "system",
+            actorId: opts.actorId,
+            verifierType: "agent",
+            verifierId: opts.actorId,
+            reason: `${opts.signalKind}: ${opts.evidence}`,
+          })
+        : parseConfidenceEvent({
+            id: stableId(
+              "evt",
+              `${target.page.id}:${opts.signalKind}:${opts.actorId}:${opts.evidence}:${timestamp}`,
+            ),
+            kind: "contradicted_by",
+            pageId: target.page.id,
+            timestamp,
+            actor: "system",
+            actorId: opts.actorId,
+            bySourceId: stableId(
+              "src",
+              `${opts.signalKind}:${opts.actorId}:${opts.evidence}`,
+            ),
+            severity: runtimeContradictionSeverity(opts.signalKind),
+            reason: `${opts.signalKind}: ${opts.evidence}`,
+          });
     written.push(
       toPosix(
         relative(

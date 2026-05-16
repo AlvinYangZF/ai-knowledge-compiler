@@ -1879,6 +1879,93 @@ describe("akb CLI", () => {
     expect(ledger.match(/"kind":"verified"/g)?.length).toBe(2);
   });
 
+  it("records runtime contradiction signals from webhook and watch failures", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "runtime-failure.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_rtfail000001",
+        "title: Runtime Failure Page",
+        "references:",
+        "  - src/runtime-failure.ts",
+        "---",
+        "# Runtime Failure Page",
+        "",
+        "Runtime failure signal target.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+
+    const webhook = runCli(
+      [
+        "webhook",
+        "ci-failure",
+        "--actor-id",
+        "ci:github-actions",
+        "--changed-file",
+        "src/runtime-failure.ts",
+        "--evidence",
+        "https://ci.example/run/2",
+        "--no-commit",
+      ],
+      vault,
+    );
+    expect(webhook).toContain("Recorded 1 runtime contradiction");
+
+    const signalDir = join(vault, ".akb", "runtime-signals");
+    mkdirSync(signalDir, { recursive: true });
+    writeFileSync(
+      join(signalDir, "failure.json"),
+      JSON.stringify({
+        kind: "test_failure",
+        page_ids: ["page_rtfail000001"],
+        actor_id: "test:integration",
+        evidence: "test-run-42",
+      }),
+    );
+    const watch = runCli(["watch", "--once", "--no-commit"], vault);
+    expect(watch).toContain("Processed 1 runtime signal");
+
+    const ledger = readFileSync(
+      join(vault, "pages", ".page_rtfail000001.ledger.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const contradictions = ledger.filter(
+      (event) => event.kind === "contradicted_by",
+    );
+    expect(contradictions).toHaveLength(2);
+    expect(contradictions[0]).toMatchObject({
+      actor: "system",
+      actorId: "ci:github-actions",
+      severity: "minor",
+      reason: "ci_failure: https://ci.example/run/2",
+    });
+    expect(contradictions[1]).toMatchObject({
+      actorId: "test:integration",
+      severity: "major",
+      reason: "test_failure: test-run-42",
+    });
+
+    const projection = new ConfidenceProjection({
+      dbPath: join(vault, ".akb", "index.db"),
+      readonly: true,
+    });
+    try {
+      const state = projection
+        .getStates(["page_rtfail000001" as never])
+        .get("page_rtfail000001" as never);
+      expect(state?.contradictionCount).toBe(2);
+    } finally {
+      projection.close();
+    }
+  });
+
   it("decay writes sparse checkpoints when confidence crosses a threshold", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);

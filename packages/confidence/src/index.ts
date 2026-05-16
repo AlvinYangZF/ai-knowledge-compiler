@@ -58,6 +58,7 @@ export const ConfidenceEventSchema = z
       kind: z.literal("contradicted_by"),
       bySourceId: SourceIdSchema,
       severity: z.enum(["minor", "major"]),
+      reason: z.string().min(1).optional(),
     }),
     EventBaseSchema.extend({
       kind: z.literal("superseded_by"),
