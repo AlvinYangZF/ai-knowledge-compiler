@@ -15,6 +15,30 @@ export interface BuildCompilePatchOptions {
   now?: Date;
 }
 
+export interface DeepSeekProviderOptions {
+  apiKey: string;
+  baseUrl?: string;
+  model?: string;
+  timeoutMs?: number;
+  retries?: number;
+  fetch?: typeof fetch;
+}
+
+export interface DeepSeekChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+export interface DeepSeekJsonCall {
+  messages: DeepSeekChatMessage[];
+  responseSchemaName: string;
+}
+
+export interface DeepSeekJsonResult {
+  content: string;
+  model: string;
+}
+
 export interface CompilePatchDocument {
   id: string;
   status: "proposed" | "applied" | "rejected";
@@ -81,6 +105,95 @@ const PIPELINE_STAGES = [
   "synthesize",
   "emit",
 ] as const;
+
+const providerSecrets = new WeakMap<DeepSeekCompileProvider, string>();
+
+export class DeepSeekCompileProvider {
+  readonly baseUrl: string;
+  readonly model: string;
+  readonly timeoutMs: number;
+  readonly retries: number;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(opts: DeepSeekProviderOptions) {
+    if (opts.apiKey.length === 0) {
+      throw new Error("DeepSeek API key is required");
+    }
+    providerSecrets.set(this, opts.apiKey);
+    this.baseUrl = opts.baseUrl ?? "https://api.deepseek.com";
+    this.model = opts.model ?? "deepseek-v4-flash";
+    this.timeoutMs = opts.timeoutMs ?? 30_000;
+    this.retries = opts.retries ?? 2;
+    this.fetchImpl = opts.fetch ?? fetch;
+  }
+
+  async completeJson(call: DeepSeekJsonCall): Promise<DeepSeekJsonResult> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= this.retries; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+      try {
+        const response = await this.fetchImpl(
+          `${this.baseUrl.replace(/\/$/, "")}/chat/completions`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${providerSecrets.get(this) ?? ""}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              model: this.model,
+              messages: call.messages,
+              temperature: 0,
+              response_format: {
+                type: "json_object",
+              },
+            }),
+            signal: controller.signal,
+          },
+        );
+        if (!response.ok) {
+          throw new DeepSeekHttpError(response.status);
+        }
+        const payload = (await response.json()) as {
+          model?: string;
+          choices?: Array<{ message?: { content?: string } }>;
+        };
+        const content = payload.choices?.[0]?.message?.content;
+        if (typeof content !== "string" || content.length === 0) {
+          throw new Error(
+            `DeepSeek response missing ${call.responseSchemaName} JSON content`,
+          );
+        }
+        return {
+          content,
+          model: payload.model ?? this.model,
+        };
+      } catch (error) {
+        lastError = error;
+        if (attempt === this.retries || !shouldRetryDeepSeekError(error)) {
+          break;
+        }
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+}
+
+class DeepSeekHttpError extends Error {
+  constructor(readonly status: number) {
+    super(`DeepSeek request failed: HTTP ${status}`);
+  }
+}
+
+function shouldRetryDeepSeekError(error: unknown): boolean {
+  if (error instanceof DeepSeekHttpError) {
+    return error.status === 429 || error.status >= 500;
+  }
+  return true;
+}
 
 export function buildHeuristicCompilePatch(
   opts: BuildCompilePatchOptions,
