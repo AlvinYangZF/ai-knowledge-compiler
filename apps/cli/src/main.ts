@@ -132,6 +132,10 @@ interface ProjectionRebuildOptions {
 interface LintReport {
   lowConfidence: Array<{ page: Page; score: number }>;
   stale: Array<{ page: Page; lastVerifiedAt: string }>;
+  unresolvedContradictions: Array<{
+    page: Page;
+    contradictionCount: number;
+  }>;
   orphanPages: Page[];
   highDerivedRatio: Array<{
     page: Page;
@@ -1021,6 +1025,7 @@ async function lintCommand(): Promise<void> {
   writeLintReports(vaultDir, report);
   printLintReport(report);
   if (
+    report.unresolvedContradictions.length > 0 ||
     report.brokenWikiLinks.length > 0 ||
     report.supersessionCycles.length > 0
   ) {
@@ -1063,6 +1068,7 @@ function buildLintReport(vaultDir: string): LintReport {
 
   const lowConfidence: LintReport["lowConfidence"] = [];
   const stale: LintReport["stale"] = [];
+  const unresolvedContradictions: LintReport["unresolvedContradictions"] = [];
   const brokenWikiLinks: LintReport["brokenWikiLinks"] = [];
   const highDerivedRatio: LintReport["highDerivedRatio"] = [];
   const orphanedLineage: LintReport["orphanedLineage"] = [];
@@ -1081,6 +1087,16 @@ function buildLintReport(vaultDir: string): LintReport {
     }
     if (state?.lastVerifiedAt && isOlderThanDays(state.lastVerifiedAt, 180)) {
       stale.push({ page: item.page, lastVerifiedAt: state.lastVerifiedAt });
+    }
+    const events = loadConfidenceEvents(vaultDir, item.page.path, item.page.id);
+    if (events.length > 0) {
+      const activeContradictionCount = countActiveContradictions(events);
+      if (activeContradictionCount > 0) {
+        unresolvedContradictions.push({
+          page: item.page,
+          contradictionCount: activeContradictionCount,
+        });
+      }
     }
     const chunks = chunksByPage.get(item.page.id) ?? [];
     const derivedChunks = chunks.filter(
@@ -1138,6 +1154,7 @@ function buildLintReport(vaultDir: string): LintReport {
   return {
     lowConfidence,
     stale,
+    unresolvedContradictions,
     orphanPages,
     highDerivedRatio,
     orphanedLineage,
@@ -1146,9 +1163,27 @@ function buildLintReport(vaultDir: string): LintReport {
   };
 }
 
+function countActiveContradictions(events: ConfidenceEvent[]): number {
+  let activeContradictions = 0;
+  for (const event of [...events].sort((a, b) =>
+    a.timestamp.localeCompare(b.timestamp),
+  )) {
+    if (event.kind === "contradicted_by") {
+      activeContradictions += 1;
+    } else if (event.kind === "verified" || event.kind === "superseded_by") {
+      activeContradictions = 0;
+    }
+  }
+  return activeContradictions;
+}
+
 function printLintReport(report: LintReport): void {
   console.log("Confidence issues:");
-  if (report.lowConfidence.length === 0 && report.stale.length === 0) {
+  if (
+    report.lowConfidence.length === 0 &&
+    report.stale.length === 0 &&
+    report.unresolvedContradictions.length === 0
+  ) {
     console.log("  none");
   }
   for (const issue of report.lowConfidence) {
@@ -1159,6 +1194,11 @@ function printLintReport(report: LintReport): void {
   for (const issue of report.stale) {
     console.log(
       `  warn stale ${issue.page.id} ${issue.page.path} last_verified_at=${issue.lastVerifiedAt}`,
+    );
+  }
+  for (const issue of report.unresolvedContradictions) {
+    console.log(
+      `  error unresolved contradiction ${issue.page.id} ${issue.page.path} count=${issue.contradictionCount}`,
     );
   }
 
@@ -1234,6 +1274,19 @@ function writeLintReports(vaultDir: string, report: LintReport): void {
     ),
   );
   writeFileSync(
+    join(lintDir, "unresolved-contradictions.md"),
+    renderLintTable(
+      "Unresolved Contradictions",
+      ["Page", "Path", "Contradictions", "Suggestion"],
+      report.unresolvedContradictions.map((issue) => [
+        issue.page.id,
+        issue.page.path,
+        String(issue.contradictionCount),
+        "supersede the page or re-verify with stronger evidence",
+      ]),
+    ),
+  );
+  writeFileSync(
     join(lintDir, "derived-ratio.md"),
     renderLintTable(
       "High Derived Ratio",
@@ -1294,6 +1347,11 @@ function renderLintSuggestions(report: LintReport): string {
   for (const page of report.orphanPages) {
     lines.push(
       `- ${page.id}: add incoming/outgoing wiki links or mark it intentionally standalone.`,
+    );
+  }
+  for (const issue of report.unresolvedContradictions) {
+    lines.push(
+      `- ${issue.page.id}: resolve ${issue.contradictionCount} active contradiction(s) by superseding or re-verifying with stronger evidence.`,
     );
   }
   for (const issue of report.highDerivedRatio) {

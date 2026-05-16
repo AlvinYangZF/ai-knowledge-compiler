@@ -1106,6 +1106,189 @@ describe("akb CLI", () => {
     expect(unitReport).toContain("page_lintsrc00001");
   });
 
+  it("lint fails on unresolved active contradictions", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "contradiction.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_lintcontra01",
+        "title: Lint Contradiction",
+        "---",
+        "# Lint Contradiction",
+        "",
+        "This page has an unresolved contradiction.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+    writeFileSync(
+      join(vault, "pages", ".page_lintcontra01.ledger.jsonl"),
+      [
+        JSON.stringify({
+          id: "evt_lintcontra01",
+          kind: "source_added",
+          pageId: "page_lintcontra01",
+          timestamp: "2026-05-01T00:00:00.000Z",
+          actor: "system",
+          actorId: "akb-test",
+          sourceId: "src_lintcontra01",
+          sourceWeight: 0.8,
+        }),
+        JSON.stringify({
+          id: "evt_lintcontra02",
+          kind: "contradicted_by",
+          pageId: "page_lintcontra01",
+          timestamp: "2026-05-02T00:00:00.000Z",
+          actor: "system",
+          actorId: "akb-test",
+          bySourceId: "src_lintcontra02",
+          severity: "major",
+        }),
+        "",
+      ].join("\n"),
+    );
+
+    const failure = runCliFailure(["lint"], vault);
+    const report = readFileSync(
+      join(vault, ".akb", "lint", "unresolved-contradictions.md"),
+      "utf8",
+    );
+
+    expect(failure).toContain("unresolved contradiction");
+    expect(report).toContain("page_lintcontra01");
+  });
+
+  it("lint allows superseded contradictions", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "resolved-contradiction.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_lintresolve1",
+        "title: Resolved Contradiction",
+        "superseded_by: page_lintsupers01",
+        "---",
+        "# Resolved Contradiction",
+        "",
+        "This page has a resolved contradiction.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+    writeFileSync(
+      join(vault, "pages", ".page_lintresolve1.ledger.jsonl"),
+      [
+        JSON.stringify({
+          id: "evt_lintresolve1",
+          kind: "source_added",
+          pageId: "page_lintresolve1",
+          timestamp: "2026-05-01T00:00:00.000Z",
+          actor: "system",
+          actorId: "akb-test",
+          sourceId: "src_lintresolve1",
+          sourceWeight: 0.8,
+        }),
+        JSON.stringify({
+          id: "evt_lintresolve2",
+          kind: "contradicted_by",
+          pageId: "page_lintresolve1",
+          timestamp: "2026-05-02T00:00:00.000Z",
+          actor: "system",
+          actorId: "akb-test",
+          bySourceId: "src_lintresolve2",
+          severity: "major",
+        }),
+        JSON.stringify({
+          id: "evt_lintresolve3",
+          kind: "superseded_by",
+          pageId: "page_lintresolve1",
+          timestamp: "2026-05-03T00:00:00.000Z",
+          actor: "system",
+          actorId: "akb-test",
+          supersederPageId: "page_lintsupers01",
+        }),
+        "",
+      ].join("\n"),
+    );
+
+    const output = runCli(["lint"], vault);
+    const report = readFileSync(
+      join(vault, ".akb", "lint", "unresolved-contradictions.md"),
+      "utf8",
+    );
+
+    expect(output).not.toContain("unresolved contradiction");
+    expect(report).toContain("No issues found.");
+  });
+
+  it("lint allows re-verified contradictions", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "verified-contradiction.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_lintverify01",
+        "title: Verified Contradiction",
+        "---",
+        "# Verified Contradiction",
+        "",
+        "This page has a re-verified contradiction.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+    writeFileSync(
+      join(vault, "pages", ".page_lintverify01.ledger.jsonl"),
+      [
+        JSON.stringify({
+          id: "evt_lintverify01",
+          kind: "source_added",
+          pageId: "page_lintverify01",
+          timestamp: "2026-05-01T00:00:00.000Z",
+          actor: "system",
+          actorId: "akb-test",
+          sourceId: "src_lintverify01",
+          sourceWeight: 0.8,
+        }),
+        JSON.stringify({
+          id: "evt_lintverify02",
+          kind: "contradicted_by",
+          pageId: "page_lintverify01",
+          timestamp: "2026-05-02T00:00:00.000Z",
+          actor: "system",
+          actorId: "akb-test",
+          bySourceId: "src_lintverify02",
+          severity: "major",
+        }),
+        JSON.stringify({
+          id: "evt_lintverify03",
+          kind: "verified",
+          pageId: "page_lintverify01",
+          timestamp: "2026-05-03T00:00:00.000Z",
+          actor: "human",
+          actorId: "reviewer",
+          verifierType: "human",
+          verifierId: "reviewer",
+          reason: "Reviewed stronger evidence.",
+        }),
+        "",
+      ].join("\n"),
+    );
+
+    const output = runCli(["lint"], vault);
+    const report = readFileSync(
+      join(vault, ".akb", "lint", "unresolved-contradictions.md"),
+      "utf8",
+    );
+
+    expect(output).not.toContain("unresolved contradiction");
+    expect(report).toContain("No issues found.");
+  });
+
   it("lint fails on broken wikilinks and supersession cycles", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
