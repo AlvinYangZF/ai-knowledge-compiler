@@ -18,3 +18,4 @@
 - Added `@akb/ranker` and wired confidence-aware reranking into CLI and MCP search results, including `final_score`, component scores, confidence flags, and default filtering of superseded pages.
 - Added SQLite confidence projection tables and `akb projection rebuild --confidence`; CLI and MCP search now read projected confidence state before falling back to JSONL.
 - Added `akb lint` for low-confidence and stale warnings plus hard failures for broken wikilinks and supersession cycles.
+- Added `RECENTLY_CONTRADICTED` ranking flags for recent major contradiction events in CLI and MCP search.
