@@ -1565,11 +1565,21 @@ describe("akb CLI", () => {
       ].join("\n"),
     );
     const failure = runCliFailure(
-      ["eval", "compile", "--set", ".akb/eval/compile-golden.yaml"],
+      [
+        "eval",
+        "compile",
+        "--set",
+        ".akb/eval/compile-golden.yaml",
+        "--baseline",
+        ".akb/eval/compile-report.json",
+        "--max-relation-regression",
+        "0.08",
+      ],
       vault,
     );
     expect(failure).toContain("FAILED");
     expect(failure).toContain("expected supersede");
+    expect(failure).toContain("relation accuracy regression");
   });
 
   it("rejects duplicate compile and invalid patches without partial writes", () => {

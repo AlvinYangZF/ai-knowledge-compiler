@@ -62,6 +62,8 @@ interface EvalOptions {
 interface EvalCompileOptions {
   set?: string;
   output?: string;
+  baseline?: string;
+  maxRelationRegression?: number;
 }
 
 interface CompileGoldenItem {
@@ -90,7 +92,12 @@ interface CompileEvalFailure {
   expectedRelation: string | string[];
   actualRelation?: string;
   actualTargetPage?: string;
-  kind: "relation" | "target" | "create_page" | "delete_content";
+  kind:
+    | "relation"
+    | "target"
+    | "create_page"
+    | "delete_content"
+    | "relation_regression";
 }
 
 interface VerifyOptions {
@@ -258,6 +265,13 @@ export async function run(argv = process.argv): Promise<void> {
     .command("compile")
     .option("--set <path>", "compile golden set path")
     .option("--output <path>", "write JSON report")
+    .option("--baseline <path>", "previous compile eval JSON report")
+    .option(
+      "--max-relation-regression <ratio>",
+      "maximum allowed relation accuracy regression",
+      parseRatio,
+      0.08,
+    )
     .action(evalCompileCommand);
   program.command("lint").action(lintCommand);
   program
@@ -699,6 +713,8 @@ function evalCompileCommand(options: EvalCompileOptions): void {
   assertVault(vaultDir);
   const setOption = options.set ?? cliOptionValue("--set");
   const outputOption = options.output ?? cliOptionValue("--output");
+  const baselineOption = options.baseline ?? cliOptionValue("--baseline");
+  const maxRelationRegression = options.maxRelationRegression ?? 0.08;
   const goldenPath = resolve(
     vaultDir,
     setOption ?? ".akb/eval/compile-golden.yaml",
@@ -798,6 +814,27 @@ function evalCompileCommand(options: EvalCompileOptions): void {
     }
   }
 
+  const relationAccuracy =
+    relationChecks === 0 ? 1 : relationPasses / relationChecks;
+  const targetAccuracy = targetChecks === 0 ? 1 : targetPasses / targetChecks;
+  let baselineRelationAccuracy: number | undefined;
+  let relationAccuracyRegression: number | undefined;
+  if (baselineOption) {
+    baselineRelationAccuracy = loadBaselineRelationAccuracy(
+      resolve(vaultDir, baselineOption),
+    );
+    relationAccuracyRegression = baselineRelationAccuracy - relationAccuracy;
+    if (relationAccuracyRegression > maxRelationRegression) {
+      failures.push({
+        id: "quality_gate",
+        source: baselineOption,
+        expectedRelation: `relation accuracy regression <= ${maxRelationRegression.toFixed(4)}`,
+        actualRelation: `regression ${relationAccuracyRegression.toFixed(4)}`,
+        kind: "relation_regression",
+      });
+    }
+  }
+
   const failedItemIds = new Set(failures.map((failure) => failure.id));
   const report = {
     total: items.length,
@@ -808,9 +845,11 @@ function evalCompileCommand(options: EvalCompileOptions): void {
     passed: items.length - failedItemIds.size,
     failed: failedItemIds.size,
     failure_count: failures.length,
-    relation_accuracy:
-      relationChecks === 0 ? 1 : relationPasses / relationChecks,
-    target_accuracy: targetChecks === 0 ? 1 : targetPasses / targetChecks,
+    relation_accuracy: relationAccuracy,
+    target_accuracy: targetAccuracy,
+    baseline_relation_accuracy: baselineRelationAccuracy,
+    relation_accuracy_regression: relationAccuracyRegression,
+    max_relation_regression: baselineOption ? maxRelationRegression : undefined,
     failures,
   };
   if (outputOption) {
@@ -823,6 +862,11 @@ function evalCompileCommand(options: EvalCompileOptions): void {
   console.log(`Compile eval: ${items.length} items`);
   console.log(`  relation accuracy: ${relationPasses}/${relationChecks}`);
   console.log(`  target accuracy:   ${targetPasses}/${targetChecks}`);
+  if (relationAccuracyRegression !== undefined) {
+    console.log(
+      `  relation accuracy regression: ${relationAccuracyRegression.toFixed(4)} (max ${maxRelationRegression.toFixed(4)})`,
+    );
+  }
   if (failures.length > 0) {
     console.log("");
     console.log("FAILED:");
@@ -908,6 +952,19 @@ function loadCompileGoldenItems(path: string): CompileGoldenItem[] {
       },
     };
   });
+}
+
+function loadBaselineRelationAccuracy(path: string): number {
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  if (
+    !isRecord(parsed) ||
+    typeof parsed.relation_accuracy !== "number" ||
+    parsed.relation_accuracy < 0 ||
+    parsed.relation_accuracy > 1
+  ) {
+    throw new Error(`Invalid compile eval baseline: ${path}`);
+  }
+  return parsed.relation_accuracy;
 }
 
 function buildCompileEvalPatch(
@@ -2583,6 +2640,14 @@ function parsePositiveInt(value: string): number {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isInteger(parsed) || parsed <= 0) {
     throw new InvalidArgumentError("must be a positive integer");
+  }
+  return parsed;
+}
+
+function parseRatio(value: string): number {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+    throw new InvalidArgumentError("must be a number between 0 and 1");
   }
   return parsed;
 }
