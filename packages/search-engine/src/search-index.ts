@@ -30,6 +30,13 @@ export interface SearchOptions {
   snippetChars?: number;
 }
 
+export interface HybridSearchResult extends SearchResult {
+  retrieval_mode: "hybrid";
+  hybrid_score: number;
+  bm25_score: number;
+  vector_score: number;
+}
+
 export interface UpsertPageOptions {
   bodyStartLine?: number;
 }
@@ -57,11 +64,16 @@ export class SearchIndex {
       currentVersion < SCHEMA_VERSION
     ) {
       migrateSchema(this.db, currentVersion);
+      this.backfillMissingChunkVectors();
     }
     const migratedVersion = this.db.pragma("user_version", {
       simple: true,
     }) as number;
-    assertSchemaCompatible(migratedVersion);
+    if (!opts.readonly) {
+      assertSchemaCompatible(migratedVersion);
+    } else if (migratedVersion !== 2) {
+      assertSchemaCompatible(migratedVersion);
+    }
     if (!opts.readonly && migratedVersion === 0) {
       this.db.exec(SCHEMA_SQL);
     }
@@ -114,6 +126,11 @@ export class SearchIndex {
     const remove = this.db.transaction(() => {
       this.db.prepare("DELETE FROM pages_fts WHERE id = ?").run(pageId);
       this.db.prepare("DELETE FROM chunks_fts WHERE page_id = ?").run(pageId);
+      this.db
+        .prepare(
+          "DELETE FROM chunk_vectors WHERE chunk_id IN (SELECT id FROM chunks WHERE page_id = ?)",
+        )
+        .run(pageId);
       this.db.prepare("DELETE FROM chunks WHERE page_id = ?").run(pageId);
       this.db.prepare("DELETE FROM pages WHERE id = ?").run(pageId);
     });
@@ -134,6 +151,7 @@ export class SearchIndex {
         SELECT
           p.id, p.path, p.title, p.frontmatter,
           c.line_start, c.line_end, c.text,
+          chunks_fts.id AS chunk_id,
           bm25(chunks_fts) AS rank
         FROM chunks_fts
         JOIN chunks c ON c.id = chunks_fts.id
@@ -180,6 +198,83 @@ export class SearchIndex {
     return results;
   }
 
+  hybridSearch(query: string, opts: SearchOptions = {}): HybridSearchResult[] {
+    const topK = opts.topK ?? 10;
+    const snippetChars = opts.snippetChars ?? 200;
+    const queryVector = sparseVector(query);
+    if (queryVector.norm === 0) {
+      return [];
+    }
+
+    const bm25ByChunk = this.bm25ChunkScores(query, opts);
+    const hasVectorTable = this.hasChunkVectorsTable();
+    const rows = this.db
+      .prepare(
+        `
+        SELECT
+          p.id, p.path, p.title, p.frontmatter,
+          c.line_start, c.line_end, c.text,
+          ${hasVectorTable ? "v.dims_json, v.norm" : "NULL AS dims_json, NULL AS norm"},
+          c.id AS chunk_id
+        FROM chunks c
+        JOIN pages p ON p.id = c.page_id
+        ${hasVectorTable ? "LEFT JOIN chunk_vectors v ON v.chunk_id = c.id" : ""}
+        ORDER BY p.id, c.idx
+      `,
+      )
+      .all() as VectorCandidateRow[];
+
+    const bestByPage = new Map<string, HybridSearchResult>();
+    for (const row of rows) {
+      const frontmatter = JSON.parse(row.frontmatter) as { tags?: unknown };
+      if (
+        opts.tags?.length &&
+        !intersects(
+          opts.tags,
+          Array.isArray(frontmatter.tags) ? frontmatter.tags : [],
+        )
+      ) {
+        continue;
+      }
+      const chunkVector =
+        row.dims_json && row.norm
+          ? {
+              dims: JSON.parse(row.dims_json) as Record<string, number>,
+              norm: row.norm,
+            }
+          : sparseVector(row.text);
+      const vectorScore = cosineSimilarity(queryVector, chunkVector);
+      const bm25Score = bm25ByChunk.get(row.chunk_id) ?? 0;
+      const hybridScore = roundScore(0.65 * bm25Score + 0.35 * vectorScore);
+      if (hybridScore <= 0) {
+        continue;
+      }
+      const result: HybridSearchResult = {
+        page_id: row.id as PageId,
+        path: row.path,
+        title: row.title,
+        score: hybridScore,
+        retrieval_mode: "hybrid",
+        hybrid_score: hybridScore,
+        bm25_score: roundScore(bm25Score),
+        vector_score: roundScore(vectorScore),
+        snippet: makeSnippet(row.text, query, snippetChars),
+        citation: {
+          line_start: row.line_start,
+          line_end: row.line_end,
+        },
+      };
+      const previous = bestByPage.get(row.id);
+      if (!previous || result.hybrid_score > previous.hybrid_score) {
+        bestByPage.set(row.id, result);
+      }
+    }
+
+    return [...bestByPage.values()]
+      .sort((a, b) => b.hybrid_score - a.hybrid_score)
+      .slice(0, topK);
+  }
+
   rebuild(
     pages: Iterable<{ page: Page; body: string; bodyStartLine?: number }>,
   ): RebuildResult {
@@ -188,6 +283,7 @@ export class SearchIndex {
     const rebuild = this.db.transaction(() => {
       this.db.prepare("DELETE FROM chunks_fts").run();
       this.db.prepare("DELETE FROM pages_fts").run();
+      this.db.prepare("DELETE FROM chunk_vectors").run();
       this.db.prepare("DELETE FROM chunks").run();
       this.db.prepare("DELETE FROM pages").run();
       for (const item of items) {
@@ -370,6 +466,11 @@ export class SearchIndex {
         "DELETE FROM chunk_lineage WHERE chunk_id IN (SELECT id FROM chunks WHERE page_id = ?)",
       )
       .run(page.id);
+    this.db
+      .prepare(
+        "DELETE FROM chunk_vectors WHERE chunk_id IN (SELECT id FROM chunks WHERE page_id = ?)",
+      )
+      .run(page.id);
     this.db.prepare("DELETE FROM chunks WHERE page_id = ?").run(page.id);
     this.db
       .prepare(
@@ -426,6 +527,9 @@ export class SearchIndex {
     const insertChunkFts = this.db.prepare(
       "INSERT INTO chunks_fts (id, page_id, text) VALUES (?, ?, ?)",
     );
+    const insertChunkVector = this.db.prepare(
+      "INSERT INTO chunk_vectors (chunk_id, dims_json, norm) VALUES (?, ?, ?)",
+    );
     for (const chunk of chunks) {
       insertChunk.run({
         id: chunk.id,
@@ -438,6 +542,8 @@ export class SearchIndex {
         origin_kind: chunk.origin.kind,
       });
       insertChunkFts.run(chunk.id, chunk.pageId, chunk.text);
+      const vector = sparseVector(chunk.text);
+      insertChunkVector.run(chunk.id, JSON.stringify(vector.dims), vector.norm);
       if (isDerivedChunk(chunk)) {
         for (const row of lineageRowsForChunk(chunk)) {
           insertLineage.run(row);
@@ -486,6 +592,78 @@ export class SearchIndex {
       .get() as { count: number };
     return row.count === 1;
   }
+
+  private hasChunkVectorsTable(): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'chunk_vectors'",
+      )
+      .get() as { count: number };
+    return row.count === 1;
+  }
+
+  private backfillMissingChunkVectors(): void {
+    if (!this.hasChunkVectorsTable()) {
+      return;
+    }
+    const rows = this.db
+      .prepare(
+        `
+        SELECT c.id, c.text
+        FROM chunks c
+        LEFT JOIN chunk_vectors v ON v.chunk_id = c.id
+        WHERE v.chunk_id IS NULL
+      `,
+      )
+      .all() as Array<{ id: string; text: string }>;
+    const insert = this.db.prepare(
+      "INSERT INTO chunk_vectors (chunk_id, dims_json, norm) VALUES (?, ?, ?)",
+    );
+    const write = this.db.transaction(() => {
+      for (const row of rows) {
+        const vector = sparseVector(row.text);
+        insert.run(row.id, JSON.stringify(vector.dims), vector.norm);
+      }
+    });
+    write();
+  }
+
+  private bm25ChunkScores(
+    query: string,
+    opts: SearchOptions,
+  ): Map<string, number> {
+    const ftsQuery = toFtsQuery(query);
+    if (!ftsQuery) {
+      return new Map();
+    }
+    const rows = this.db
+      .prepare(
+        `
+        SELECT chunks_fts.id AS chunk_id, bm25(chunks_fts) AS rank
+        FROM chunks_fts
+        JOIN chunks c ON c.id = chunks_fts.id
+        JOIN pages p ON p.id = c.page_id
+        WHERE chunks_fts MATCH ?
+        ORDER BY rank
+        LIMIT ?
+      `,
+      )
+      .all(ftsQuery, Math.max((opts.topK ?? 10) * 20, 50)) as Array<{
+      chunk_id: string;
+      rank: number;
+    }>;
+    const scores = rows.map((row) => ({
+      chunkId: row.chunk_id,
+      score: row.rank < 0 ? -row.rank : 1 / (1 + row.rank),
+    }));
+    const maxScore = Math.max(...scores.map((row) => row.score), 0);
+    return new Map(
+      scores.map((row) => [
+        row.chunkId,
+        maxScore > 0 ? roundScore(row.score / maxScore) : 0,
+      ]),
+    );
+  }
 }
 
 export function openIndex(dbPath: string): SearchIndex {
@@ -494,6 +672,7 @@ export function openIndex(dbPath: string): SearchIndex {
 
 interface SearchRow {
   id: string;
+  chunk_id: string;
   path: string;
   title: string;
   frontmatter: string;
@@ -501,6 +680,19 @@ interface SearchRow {
   line_end: number;
   text: string;
   rank: number;
+}
+
+interface VectorCandidateRow {
+  id: string;
+  chunk_id: string;
+  path: string;
+  title: string;
+  frontmatter: string;
+  line_start: number;
+  line_end: number;
+  text: string;
+  dims_json: string | null;
+  norm: number | null;
 }
 
 interface ChunkRow {
@@ -602,6 +794,44 @@ function toFtsQuery(query: string): string {
   return [...query.matchAll(/[\p{L}\p{N}_]+/gu)]
     .map((match) => `"${match[0].replaceAll('"', '""')}"`)
     .join(" ");
+}
+
+function sparseVector(text: string): {
+  dims: Record<string, number>;
+  norm: number;
+} {
+  const dims: Record<string, number> = {};
+  for (const term of termsForVector(text)) {
+    dims[term] = (dims[term] ?? 0) + 1;
+  }
+  const norm = Math.sqrt(
+    Object.values(dims).reduce((sum, value) => sum + value * value, 0),
+  );
+  return { dims, norm };
+}
+
+function termsForVector(text: string): string[] {
+  return [...text.matchAll(/[\p{L}\p{N}_]+/gu)].map((match) =>
+    match[0].toLowerCase(),
+  );
+}
+
+function cosineSimilarity(
+  a: { dims: Record<string, number>; norm: number },
+  b: { dims: Record<string, number>; norm: number | null },
+): number {
+  if (a.norm === 0 || !b.norm) {
+    return 0;
+  }
+  let dot = 0;
+  for (const [term, value] of Object.entries(a.dims)) {
+    dot += value * (b.dims[term] ?? 0);
+  }
+  return roundScore(dot / (a.norm * b.norm));
+}
+
+function roundScore(value: number): number {
+  return Math.max(0, Math.min(1, Math.round(value * 1000) / 1000));
 }
 
 function intersects(needles: string[], values: unknown[]): boolean {

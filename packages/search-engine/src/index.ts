@@ -9,6 +9,7 @@ export {
   SCHEMA_VERSION,
 } from "./schema.js";
 export {
+  type HybridSearchResult,
   openIndex,
   SearchIndex,
   type SearchIndexOptions,

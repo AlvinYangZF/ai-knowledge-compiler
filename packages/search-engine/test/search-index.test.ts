@@ -73,6 +73,51 @@ describe("SearchIndex", () => {
     expect(results[0].page_id).toBe(samplePages.gc.page.id);
   });
 
+  it("stores sparse vectors and returns hybrid retrieval scores", () => {
+    idx.upsertPage(samplePages.gc.page, samplePages.gc.body);
+    idx.upsertPage(samplePages.ftl.page, samplePages.ftl.body);
+
+    const results = idx.hybridSearch("mapping cache", { topK: 5 });
+
+    expect(results[0]).toMatchObject({
+      page_id: samplePages.ftl.page.id,
+      retrieval_mode: "hybrid",
+    });
+    expect(results[0].hybrid_score).toBeGreaterThan(0);
+    expect(results[0].vector_score).toBeGreaterThan(0);
+    expect(results[0].bm25_score).toBeGreaterThan(0);
+    expect(results[0].score).toBe(results[0].hybrid_score);
+  });
+
+  it("keeps hybrid citations anchored to the matching chunk", () => {
+    idx.close();
+    const small = new SearchIndex({
+      dbPath: join(dir, "citation.db"),
+      maxChunkTokens: 6,
+    });
+    try {
+      small.upsertPage(
+        samplePages.gc.page,
+        [
+          "# Mixed Signals",
+          "",
+          "alpha beta target appears in this first section.",
+          "",
+          "## Repeated Alpha",
+          "",
+          "alpha alpha alpha alpha appears later without the target term.",
+        ].join("\n"),
+      );
+
+      const results = small.hybridSearch("alpha target", { topK: 1 });
+
+      expect(results[0].snippet).toContain("target");
+      expect(results[0].citation.line_start).toBeLessThan(5);
+    } finally {
+      small.close();
+    }
+  });
+
   it("deletePage removes page and search records", () => {
     idx.upsertPage(samplePages.gc.page, samplePages.gc.body);
     idx.deletePage(samplePages.gc.page.id);
@@ -171,7 +216,7 @@ describe("SearchIndex", () => {
     ]);
   });
 
-  it("migrates v1 indexes to the lineage schema", () => {
+  it("migrates v1 indexes to the lineage and vector schema", () => {
     idx.close();
     const dbPath = join(dir, "legacy.db");
     const db = new Database(dbPath);
@@ -218,6 +263,39 @@ describe("SearchIndex", () => {
     expect(
       migrated.getChunksForPage(samplePages.gc.page.id)[0].origin.kind,
     ).toBe("verbatim");
+    expect(
+      migrated.hybridSearch("garbage collection")[0].vector_score,
+    ).toBeGreaterThan(0);
+    migrated.close();
+  });
+
+  it("opens populated v2 indexes in readonly mode for legacy BM25 search", () => {
+    idx.close();
+    const dbPath = join(dir, "readonly-v2.db");
+    createLegacyV2Index(dbPath);
+
+    const readonly = new SearchIndex({ dbPath, readonly: true });
+    expect(readonly.search("garbage collection")[0].page_id).toBe(
+      samplePages.gc.page.id,
+    );
+    expect(readonly.hybridSearch("garbage collection")[0].vector_score).toBe(1);
+    readonly.close();
+  });
+
+  it("backfills vectors when migrating populated v2 indexes", () => {
+    idx.close();
+    const dbPath = join(dir, "populated-v2.db");
+    createLegacyV2Index(dbPath);
+
+    const migrated = new SearchIndex({ dbPath });
+    const db = new Database(dbPath, { readonly: true });
+    const vectorCount = db
+      .prepare("SELECT COUNT(*) AS count FROM chunk_vectors")
+      .get() as { count: number };
+    db.close();
+
+    expect(vectorCount.count).toBeGreaterThan(0);
+    expect(migrated.hybridSearch("garbage collection")[0].vector_score).toBe(1);
     migrated.close();
   });
 
@@ -252,3 +330,98 @@ describe("SearchIndex", () => {
     }
   });
 });
+
+function createLegacyV2Index(dbPath: string): void {
+  const db = new Database(dbPath);
+  db.exec(`
+    PRAGMA user_version = 2;
+    CREATE TABLE pages (
+      id TEXT PRIMARY KEY,
+      path TEXT NOT NULL UNIQUE,
+      title TEXT NOT NULL,
+      frontmatter TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      body_start_line INTEGER NOT NULL,
+      indexed_at TEXT NOT NULL
+    );
+    CREATE VIRTUAL TABLE pages_fts USING fts5(
+      id UNINDEXED,
+      title,
+      body,
+      tags,
+      tokenize='unicode61 remove_diacritics 2'
+    );
+    CREATE TABLE chunks (
+      id TEXT PRIMARY KEY,
+      page_id TEXT NOT NULL,
+      idx INTEGER NOT NULL,
+      line_start INTEGER NOT NULL,
+      line_end INTEGER NOT NULL,
+      text TEXT NOT NULL,
+      token_count INTEGER NOT NULL,
+      origin_kind TEXT NOT NULL DEFAULT 'verbatim'
+    );
+    CREATE TABLE chunk_lineage (
+      id TEXT PRIMARY KEY,
+      chunk_id TEXT NOT NULL,
+      source_unit_id TEXT,
+      source_chunk_id TEXT,
+      method TEXT NOT NULL,
+      patch_id TEXT NOT NULL,
+      prompt_hash TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      compiled_at TEXT NOT NULL
+    );
+    CREATE VIRTUAL TABLE chunks_fts USING fts5(
+      id UNINDEXED,
+      page_id UNINDEXED,
+      text,
+      tokenize='unicode61 remove_diacritics 2'
+    );
+  `);
+  db.prepare(
+    `
+    INSERT INTO pages (
+      id, path, title, frontmatter, content_hash, body_start_line, indexed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `,
+  ).run(
+    samplePages.gc.page.id,
+    samplePages.gc.page.path,
+    samplePages.gc.page.title,
+    JSON.stringify(samplePages.gc.page.frontmatter),
+    "legacy-hash",
+    1,
+    "2026-05-16T00:00:00.000Z",
+  );
+  db.prepare(
+    "INSERT INTO pages_fts (id, title, body, tags) VALUES (?, ?, ?, ?)",
+  ).run(
+    samplePages.gc.page.id,
+    samplePages.gc.page.title,
+    samplePages.gc.body,
+    "",
+  );
+  db.prepare(
+    `
+    INSERT INTO chunks (
+      id, page_id, idx, line_start, line_end, text, token_count, origin_kind
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `,
+  ).run(
+    `${samplePages.gc.page.id}:c0`,
+    samplePages.gc.page.id,
+    0,
+    1,
+    3,
+    "garbage collection",
+    2,
+    "verbatim",
+  );
+  db.prepare("INSERT INTO chunks_fts (id, page_id, text) VALUES (?, ?, ?)").run(
+    `${samplePages.gc.page.id}:c0`,
+    samplePages.gc.page.id,
+    "garbage collection",
+  );
+  db.close();
+}

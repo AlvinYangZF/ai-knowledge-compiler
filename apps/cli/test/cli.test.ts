@@ -82,6 +82,16 @@ describe("akb CLI", () => {
     expect(json.results[0].title).toBe("Garbage Collection Strategy");
     expect(json.results[0].citation.line_start).toBeGreaterThan(1);
 
+    const hybridJson = JSON.parse(
+      runCli(
+        ["search", "garbage collection", "--hybrid", "--format", "json"],
+        vault,
+      ),
+    );
+    expect(hybridJson.retrieval_mode).toBe("hybrid");
+    expect(hybridJson.results[0].hybrid_score).toBeGreaterThan(0);
+    expect(hybridJson.results[0].vector_score).toBeGreaterThan(0);
+
     const pageId = json.results[0].page_id;
     writeFileSync(
       join(vault, ".akb", "eval", "golden.yaml"),

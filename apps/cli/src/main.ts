@@ -59,6 +59,7 @@ interface SearchOptions {
   topK?: number;
   format?: "text" | "json";
   includeSuperseded?: boolean;
+  hybrid?: boolean;
 }
 
 interface AskOptions extends SearchOptions {}
@@ -272,6 +273,7 @@ export async function run(argv = process.argv): Promise<void> {
     .command("search")
     .argument("<query>")
     .option("--top-k <n>", "number of results", parsePositiveInt, 5)
+    .option("--hybrid", "combine BM25 with local sparse vector scores")
     .option("--format <format>", "text or json", parseFormat, "text")
     .option("--include-superseded", "include historical superseded pages")
     .action(searchCommand);
@@ -279,6 +281,7 @@ export async function run(argv = process.argv): Promise<void> {
     .command("ask")
     .argument("<question>")
     .option("--top-k <n>", "number of cited results", parsePositiveInt, 5)
+    .option("--hybrid", "combine BM25 with local sparse vector scores")
     .option("--format <format>", "text or json", parseFormat, "text")
     .option("--include-superseded", "include historical superseded pages")
     .action(askCommand);
@@ -593,7 +596,16 @@ async function searchCommand(
   const elapsedMs = Math.round(performance.now() - start);
   if (options.format === "json") {
     console.log(
-      JSON.stringify({ query, results, elapsed_ms: elapsedMs }, null, 2),
+      JSON.stringify(
+        {
+          query,
+          retrieval_mode: options.hybrid ? "hybrid" : "bm25",
+          results,
+          elapsed_ms: elapsedMs,
+        },
+        null,
+        2,
+      ),
     );
     return;
   }
@@ -601,7 +613,7 @@ async function searchCommand(
     const flags =
       result.flags.length > 0 ? ` flags=${result.flags.join(",")}` : "";
     console.log(
-      `[${offset + 1}] ${result.page_id}  ${result.path}  L${result.citation.line_start}-L${result.citation.line_end}  score=${result.final_score.toFixed(2)} bm25=${result.score.toFixed(2)}${flags}`,
+      `[${offset + 1}] ${result.page_id}  ${result.path}  L${result.citation.line_start}-L${result.citation.line_end}  score=${result.final_score.toFixed(2)} ${options.hybrid ? "hybrid" : "bm25"}=${result.score.toFixed(2)}${flags}`,
     );
     console.log(`    ${result.title}`);
     console.log(`    > ${result.snippet.replace(/\s+/g, " ")}`);
@@ -618,7 +630,9 @@ function rankedResultsForQuery(
   const index = new SearchIndex({ dbPath: join(vaultDir, ".akb", "index.db") });
   try {
     const topK = options.topK ?? 5;
-    const rawResults = index.search(query, { topK: Math.max(topK * 10, 50) });
+    const rawResults = options.hybrid
+      ? index.hybridSearch(query, { topK: Math.max(topK * 10, 50) })
+      : index.search(query, { topK: Math.max(topK * 10, 50) });
     return rankSearchResults({
       rawResults,
       confidenceState: rankConfidenceStateForResults(vaultDir, rawResults),
@@ -653,6 +667,7 @@ async function askCommand(
     answer,
     citations,
     no_evidence: noEvidence,
+    retrieval_mode: options.hybrid ? "hybrid" : "bm25",
     degraded: true,
     degraded_reason: noEvidence
       ? `No indexed knowledge matched: ${question}`

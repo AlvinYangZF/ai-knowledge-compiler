@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export const SCHEMA_SQL = `
 PRAGMA user_version = ${SCHEMA_VERSION};
@@ -54,6 +54,13 @@ CREATE INDEX IF NOT EXISTS idx_lineage_chunk ON chunk_lineage(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_lineage_source_chunk
   ON chunk_lineage(source_chunk_id);
 
+CREATE TABLE IF NOT EXISTS chunk_vectors (
+    chunk_id        TEXT PRIMARY KEY,
+    dims_json       TEXT NOT NULL,
+    norm            REAL NOT NULL,
+    FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     id UNINDEXED,
     page_id UNINDEXED,
@@ -98,6 +105,16 @@ export function migrateSchema(
       CREATE INDEX IF NOT EXISTS idx_lineage_chunk ON chunk_lineage(chunk_id);
       CREATE INDEX IF NOT EXISTS idx_lineage_source_chunk
         ON chunk_lineage(source_chunk_id);
+    `);
+  }
+  if (actual <= 2) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS chunk_vectors (
+          chunk_id        TEXT PRIMARY KEY,
+          dims_json       TEXT NOT NULL,
+          norm            REAL NOT NULL,
+          FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+      );
 
       PRAGMA user_version = ${SCHEMA_VERSION};
     `);
