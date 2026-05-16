@@ -17,6 +17,10 @@
   },
   "dependencies": {
     "@akb/core": "workspace:*",
+    "better-sqlite3": "^12.10.0",
     "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13"
   }
 }

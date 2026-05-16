@@ -1,7 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { createServer, type Server as HttpServer } from "node:http";
 import { join, resolve } from "node:path";
-import { computeConfidenceState, loadConfidenceEvents } from "@akb/confidence";
+import {
+  ConfidenceProjection,
+  computeConfidenceState,
+  loadConfidenceEvents,
+} from "@akb/confidence";
 import type { PageId, SearchResult } from "@akb/core";
 import { type RankConfidenceState, rankSearchResults } from "@akb/ranker";
 import { SearchIndex } from "@akb/search-engine";
@@ -119,8 +123,14 @@ function rankConfidenceStateForResults(
   vaultDir: string,
   results: SearchResult[],
 ): Map<PageId, RankConfidenceState> {
-  const states = new Map<PageId, RankConfidenceState>();
+  const states = loadProjectedRankConfidenceState(
+    vaultDir,
+    results.map((result) => result.page_id),
+  );
   for (const result of results) {
+    if (states.has(result.page_id)) {
+      continue;
+    }
     const events = loadConfidenceEvents(vaultDir, result.path, result.page_id);
     if (events.length === 0) {
       continue;
@@ -134,6 +144,32 @@ function rankConfidenceStateForResults(
     });
   }
   return states;
+}
+
+function loadProjectedRankConfidenceState(
+  vaultDir: string,
+  pageIds: PageId[],
+): Map<PageId, RankConfidenceState> {
+  const projection = new ConfidenceProjection({
+    dbPath: getIndexPath(vaultDir),
+    readonly: true,
+  });
+  try {
+    const states = new Map<PageId, RankConfidenceState>();
+    for (const [pageId, state] of projection.getStates(pageIds)) {
+      states.set(pageId, {
+        score: state.score,
+        supersededBy: state.supersededBy,
+        lastVerifiedAt: state.lastVerifiedAt,
+        lastEventAt: state.lastEventAt,
+      });
+    }
+    return states;
+  } catch {
+    return new Map();
+  } finally {
+    projection.close();
+  }
 }
 
 export async function startHttpMcpServer(opts: {

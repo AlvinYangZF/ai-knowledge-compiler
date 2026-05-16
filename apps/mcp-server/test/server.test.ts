@@ -1,6 +1,11 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  ConfidenceProjection,
+  computeConfidenceState,
+  parseConfidenceEvent,
+} from "@akb/confidence";
 import type { Page } from "@akb/core";
 import { SearchIndex } from "@akb/search-engine";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -98,19 +103,30 @@ describe("akb MCP server", () => {
   });
 
   it("returns confidence-aware ranked search payloads", async () => {
-    writeFileSync(
-      join(dir, "pages", ".page_mcp000000000.ledger.jsonl"),
-      `${JSON.stringify({
-        id: "evt_mcp000000001",
-        kind: "source_added",
-        pageId: "page_mcp000000000",
-        timestamp: "2026-05-01T00:00:00.000Z",
-        actor: "system",
-        actorId: "akb-test",
-        sourceId: "src_mcp000000001",
-        sourceWeight: 0.1,
-      })}\n`,
-    );
+    const ledgerPath = join(dir, "pages", ".page_mcp000000000.ledger.jsonl");
+    const event = parseConfidenceEvent({
+      id: "evt_mcp000000001",
+      kind: "source_added",
+      pageId: "page_mcp000000000",
+      timestamp: "2026-05-01T00:00:00.000Z",
+      actor: "system",
+      actorId: "akb-test",
+      sourceId: "src_mcp000000001",
+      sourceWeight: 0.1,
+    });
+    writeFileSync(ledgerPath, `${JSON.stringify(event)}\n`);
+    const projection = new ConfidenceProjection({
+      dbPath: join(dir, ".akb", "index.db"),
+    });
+    projection.rebuild([
+      {
+        pageId: event.pageId,
+        events: [event],
+        state: computeConfidenceState([event]),
+      },
+    ]);
+    projection.close();
+    rmSync(ledgerPath);
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
     const server = createAkbMcpServer(dir);

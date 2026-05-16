@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   appendConfidenceEvent,
+  ConfidenceProjection,
   computeConfidenceState,
   ledgerPathForPage,
   loadConfidenceEvents,
@@ -107,5 +108,45 @@ describe("confidence ledger", () => {
     expect(ledgerPathForPage(dir, "pages/gc.md", "page_conf00000000")).toBe(
       join(dir, "pages", ".page_conf00000000.ledger.jsonl"),
     );
+  });
+
+  it("rebuilds SQLite confidence projection tables from canonical events", () => {
+    const event = parseConfidenceEvent({
+      id: "evt_project00001",
+      kind: "source_added",
+      pageId: "page_project00001",
+      timestamp: "2026-05-01T12:00:00.000Z",
+      actor: "system",
+      actorId: "akb-test",
+      sourceId: "src_project00001",
+      sourceWeight: 0.2,
+    });
+    const state = computeConfidenceState([event], {
+      now: new Date("2026-05-15T12:00:00.000Z"),
+    });
+    const projection = new ConfidenceProjection({
+      dbPath: join(dir, "index.db"),
+    });
+
+    try {
+      const result = projection.rebuild([
+        {
+          pageId: event.pageId,
+          events: [event],
+          state,
+        },
+      ]);
+      const states = projection.getStates([event.pageId]);
+      const events = projection.getEvents(event.pageId);
+
+      expect(result).toEqual({ pages: 1, events: 1 });
+      expect(states.get(event.pageId)).toMatchObject({
+        score: state.score,
+        lastEventAt: event.timestamp,
+      });
+      expect(events).toEqual([event]);
+    } finally {
+      projection.close();
+    }
   });
 });

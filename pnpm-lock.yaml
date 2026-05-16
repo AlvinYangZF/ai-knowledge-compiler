@@ -86,9 +86,16 @@ importers:
       '@akb/core':
         specifier: workspace:*
         version: link:../core
+      better-sqlite3:
+        specifier: ^12.10.0
+        version: 12.10.0
       zod:
         specifier: ^4.1.12
         version: 4.4.3
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7.6.13
+        version: 7.6.13
 
   packages/core:
     dependencies:

@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { type PageId, PageIdSchema } from "@akb/core";
+import Database from "better-sqlite3";
 import { z } from "zod";
 
 export type SourceId = string & { readonly __brand: "SourceId" };
@@ -115,6 +116,34 @@ export interface ComputeConfidenceOptions {
   now?: Date;
   pageType?: string;
   base?: number;
+}
+
+export interface ProjectedConfidencePage {
+  pageId: PageId;
+  events: ConfidenceEvent[];
+  state: ConfidenceState;
+}
+
+export interface ConfidenceProjectionRebuildResult {
+  pages: number;
+  events: number;
+}
+
+export type ProjectedConfidenceState = Pick<
+  ConfidenceState,
+  | "pageId"
+  | "score"
+  | "sourceCount"
+  | "contradictionCount"
+  | "lastVerifiedAt"
+  | "lastEventAt"
+  | "supersededBy"
+  | "computedAt"
+>;
+
+export interface ConfidenceProjectionOptions {
+  dbPath: string;
+  readonly?: boolean;
 }
 
 export function parseConfidenceEvent(value: unknown): ConfidenceEvent {
@@ -235,6 +264,173 @@ export function computeConfidenceState(
     },
   };
 }
+
+export class ConfidenceProjection {
+  private readonly db: Database.Database;
+
+  constructor(opts: ConfidenceProjectionOptions) {
+    this.db = new Database(opts.dbPath, { readonly: opts.readonly ?? false });
+    if (!opts.readonly) {
+      this.db.pragma("journal_mode = WAL");
+      this.db.pragma("synchronous = NORMAL");
+      this.ensureSchema();
+    }
+  }
+
+  rebuild(
+    pages: Iterable<ProjectedConfidencePage>,
+  ): ConfidenceProjectionRebuildResult {
+    const items = [...pages];
+    let eventCount = 0;
+    const write = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM confidence_events").run();
+      this.db.prepare("DELETE FROM confidence_state").run();
+      const insertEvent = this.db.prepare(`
+        INSERT INTO confidence_events (
+          id, page_id, kind, timestamp, actor, actor_id, payload
+        ) VALUES (
+          @id, @pageId, @kind, @timestamp, @actor, @actorId, @payload
+        )
+      `);
+      const insertState = this.db.prepare(`
+        INSERT INTO confidence_state (
+          page_id, score, source_count, contradiction_count,
+          last_verified_at, last_event_at, superseded_by, computed_at
+        ) VALUES (
+          @pageId, @score, @sourceCount, @contradictionCount,
+          @lastVerifiedAt, @lastEventAt, @supersededBy, @computedAt
+        )
+      `);
+
+      for (const item of items) {
+        for (const event of item.events) {
+          insertEvent.run({
+            id: event.id,
+            pageId: event.pageId,
+            kind: event.kind,
+            timestamp: event.timestamp,
+            actor: event.actor,
+            actorId: event.actorId ?? null,
+            payload: JSON.stringify(event),
+          });
+          eventCount += 1;
+        }
+        insertState.run({
+          pageId: item.state.pageId,
+          score: item.state.score,
+          sourceCount: item.state.sourceCount,
+          contradictionCount: item.state.contradictionCount,
+          lastVerifiedAt: item.state.lastVerifiedAt ?? null,
+          lastEventAt: item.state.lastEventAt,
+          supersededBy: item.state.supersededBy ?? null,
+          computedAt: item.state.computedAt,
+        });
+      }
+    });
+    write();
+    return { pages: items.length, events: eventCount };
+  }
+
+  getStates(pageIds: Iterable<PageId>): Map<PageId, ProjectedConfidenceState> {
+    if (!this.hasProjectionTables()) {
+      return new Map();
+    }
+    const get = this.db.prepare(`
+      SELECT
+        page_id, score, source_count, contradiction_count,
+        last_verified_at, last_event_at, superseded_by, computed_at
+      FROM confidence_state
+      WHERE page_id = ?
+    `);
+    const states = new Map<PageId, ProjectedConfidenceState>();
+    for (const pageId of pageIds) {
+      const row = get.get(pageId) as ConfidenceStateRow | undefined;
+      if (!row) {
+        continue;
+      }
+      states.set(pageId, {
+        pageId: row.page_id as PageId,
+        score: row.score,
+        sourceCount: row.source_count,
+        contradictionCount: row.contradiction_count,
+        lastVerifiedAt: row.last_verified_at ?? undefined,
+        lastEventAt: row.last_event_at,
+        supersededBy: row.superseded_by
+          ? (row.superseded_by as PageId)
+          : undefined,
+        computedAt: row.computed_at,
+      });
+    }
+    return states;
+  }
+
+  getEvents(pageId: PageId): ConfidenceEvent[] {
+    if (!this.hasProjectionTables()) {
+      return [];
+    }
+    return (
+      this.db
+        .prepare(
+          "SELECT payload FROM confidence_events WHERE page_id = ? ORDER BY timestamp, id",
+        )
+        .all(pageId) as Array<{ payload: string }>
+    ).map((row) => parseConfidenceEvent(JSON.parse(row.payload)));
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  private ensureSchema(): void {
+    this.db.exec(CONFIDENCE_PROJECTION_SQL);
+  }
+
+  private hasProjectionTables(): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name IN ('confidence_events', 'confidence_state')",
+      )
+      .get() as { count: number };
+    return row.count === 2;
+  }
+}
+
+interface ConfidenceStateRow {
+  page_id: string;
+  score: number;
+  source_count: number;
+  contradiction_count: number;
+  last_verified_at: string | null;
+  last_event_at: string;
+  superseded_by: string | null;
+  computed_at: string;
+}
+
+const CONFIDENCE_PROJECTION_SQL = `
+CREATE TABLE IF NOT EXISTS confidence_events (
+    id              TEXT PRIMARY KEY,
+    page_id         TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    timestamp       TEXT NOT NULL,
+    actor           TEXT NOT NULL,
+    actor_id        TEXT,
+    payload         TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_conf_events_page_time
+  ON confidence_events(page_id, timestamp);
+
+CREATE TABLE IF NOT EXISTS confidence_state (
+    page_id              TEXT PRIMARY KEY,
+    score                REAL NOT NULL,
+    source_count         INTEGER NOT NULL,
+    contradiction_count  INTEGER NOT NULL,
+    last_verified_at     TEXT,
+    last_event_at        TEXT NOT NULL,
+    superseded_by        TEXT,
+    computed_at          TEXT NOT NULL
+);
+`;
 
 function computeTimeDecay(
   lastEventAt: string,

@@ -12,6 +12,7 @@ import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   appendConfidenceEvent,
+  ConfidenceProjection,
   computeConfidenceState,
   loadConfidenceEvents,
   parseConfidenceEvent,
@@ -68,6 +69,11 @@ interface MigrateOptions {
 
 interface ConfidenceShowOptions {
   format?: "text" | "json";
+}
+
+interface ProjectionRebuildOptions {
+  confidence?: boolean;
+  all?: boolean;
 }
 
 export async function run(argv = process.argv): Promise<void> {
@@ -134,6 +140,12 @@ export async function run(argv = process.argv): Promise<void> {
     .argument("<page-id-or-path>")
     .option("--format <format>", "text or json", parseFormat, "text")
     .action(confidenceShowCommand);
+  const projection = program.command("projection");
+  projection
+    .command("rebuild")
+    .option("--confidence", "rebuild confidence ledger projection")
+    .option("--all", "rebuild all supported projections")
+    .action(projectionRebuildCommand);
   const mcp = program.command("mcp");
   mcp
     .command("serve")
@@ -352,8 +364,14 @@ function rankConfidenceStateForResults(
   vaultDir: string,
   results: SearchResult[],
 ): Map<PageId, RankConfidenceState> {
-  const states = new Map<PageId, RankConfidenceState>();
+  const states = loadProjectedRankConfidenceState(
+    vaultDir,
+    results.map((result) => result.page_id),
+  );
   for (const result of results) {
+    if (states.has(result.page_id)) {
+      continue;
+    }
     const events = loadConfidenceEvents(vaultDir, result.path, result.page_id);
     if (events.length === 0) {
       continue;
@@ -367,6 +385,32 @@ function rankConfidenceStateForResults(
     });
   }
   return states;
+}
+
+function loadProjectedRankConfidenceState(
+  vaultDir: string,
+  pageIds: PageId[],
+): Map<PageId, RankConfidenceState> {
+  const projection = new ConfidenceProjection({
+    dbPath: join(vaultDir, ".akb", "index.db"),
+    readonly: true,
+  });
+  try {
+    const states = new Map<PageId, RankConfidenceState>();
+    for (const [pageId, state] of projection.getStates(pageIds)) {
+      states.set(pageId, {
+        score: state.score,
+        supersededBy: state.supersededBy,
+        lastVerifiedAt: state.lastVerifiedAt,
+        lastEventAt: state.lastEventAt,
+      });
+    }
+    return states;
+  } catch {
+    return new Map();
+  } finally {
+    projection.close();
+  }
 }
 
 async function evalCommand(options: EvalOptions): Promise<void> {
@@ -406,6 +450,52 @@ async function evalCommand(options: EvalOptions): Promise<void> {
     }
   } finally {
     index.close();
+  }
+}
+
+async function projectionRebuildCommand(
+  options: ProjectionRebuildOptions,
+): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  if (!options.confidence && !options.all) {
+    throw new Error("Choose a projection to rebuild: --confidence or --all");
+  }
+
+  const pages = scanVaultPages(vaultDir);
+  const projection = new ConfidenceProjection({
+    dbPath: join(vaultDir, ".akb", "index.db"),
+  });
+  try {
+    const result = projection.rebuild(
+      pages.flatMap((item) => {
+        const events = loadConfidenceEvents(
+          vaultDir,
+          item.page.path,
+          item.page.id,
+        );
+        if (events.length === 0) {
+          return [];
+        }
+        return [
+          {
+            pageId: item.page.id,
+            events,
+            state: computeConfidenceState(events, {
+              pageType:
+                typeof item.page.frontmatter.type === "string"
+                  ? item.page.frontmatter.type
+                  : undefined,
+            }),
+          },
+        ];
+      }),
+    );
+    console.log(
+      `Rebuilt confidence projection for ${result.pages} page${result.pages === 1 ? "" : "s"} and ${result.events} event${result.events === 1 ? "" : "s"}.`,
+    );
+  } finally {
+    projection.close();
   }
 }
 

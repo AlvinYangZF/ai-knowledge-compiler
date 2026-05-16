@@ -465,4 +465,49 @@ describe("akb CLI", () => {
     );
     expect(oldResult.flags).toContain("SUPERSEDED");
   });
+
+  it("rebuilds confidence projection and uses it for search ranking", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "projection.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_projsearch01",
+        "title: Projection Search",
+        "---",
+        "# Projection Search",
+        "",
+        "Projection-backed confidence search should flag weak sources.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+    const ledgerPath = join(vault, "pages", ".page_projsearch01.ledger.jsonl");
+    writeFileSync(
+      ledgerPath,
+      `${JSON.stringify({
+        id: "evt_projsearch01",
+        kind: "source_added",
+        pageId: "page_projsearch01",
+        timestamp: "2026-05-01T12:00:00.000Z",
+        actor: "system",
+        actorId: "akb-test",
+        sourceId: "src_projsearch01",
+        sourceWeight: 0.1,
+      })}\n`,
+    );
+
+    const output = runCli(["projection", "rebuild", "--confidence"], vault);
+    rmSync(ledgerPath);
+    runCli(["index", "--rebuild"], vault);
+    const ranked = JSON.parse(
+      runCli(["search", "projection", "--format", "json"], vault),
+    );
+
+    expect(output).toContain("Rebuilt confidence projection");
+    expect(ranked.results[0].page_id).toBe("page_projsearch01");
+    expect(ranked.results[0].flags).toContain("NEEDS_REVIEW");
+    expect(ranked.results[0].component_scores.confidence).toBeLessThan(0.5);
+  });
 });
