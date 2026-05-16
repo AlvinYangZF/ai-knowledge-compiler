@@ -2438,6 +2438,212 @@ describe("akb CLI", () => {
     ).toBe(true);
   });
 
+  it("applies merge patches by replacing only the target section", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "merge-target.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_mergetarget1",
+        "title: Merge Target",
+        "---",
+        "# Merge Target",
+        "",
+        "Intro stays.",
+        "",
+        "## Trigger Conditions",
+        "",
+        "Old fixed threshold.",
+        "",
+        "## Untouched Section",
+        "",
+        "This section must remain.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+    writeFileSync(
+      join(vault, ".akb", "patches", "patch_merge_replace.yaml"),
+      [
+        "id: patch_merge_replace",
+        "status: proposed",
+        "source:",
+        "  pageId: page_mergetarget1",
+        "changes:",
+        "  - type: modify",
+        "    pageId: page_mergetarget1",
+        "    operation: replace_section",
+        '    targetSection: "Trigger Conditions"',
+        "    relation: merge",
+        "    classifyConfidence: 0.9",
+        '    reasoning: "merge threshold wording"',
+        "    content: |",
+        "      ## Trigger Conditions",
+        "",
+        '      <!-- akb:derived source=page_mergetarget1:c1 method=merge patch=patch_merge_replace promptHash="sha256:test" modelId="deepseek-v4-pro" compiledAt="2026-05-16T00:00:00.000Z" -->',
+        "      New adaptive threshold.",
+        "    confidenceImpact:",
+        "      kind: source_added",
+        "      sourceWeight: 0.8",
+        "lineage:",
+        "  units:",
+        "    - id: su_merge",
+        "      sourcePageId: page_mergetarget1",
+        "      sourceChunkIds:",
+        "        - page_mergetarget1:c1",
+        "      kind: claim_cluster",
+        "  derivedChunks: []",
+      ].join("\n"),
+    );
+
+    runCli(["patch", "apply", "patch_merge_replace", "--no-commit"], vault);
+    const updated = readFileSync(
+      join(vault, "pages", "merge-target.md"),
+      "utf8",
+    );
+
+    expect(updated).toContain("Intro stays.");
+    expect(updated).toContain("New adaptive threshold.");
+    expect(updated).not.toContain("Old fixed threshold.");
+    expect(updated).toContain("## Untouched Section");
+    expect(updated).toContain("This section must remain.");
+  });
+
+  it("rejects missing replace_section targets before partial writes", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const first = join(dir, "replace-first.md");
+    const second = join(dir, "replace-second.md");
+    writeFileSync(
+      first,
+      [
+        "---",
+        "id: page_replaaaa0001",
+        "title: Replace First",
+        "---",
+        "# Replace First",
+        "",
+        "First body.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      second,
+      [
+        "---",
+        "id: page_replbbbb0001",
+        "title: Replace Second",
+        "---",
+        "# Replace Second",
+        "",
+        "## Present",
+        "",
+        "Second body.",
+      ].join("\n"),
+    );
+    runCli(["ingest", first, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", second, "--no-commit", "--no-compile"], vault);
+    const before = readFileSync(
+      join(vault, "pages", "replace-first.md"),
+      "utf8",
+    );
+    writeFileSync(
+      join(vault, ".akb", "patches", "patch_replace_missing.yaml"),
+      [
+        "id: patch_replace_missing",
+        "status: proposed",
+        "changes:",
+        "  - type: modify",
+        "    pageId: page_replaaaa0001",
+        "    operation: append_section",
+        "    relation: extend",
+        "    classifyConfidence: 0.8",
+        "    reasoning: valid first change",
+        "    content: |",
+        "      ## Should Not Land",
+        "      <!-- akb:derived source=page_replaaaa0001:c0 method=extend patch=patch_replace_missing -->",
+        "      This must not apply.",
+        "  - type: modify",
+        "    pageId: page_replbbbb0001",
+        "    operation: replace_section",
+        "    targetSection: Missing",
+        "    relation: merge",
+        "    classifyConfidence: 0.8",
+        "    reasoning: missing target",
+        "    content: |",
+        "      ## Missing",
+        "      <!-- akb:derived source=page_replbbbb0001:c1 method=merge patch=patch_replace_missing -->",
+        "      Replacement.",
+      ].join("\n"),
+    );
+
+    const failure = runCliFailure(
+      ["patch", "apply", "patch_replace_missing", "--no-commit"],
+      vault,
+    );
+
+    expect(failure).toContain("target section not found");
+    expect(readFileSync(join(vault, "pages", "replace-first.md"), "utf8")).toBe(
+      before,
+    );
+  });
+
+  it("ignores headings inside fenced code when replacing sections", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "fenced-target.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_fencedrep001",
+        "title: Fenced Target",
+        "---",
+        "# Fenced Target",
+        "",
+        "```",
+        "## Trigger Conditions",
+        "not a real heading",
+        "```",
+        "",
+        "## Trigger Conditions",
+        "",
+        "Real old section.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+    writeFileSync(
+      join(vault, ".akb", "patches", "patch_replace_fenced.yaml"),
+      [
+        "id: patch_replace_fenced",
+        "status: proposed",
+        "changes:",
+        "  - type: modify",
+        "    pageId: page_fencedrep001",
+        "    operation: replace_section",
+        "    targetSection: Trigger Conditions",
+        "    relation: merge",
+        "    classifyConfidence: 0.8",
+        "    reasoning: fenced heading ignored",
+        "    content: |",
+        "      ## Trigger Conditions",
+        "      <!-- akb:derived source=page_fencedrep001:c1 method=merge patch=patch_replace_fenced -->",
+        "      Real new section.",
+      ].join("\n"),
+    );
+
+    runCli(["patch", "apply", "patch_replace_fenced", "--no-commit"], vault);
+    const updated = readFileSync(
+      join(vault, "pages", "fenced-target.md"),
+      "utf8",
+    );
+
+    expect(updated).toContain("```");
+    expect(updated).toContain("not a real heading");
+    expect(updated).toContain("Real new section.");
+    expect(updated).not.toContain("Real old section.");
+  });
+
   it("rejects unsafe or inconsistent create patches before writing pages", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);

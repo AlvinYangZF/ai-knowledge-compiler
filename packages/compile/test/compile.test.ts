@@ -59,7 +59,8 @@ describe("compile pipeline", () => {
               {
                 type: "modify",
                 pageId: "page_compilepkg21",
-                operation: "append_section",
+                operation: "replace_section",
+                targetSection: "Threshold Policy",
                 relation: "merge",
                 classifyConfidence: 0.91,
                 reasoning: "Merged threshold policy update.",
@@ -86,7 +87,7 @@ describe("compile pipeline", () => {
         page(
           "page_compilepkg21",
           "Garbage Collection",
-          "Garbage collection uses threshold policy.",
+          "# Garbage Collection\n\n## Threshold Policy\n\nGarbage collection uses threshold policy.",
         ),
       ],
       model: "deepseek-v4-pro",
@@ -109,6 +110,8 @@ describe("compile pipeline", () => {
     expect(patch.changes[0]).toMatchObject({
       type: "modify",
       pageId: "page_compilepkg21",
+      operation: "replace_section",
+      targetSection: "Threshold Policy",
       relation: "merge",
     });
     expect(patch.lineage.units).toEqual([

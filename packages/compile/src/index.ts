@@ -92,7 +92,8 @@ export type CompilePatchChange =
   | {
       type: "modify";
       pageId: string;
-      operation: "append_section";
+      operation: "append_section" | "replace_section";
+      targetSection?: string;
       relation: "extend" | "merge" | "contradict";
       classifyConfidence: number;
       reasoning: string;
@@ -752,18 +753,38 @@ function parsePatchChanges(
       return [];
     }
     if (change.type === "modify") {
+      if (
+        change.operation !== "append_section" &&
+        change.operation !== "replace_section"
+      ) {
+        return [];
+      }
       const pageId =
         context.target?.page.id ??
         (typeof change.pageId === "string" ? change.pageId : undefined);
+      const targetSection =
+        change.operation === "replace_section" &&
+        typeof change.targetSection === "string" &&
+        change.targetSection.trim().length > 0
+          ? change.targetSection
+          : undefined;
       const content = typeof change.content === "string" ? change.content : "";
-      if (!pageId || !isLineageMarkedContent(content)) {
+      if (
+        !pageId ||
+        !isLineageMarkedContent(content) ||
+        (change.operation === "replace_section" && !targetSection)
+      ) {
         return [];
       }
       return [
         {
           type: "modify",
           pageId,
-          operation: "append_section",
+          operation:
+            change.operation === "replace_section"
+              ? "replace_section"
+              : "append_section",
+          targetSection,
           relation:
             change.relation === "merge" ||
             change.relation === "contradict" ||
@@ -857,7 +878,7 @@ function parsePatchChanges(
 function derivedChunksForChanges(opts: {
   changes: CompilePatchChange[];
   units: SemanticUnit[];
-  targetChunks: Array<{ id: string }>;
+  targetChunks: Array<{ id: string; text?: string }>;
   promptHash: string;
   model: string;
   timestamp: string;
@@ -873,7 +894,7 @@ function derivedChunksForChanges(opts: {
     const chunkId =
       change.type === "create"
         ? `${change.newPageId}:c0`
-        : `${change.pageId}:c${opts.targetChunks.length}`;
+        : targetChunkIdForChange(change, opts.targetChunks);
     return [
       {
         chunkId,
@@ -888,6 +909,31 @@ function derivedChunksForChanges(opts: {
       },
     ];
   });
+}
+
+function targetChunkIdForChange(
+  change: Extract<CompilePatchChange, { type: "modify" }>,
+  targetChunks: Array<{ id: string; text?: string }>,
+): string {
+  if (change.operation === "replace_section" && change.targetSection) {
+    const target = normalizeHeading(change.targetSection);
+    const chunk = targetChunks.find((item) =>
+      item.text
+        ?.split("\n")[0]
+        ?.replace(/^#+\s*/, "")
+        .trim()
+        .toLowerCase()
+        .includes(target),
+    );
+    if (chunk) {
+      return chunk.id;
+    }
+  }
+  return `${change.pageId}:c${targetChunks.length}`;
+}
+
+function normalizeHeading(value: string): string {
+  return value.trim().toLowerCase();
 }
 
 function isLineageMarkedContent(content: string): boolean {

@@ -212,7 +212,8 @@ type PatchChange =
   | {
       type: "modify";
       pageId: string;
-      operation: "append_section";
+      operation: "append_section" | "replace_section";
+      targetSection?: string;
       relation: string;
       classifyConfidence: number;
       reasoning: string;
@@ -2539,11 +2540,15 @@ async function patchApplyCommand(
         throw new Error(`Patch target page not found: ${change.pageId}`);
       }
       const parsed = pageFromFile(vaultDir, file);
-      writeMarkdownFile(
-        file,
-        parsed.page.frontmatter,
-        `${parsed.body.trimEnd()}\n\n${change.content.trimEnd()}`,
-      );
+      const nextBody =
+        change.operation === "replace_section"
+          ? replaceMarkdownSection(
+              parsed.body,
+              String(change.targetSection ?? ""),
+              change.content,
+            )
+          : `${parsed.body.trimEnd()}\n\n${change.content.trimEnd()}`;
+      writeMarkdownFile(file, parsed.page.frontmatter, nextBody);
       written.add(parsed.page.path);
       appendPatchConfidenceEvent(vaultDir, parsed.page, change, patch);
       written.add(
@@ -3391,8 +3396,18 @@ function parsePatchChange(change: unknown): PatchChange {
     if (!isValidPageId(change.pageId)) {
       throw new Error("Invalid patch: invalid change pageId");
     }
-    if (change.operation !== "append_section") {
+    if (
+      change.operation !== "append_section" &&
+      change.operation !== "replace_section"
+    ) {
       throw new Error("Invalid patch: unsupported modify operation");
+    }
+    if (
+      change.operation === "replace_section" &&
+      (typeof change.targetSection !== "string" ||
+        change.targetSection.trim().length === 0)
+    ) {
+      throw new Error("Invalid patch: replace_section requires targetSection");
     }
     if (typeof change.relation !== "string" || change.relation.length === 0) {
       throw new Error("Invalid patch: missing relation");
@@ -3538,10 +3553,20 @@ function validatePatchForApply(vaultDir: string, patch: PatchDocument): void {
       }
       continue;
     }
-    if (!resolvePageFile(vaultDir, change.pageId)) {
+    const targetFile = resolvePageFile(vaultDir, change.pageId);
+    if (!targetFile) {
       throw new Error(`Invalid patch: target page not found ${change.pageId}`);
     }
     if (change.type === "modify") {
+      const parsed = pageFromFile(vaultDir, targetFile);
+      if (
+        change.operation === "replace_section" &&
+        findMarkdownSection(parsed.body, change.targetSection).start === -1
+      ) {
+        throw new Error(
+          `Invalid patch: target section not found ${change.targetSection}`,
+        );
+      }
       for (const source of extractDerivedSources(change.content)) {
         if (source.includes(":c")) {
           if (!sourceChunkExists(vaultDir, source)) {
@@ -3584,6 +3609,68 @@ function extractDerivedSources(content: string): string[] {
     );
   }
   return sources;
+}
+
+function replaceMarkdownSection(
+  body: string,
+  targetSection: string,
+  replacement: string,
+): string {
+  const lines = body.split("\n");
+  const { start, end } = findMarkdownSection(body, targetSection);
+  if (start === -1) {
+    throw new Error(`Invalid patch: target section not found ${targetSection}`);
+  }
+  return [
+    ...lines.slice(0, start),
+    ...replacement.trimEnd().split("\n"),
+    ...lines.slice(end),
+  ].join("\n");
+}
+
+function findMarkdownSection(
+  body: string,
+  targetSection: string | undefined,
+): { start: number; end: number } {
+  if (!targetSection) {
+    return { start: -1, end: -1 };
+  }
+  const lines = body.split("\n");
+  const target = normalizeSectionTitle(targetSection);
+  let fenced = false;
+  let start = -1;
+  let level = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (/^\s*(```|~~~)/.test(lines[index])) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced) {
+      continue;
+    }
+    const match = lines[index].match(/^(#{1,6})\s+(.+?)\s*$/);
+    if (!match) {
+      continue;
+    }
+    if (start === -1) {
+      if (normalizeSectionTitle(match[2]) === target) {
+        start = index;
+        level = match[1].length;
+      }
+      continue;
+    }
+    if (match[1].length <= level) {
+      return { start, end: index };
+    }
+  }
+  return start === -1 ? { start: -1, end: -1 } : { start, end: lines.length };
+}
+
+function normalizeSectionTitle(value: string): string {
+  return value
+    .replace(/^#+\s*/, "")
+    .trim()
+    .toLowerCase();
 }
 
 function lineageUnitExists(patch: PatchDocument, unitId: string): boolean {
