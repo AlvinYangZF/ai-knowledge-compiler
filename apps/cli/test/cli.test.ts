@@ -1734,6 +1734,7 @@ describe("akb CLI", () => {
         '  host: "127.0.0.1"',
         "  port: 8765",
         "llm:",
+        '  base_url: "https://deepseek.test"',
         '  model: "deepseek-v4-pro"',
         '  api_key_env: "AKB_TEST_DEEPSEEK_KEY"',
         "",
@@ -1754,7 +1755,7 @@ describe("akb CLI", () => {
     );
     runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
 
-    runCli(["compile", "--source", "page_compilecfg01"], vault);
+    const output = runCli(["compile", "--source", "page_compilecfg01"], vault);
     const patch = readFileSync(
       join(vault, ".akb", "patches", "patch_page_compilecfg01.yaml"),
       "utf8",
@@ -1763,6 +1764,7 @@ describe("akb CLI", () => {
     expect(patch).toContain("modelId: deepseek-v4-pro");
     expect(patch).toContain("apiKeyEnv: AKB_TEST_DEEPSEEK_KEY");
     expect(patch).toContain("degradedReason: AKB_TEST_DEEPSEEK_KEY not set");
+    expect(output).toContain("Warning: compile degraded");
   });
 
   it("applies duplicate compile patches without changing markdown", () => {

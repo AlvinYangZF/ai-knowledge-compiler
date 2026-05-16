@@ -11,8 +11,10 @@ export interface BuildCompilePatchOptions {
   source: CompilePageInput;
   candidates: CompilePageInput[];
   model?: string;
+  baseUrl?: string;
   apiKeyEnv?: string;
   deepseekApiKey?: string;
+  provider?: CompileJsonProvider;
   now?: Date;
 }
 
@@ -38,6 +40,11 @@ export interface DeepSeekJsonCall {
 export interface DeepSeekJsonResult {
   content: string;
   model: string;
+}
+
+export interface CompileJsonProvider {
+  readonly model?: string;
+  completeJson(call: DeepSeekJsonCall): Promise<DeepSeekJsonResult>;
 }
 
 export interface CompilePatchDocument {
@@ -86,7 +93,7 @@ export type CompilePatchChange =
       type: "modify";
       pageId: string;
       operation: "append_section";
-      relation: "extend" | "contradict";
+      relation: "extend" | "merge" | "contradict";
       classifyConfidence: number;
       reasoning: string;
       content: string;
@@ -205,6 +212,205 @@ function shouldRetryDeepSeekError(error: unknown): boolean {
     return error.status === 429 || error.status >= 500;
   }
   return true;
+}
+
+export async function buildCompilePatch(
+  opts: BuildCompilePatchOptions,
+): Promise<CompilePatchDocument> {
+  const model = opts.model ?? "deepseek-v4-flash";
+  const provider =
+    opts.provider ??
+    (opts.deepseekApiKey
+      ? new DeepSeekCompileProvider({
+          apiKey: opts.deepseekApiKey,
+          baseUrl: opts.baseUrl,
+          model,
+        })
+      : undefined);
+  if (!provider) {
+    return buildHeuristicCompilePatch(opts);
+  }
+
+  try {
+    return await buildDeepSeekCompilePatch(opts, provider);
+  } catch (error) {
+    const patch = buildHeuristicCompilePatch(opts);
+    patch.compileMeta.degradedReason = `DeepSeek compile failed: ${sanitizedErrorMessage(error, opts.deepseekApiKey)}`;
+    return patch;
+  }
+}
+
+async function buildDeepSeekCompilePatch(
+  opts: BuildCompilePatchOptions,
+  provider: CompileJsonProvider,
+): Promise<CompilePatchDocument> {
+  const started = Date.now();
+  const model = provider.model ?? opts.model ?? "deepseek-v4-flash";
+  const timestamp = (opts.now ?? new Date()).toISOString();
+  const patchId = `patch_${opts.source.page.id}`;
+  let resolvedModel = model;
+  const sourceChunks = chunkByHeaders(opts.source.page.id, opts.source.body, {
+    bodyStartLine: opts.source.bodyStartLine,
+  });
+  let llmCallCount = 0;
+
+  const segmentPrompt = JSON.stringify({
+    task: "segment",
+    sourcePage: opts.source.page,
+    chunks: sourceChunks.map((chunk) => ({
+      id: chunk.id,
+      text: chunk.text,
+      lineStart: chunk.lineStart,
+      lineEnd: chunk.lineEnd,
+    })),
+  });
+  const segmentResult = await provider.completeJson({
+    responseSchemaName: "segment",
+    messages: compileMessages(
+      "Segment the source into semantic units. Return JSON only.",
+      segmentPrompt,
+    ),
+  });
+  resolvedModel = segmentResult.model || resolvedModel;
+  const segment = parseJsonObject(segmentResult.content, "segment");
+  llmCallCount += 1;
+  const units = parseSemanticUnits(segment, opts.source.page.id, sourceChunks);
+
+  const target = locateCompileTarget(opts.source, opts.candidates);
+  const targetChunks = target
+    ? chunkByHeaders(target.page.id, target.body, {
+        bodyStartLine: target.bodyStartLine,
+      })
+    : [];
+  const classifyPrompt = JSON.stringify({
+    task: "classify",
+    units,
+    candidatePage: target
+      ? {
+          page: target.page,
+          body: target.body,
+        }
+      : undefined,
+  });
+  const classifyResult = await provider.completeJson({
+    responseSchemaName: "classify",
+    messages: compileMessages(
+      "Classify the relation as new, extend, merge, contradict, supersede, or duplicate. Return JSON only.",
+      classifyPrompt,
+    ),
+  });
+  resolvedModel = classifyResult.model || resolvedModel;
+  const classify = parseJsonObject(classifyResult.content, "classify");
+  llmCallCount += 1;
+  const relation = parseCompileRelation(classify.relation);
+  const classifyConfidence = parseConfidence(classify.confidence);
+  const reasoning =
+    typeof classify.reasoning === "string"
+      ? classify.reasoning
+      : "DeepSeek relation classification";
+
+  let changes: CompilePatchChange[];
+  if (relation === "duplicate" && target) {
+    changes = [
+      {
+        type: "confidence_only",
+        pageId: target.page.id,
+        relation: "duplicate",
+        confidenceImpact: {
+          kind: "source_added",
+          sourceWeight: 0.8,
+        },
+      },
+    ];
+  } else {
+    const synthesizePrompt = JSON.stringify({
+      task: "synthesize",
+      patchId,
+      relation,
+      classifyConfidence,
+      reasoning,
+      sourcePage: opts.source.page,
+      units,
+      candidatePage: target
+        ? {
+            page: target.page,
+            body: target.body,
+          }
+        : undefined,
+    });
+    const synthesizeResult = await provider.completeJson({
+      responseSchemaName: "synthesize",
+      messages: compileMessages(
+        "Generate patch changes for the classified relation. Return JSON only.",
+        synthesizePrompt,
+      ),
+    });
+    resolvedModel = synthesizeResult.model || resolvedModel;
+    const synthesize = parseJsonObject(synthesizeResult.content, "synthesize");
+    llmCallCount += 1;
+    changes = parsePatchChanges(synthesize, {
+      relation,
+      classifyConfidence,
+      reasoning,
+      target,
+      source: opts.source,
+    });
+  }
+
+  const promptHashes = {
+    segment: stablePromptHash("segment/deepseek-v0.1"),
+    locate: stablePromptHash("locate/deterministic-v0.1"),
+    classify: stablePromptHash("classify/deepseek-v0.1"),
+    synthesize: stablePromptHash("synthesize/deepseek-v0.1"),
+    emit: stablePromptHash("emit/deterministic-v0.1"),
+  };
+
+  return {
+    id: patchId,
+    status: "proposed",
+    source: {
+      sourceId: stableId("src", opts.source.page.id),
+      pageId: opts.source.page.id,
+      ingestPath: opts.source.page.path,
+    },
+    compileMeta: {
+      provider: "deepseek",
+      modelId: resolvedModel,
+      apiKeyEnv: opts.apiKeyEnv ?? "DEEPSEEK_API_KEY",
+      promptHashes,
+      pipelineVersion: "compile/0.1",
+      stages: [
+        { name: "segment", provider: "deepseek", degraded: false },
+        { name: "locate", provider: "deterministic", degraded: false },
+        { name: "classify", provider: "deepseek", degraded: false },
+        { name: "synthesize", provider: "deepseek", degraded: false },
+        { name: "emit", provider: "deterministic", degraded: false },
+      ],
+      segmentCount: units.length,
+      llmCallCount,
+      elapsedMs: Math.max(0, Date.now() - started),
+      degraded: false,
+      temperature: 0,
+      createdAt: timestamp,
+    },
+    changes,
+    lineage: {
+      units: units.map((unit) => ({
+        id: unit.id,
+        sourcePageId: opts.source.page.id,
+        sourceChunkIds: unit.sourceChunkIds,
+        kind: unit.kind,
+      })),
+      derivedChunks: derivedChunksForChanges({
+        changes,
+        units,
+        targetChunks,
+        promptHash: promptHashes.synthesize,
+        model,
+        timestamp,
+      }),
+    },
+  };
 }
 
 export function buildHeuristicCompilePatch(
@@ -410,6 +616,314 @@ export function buildHeuristicCompilePatch(
           : [],
     },
   };
+}
+
+interface SemanticUnit {
+  id: string;
+  sourceChunkIds: string[];
+  text: string;
+  kind: string;
+  lineRange?: { start: number; end: number };
+}
+
+function compileMessages(system: string, user: string): DeepSeekChatMessage[] {
+  return [
+    { role: "system", content: `${system}\nOutput ONLY JSON.` },
+    { role: "user", content: user },
+  ];
+}
+
+function parseJsonObject(
+  content: string,
+  schemaName: string,
+): Record<string, unknown> {
+  const parsed = JSON.parse(content) as unknown;
+  if (!isRecord(parsed)) {
+    throw new Error(`${schemaName} response must be a JSON object`);
+  }
+  return parsed;
+}
+
+function parseSemanticUnits(
+  payload: Record<string, unknown>,
+  sourcePageId: string,
+  sourceChunks: Array<{
+    id: string;
+    text: string;
+    lineStart: number;
+    lineEnd: number;
+  }>,
+): SemanticUnit[] {
+  const chunkIds = new Set(sourceChunks.map((chunk) => chunk.id));
+  const rawUnits = Array.isArray(payload.units) ? payload.units : [];
+  const units = rawUnits.flatMap((unit, index): SemanticUnit[] => {
+    if (!isRecord(unit)) {
+      return [];
+    }
+    const sourceChunkIds = toStringArray(unit.sourceChunkIds).filter((id) =>
+      chunkIds.has(id),
+    );
+    if (sourceChunkIds.length === 0) {
+      return [];
+    }
+    return [
+      {
+        id:
+          typeof unit.id === "string" ? unit.id : `${sourcePageId}:su${index}`,
+        sourceChunkIds,
+        text: typeof unit.text === "string" ? unit.text : "",
+        kind: typeof unit.kind === "string" ? unit.kind : "claim_cluster",
+      },
+    ];
+  });
+  if (units.length > 0) {
+    return units;
+  }
+  return sourceChunks.map((chunk, index) => ({
+    id: `${sourcePageId}:su${index}`,
+    sourceChunkIds: [chunk.id],
+    text: chunk.text,
+    kind: "claim_cluster",
+    lineRange: { start: chunk.lineStart, end: chunk.lineEnd },
+  }));
+}
+
+function locateCompileTarget(
+  source: CompilePageInput,
+  candidates: CompilePageInput[],
+): CompilePageInput | undefined {
+  return candidates
+    .filter((item) => item.page.id !== source.page.id)
+    .map((item) => ({
+      item,
+      score:
+        lexicalRelatedness(source, item) + explicitTitleMention(source, item),
+    }))
+    .filter((candidate) => candidate.score > 0)
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        String(a.item.page.id).localeCompare(String(b.item.page.id)) ||
+        a.item.page.path.localeCompare(b.item.page.path),
+    )[0]?.item;
+}
+
+function parseCompileRelation(value: unknown): CompileRelation {
+  if (
+    value === "new" ||
+    value === "extend" ||
+    value === "merge" ||
+    value === "contradict" ||
+    value === "supersede" ||
+    value === "duplicate"
+  ) {
+    return value;
+  }
+  throw new Error("classify response has unsupported relation");
+}
+
+type CompileRelation =
+  | "new"
+  | "extend"
+  | "merge"
+  | "contradict"
+  | "supersede"
+  | "duplicate";
+
+function parseConfidence(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.min(1, value))
+    : 0.5;
+}
+
+function parsePatchChanges(
+  payload: Record<string, unknown>,
+  context: {
+    relation: CompileRelation;
+    classifyConfidence: number;
+    reasoning: string;
+    target?: CompilePageInput;
+    source: CompilePageInput;
+  },
+): CompilePatchChange[] {
+  const rawChanges = Array.isArray(payload.changes) ? payload.changes : [];
+  const changes = rawChanges.flatMap((change): CompilePatchChange[] => {
+    if (!isRecord(change) || typeof change.type !== "string") {
+      return [];
+    }
+    if (change.type === "modify") {
+      const pageId =
+        context.target?.page.id ??
+        (typeof change.pageId === "string" ? change.pageId : undefined);
+      const content = typeof change.content === "string" ? change.content : "";
+      if (!pageId || !isLineageMarkedContent(content)) {
+        return [];
+      }
+      return [
+        {
+          type: "modify",
+          pageId,
+          operation: "append_section",
+          relation:
+            change.relation === "merge" ||
+            change.relation === "contradict" ||
+            change.relation === "extend"
+              ? change.relation
+              : context.relation === "merge" ||
+                  context.relation === "contradict" ||
+                  context.relation === "extend"
+                ? context.relation
+                : "extend",
+          classifyConfidence:
+            typeof change.classifyConfidence === "number"
+              ? parseConfidence(change.classifyConfidence)
+              : context.classifyConfidence,
+          reasoning:
+            typeof change.reasoning === "string"
+              ? change.reasoning
+              : context.reasoning,
+          content,
+          confidenceImpact: isRecord(change.confidenceImpact)
+            ? change.confidenceImpact
+            : {
+                kind:
+                  context.relation === "contradict"
+                    ? "contradicted_by"
+                    : "source_added",
+                sourceWeight: 0.8,
+              },
+        },
+      ];
+    }
+    if (change.type === "create") {
+      const newPageId =
+        typeof change.newPageId === "string"
+          ? change.newPageId
+          : stablePageId(`${context.source.page.id}:new`);
+      const content = typeof change.content === "string" ? change.content : "";
+      const relation = change.relation === "supersede" ? "supersede" : "new";
+      const supersedes =
+        typeof change.supersedes === "string" ? change.supersedes : undefined;
+      const confidenceImpact = isRecord(change.confidenceImpact)
+        ? change.confidenceImpact
+        : relation === "supersede" && context.target
+          ? {
+              kind: "supersedes",
+              supersededPageId: context.target.page.id,
+            }
+          : { kind: "source_added", sourceWeight: 0.8 };
+      if (
+        !isValidCompilePageId(newPageId) ||
+        !isLineageMarkedContent(content) ||
+        !isSafeCompileCreatePath(change.path) ||
+        (relation === "supersede" &&
+          (!isValidCompilePageId(supersedes) ||
+            confidenceImpact.kind !== "supersedes" ||
+            confidenceImpact.supersededPageId !== supersedes))
+      ) {
+        return [];
+      }
+      return [
+        {
+          type: "create",
+          newPageId,
+          path:
+            typeof change.path === "string"
+              ? change.path
+              : `pages/compiled/${slugify(context.source.page.title)}.md`,
+          relation,
+          classifyConfidence:
+            typeof change.classifyConfidence === "number"
+              ? parseConfidence(change.classifyConfidence)
+              : context.classifyConfidence,
+          reasoning:
+            typeof change.reasoning === "string"
+              ? change.reasoning
+              : context.reasoning,
+          supersedes,
+          content,
+          confidenceImpact,
+        },
+      ];
+    }
+    return [];
+  });
+  if (changes.length > 0) {
+    return changes;
+  }
+  throw new Error("synthesize response produced no valid patch changes");
+}
+
+function derivedChunksForChanges(opts: {
+  changes: CompilePatchChange[];
+  units: SemanticUnit[];
+  targetChunks: Array<{ id: string }>;
+  promptHash: string;
+  model: string;
+  timestamp: string;
+}): Array<Record<string, unknown>> {
+  const sourceUnitIds = opts.units.map((unit) => unit.id);
+  const sourceChunkIds = [
+    ...new Set(opts.units.flatMap((unit) => unit.sourceChunkIds)),
+  ];
+  return opts.changes.flatMap((change): Array<Record<string, unknown>> => {
+    if (change.type === "confidence_only") {
+      return [];
+    }
+    const chunkId =
+      change.type === "create"
+        ? `${change.newPageId}:c0`
+        : `${change.pageId}:c${opts.targetChunks.length}`;
+    return [
+      {
+        chunkId,
+        derivedFrom: {
+          sourceUnitIds,
+          sourceChunkIds,
+          method: change.relation,
+          promptHash: opts.promptHash,
+          modelId: opts.model,
+          compiledAt: opts.timestamp,
+        },
+      },
+    ];
+  });
+}
+
+function isLineageMarkedContent(content: string): boolean {
+  return content.includes("akb:derived");
+}
+
+function isValidCompilePageId(value: unknown): value is string {
+  return typeof value === "string" && /^page_[a-z0-9]{12}$/.test(value);
+}
+
+function isSafeCompileCreatePath(value: unknown): boolean {
+  if (value === undefined) {
+    return true;
+  }
+  return (
+    typeof value === "string" &&
+    value.startsWith("pages/") &&
+    !value.includes("..") &&
+    !value.startsWith("/") &&
+    value.endsWith(".md")
+  );
+}
+
+function sanitizedErrorMessage(error: unknown, secret?: string): string {
+  let message = error instanceof Error ? error.message : String(error);
+  if (secret) {
+    message = message.split(secret).join("[redacted]");
+  }
+  message = message.replace(/Authorization\s+Bearer\s+\S+/gi, "[redacted]");
+  message = message.replace(/Bearer\s+\S+/gi, "[redacted]");
+  message = message.replace(/https?:\/\/\S+/gi, "[redacted-url]");
+  return message;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function lexicalRelatedness(

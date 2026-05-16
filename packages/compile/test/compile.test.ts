@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildCompilePatch,
   buildHeuristicCompilePatch,
   type CompilePageInput,
   DeepSeekCompileProvider,
@@ -19,6 +20,384 @@ function page(id: string, title: string, body: string): CompilePageInput {
 }
 
 describe("compile pipeline", () => {
+  it("builds a DeepSeek-backed patch from staged JSON responses", async () => {
+    const calls: string[] = [];
+    const provider = {
+      model: "deepseek-v4-pro",
+      completeJson: async (call: { responseSchemaName: string }) => {
+        calls.push(call.responseSchemaName);
+        if (call.responseSchemaName === "segment") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              units: [
+                {
+                  id: "su_gc",
+                  sourceChunkIds: ["page_compilepkg20:c0"],
+                  text: "Adaptive garbage collection changes threshold policy.",
+                  kind: "claim_cluster",
+                  lineRange: { start: 1, end: 1 },
+                },
+              ],
+            }),
+          };
+        }
+        if (call.responseSchemaName === "classify") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              relation: "merge",
+              confidence: 0.91,
+              reasoning: "Both pages describe garbage collection thresholds.",
+            }),
+          };
+        }
+        return {
+          model: "deepseek-v4-pro-routed",
+          content: JSON.stringify({
+            changes: [
+              {
+                type: "modify",
+                pageId: "page_compilepkg21",
+                operation: "append_section",
+                relation: "merge",
+                classifyConfidence: 0.91,
+                reasoning: "Merged threshold policy update.",
+                content:
+                  '## Threshold Policy\n\n<!-- akb:derived source=su_gc method=merge patch=patch_page_compilepkg20 promptHash="sha256:llm" modelId="deepseek-v4-pro" compiledAt="2026-05-16T00:00:00.000Z" -->\nAdaptive garbage collection changes threshold policy.',
+                confidenceImpact: {
+                  kind: "source_added",
+                  sourceWeight: 0.8,
+                },
+              },
+            ],
+          }),
+        };
+      },
+    };
+
+    const patch = await buildCompilePatch({
+      source: page(
+        "page_compilepkg20",
+        "Adaptive GC",
+        "Adaptive garbage collection changes threshold policy.",
+      ),
+      candidates: [
+        page(
+          "page_compilepkg21",
+          "Garbage Collection",
+          "Garbage collection uses threshold policy.",
+        ),
+      ],
+      model: "deepseek-v4-pro",
+      provider,
+      now: new Date("2026-05-16T00:00:00.000Z"),
+    });
+
+    expect(calls).toEqual(["segment", "classify", "synthesize"]);
+    expect(patch.compileMeta.provider).toBe("deepseek");
+    expect(patch.compileMeta.degraded).toBe(false);
+    expect(patch.compileMeta.modelId).toBe("deepseek-v4-pro-routed");
+    expect(patch.compileMeta.llmCallCount).toBe(3);
+    expect(patch.compileMeta.stages).toEqual([
+      { name: "segment", provider: "deepseek", degraded: false },
+      { name: "locate", provider: "deterministic", degraded: false },
+      { name: "classify", provider: "deepseek", degraded: false },
+      { name: "synthesize", provider: "deepseek", degraded: false },
+      { name: "emit", provider: "deterministic", degraded: false },
+    ]);
+    expect(patch.changes[0]).toMatchObject({
+      type: "modify",
+      pageId: "page_compilepkg21",
+      relation: "merge",
+    });
+    expect(patch.lineage.units).toEqual([
+      {
+        id: "su_gc",
+        sourcePageId: "page_compilepkg20",
+        sourceChunkIds: ["page_compilepkg20:c0"],
+        kind: "claim_cluster",
+      },
+    ]);
+    expect(patch.lineage.derivedChunks[0]).toMatchObject({
+      chunkId: "page_compilepkg21:c1",
+      derivedFrom: {
+        sourceUnitIds: ["su_gc"],
+        sourceChunkIds: ["page_compilepkg20:c0"],
+        method: "merge",
+        modelId: "deepseek-v4-pro",
+      },
+    });
+  });
+
+  it("falls back when DeepSeek synthesis omits valid patch changes", async () => {
+    const provider = {
+      model: "deepseek-v4-pro",
+      completeJson: async (call: { responseSchemaName: string }) => {
+        if (call.responseSchemaName === "segment") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              units: [
+                {
+                  id: "su_bad",
+                  sourceChunkIds: ["page_compilepkg22:c0"],
+                  text: "GC update.",
+                  kind: "claim_cluster",
+                },
+              ],
+            }),
+          };
+        }
+        if (call.responseSchemaName === "classify") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              relation: "extend",
+              confidence: 0.8,
+              reasoning: "Related GC update.",
+            }),
+          };
+        }
+        return {
+          model: "deepseek-v4-pro",
+          content: JSON.stringify({ changes: [] }),
+        };
+      },
+    };
+
+    const patch = await buildCompilePatch({
+      source: page("page_compilepkg22", "GC Update", "GC update."),
+      candidates: [
+        page("page_compilepkg23", "Garbage Collection", "GC target."),
+      ],
+      provider,
+      now: new Date("2026-05-16T00:00:00.000Z"),
+    });
+
+    expect(patch.compileMeta.provider).toBe("heuristic");
+    expect(patch.compileMeta.degraded).toBe(true);
+    expect(patch.compileMeta.degradedReason).toContain(
+      "DeepSeek compile failed",
+    );
+  });
+
+  it("keeps DeepSeek modify changes scoped to the located target page", async () => {
+    const provider = {
+      model: "deepseek-v4-pro",
+      completeJson: async (call: { responseSchemaName: string }) => {
+        if (call.responseSchemaName === "segment") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              units: [
+                {
+                  id: "su_scope",
+                  sourceChunkIds: ["page_compilepkg24:c0"],
+                  text: "GC update.",
+                  kind: "claim_cluster",
+                },
+              ],
+            }),
+          };
+        }
+        if (call.responseSchemaName === "classify") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              relation: "extend",
+              confidence: 0.8,
+              reasoning: "Related GC update.",
+            }),
+          };
+        }
+        return {
+          model: "deepseek-v4-pro",
+          content: JSON.stringify({
+            changes: [
+              {
+                type: "modify",
+                pageId: "page_compilepkg26",
+                operation: "append_section",
+                relation: "extend",
+                classifyConfidence: 0.8,
+                reasoning: "Malicious target switch.",
+                content:
+                  '## GC Update\n\n<!-- akb:derived source=su_scope method=extend patch=patch_page_compilepkg24 promptHash="sha256:llm" modelId="deepseek-v4-pro" compiledAt="2026-05-16T00:00:00.000Z" -->\nGC update.',
+              },
+            ],
+          }),
+        };
+      },
+    };
+
+    const patch = await buildCompilePatch({
+      source: page("page_compilepkg24", "GC Update", "GC update."),
+      candidates: [
+        page(
+          "page_compilepkg25",
+          "Garbage Collection",
+          "GC target with update terms.",
+        ),
+        page("page_compilepkg26", "Unrelated", "Different page."),
+      ],
+      provider,
+      now: new Date("2026-05-16T00:00:00.000Z"),
+    });
+
+    expect(patch.compileMeta.provider).toBe("deepseek");
+    expect(patch.changes[0]).toMatchObject({
+      type: "modify",
+      pageId: "page_compilepkg25",
+    });
+  });
+
+  it("falls back when DeepSeek synthesized content lacks derived markers", async () => {
+    const provider = {
+      model: "deepseek-v4-pro",
+      completeJson: async (call: { responseSchemaName: string }) => {
+        if (call.responseSchemaName === "segment") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              units: [
+                {
+                  id: "su_nomarker",
+                  sourceChunkIds: ["page_compilepkg27:c0"],
+                  text: "GC update.",
+                  kind: "claim_cluster",
+                },
+              ],
+            }),
+          };
+        }
+        if (call.responseSchemaName === "classify") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              relation: "extend",
+              confidence: 0.8,
+              reasoning: "Related GC update.",
+            }),
+          };
+        }
+        return {
+          model: "deepseek-v4-pro",
+          content: JSON.stringify({
+            changes: [
+              {
+                type: "modify",
+                pageId: "page_compilepkg28",
+                operation: "append_section",
+                relation: "extend",
+                classifyConfidence: 0.8,
+                reasoning: "Missing marker.",
+                content: "## GC Update\n\nGC update.",
+              },
+            ],
+          }),
+        };
+      },
+    };
+
+    const patch = await buildCompilePatch({
+      source: page("page_compilepkg27", "GC Update", "GC update."),
+      candidates: [
+        page("page_compilepkg28", "Garbage Collection", "GC target."),
+      ],
+      provider,
+      now: new Date("2026-05-16T00:00:00.000Z"),
+    });
+
+    expect(patch.compileMeta.provider).toBe("heuristic");
+    expect(patch.compileMeta.degradedReason).toContain(
+      "DeepSeek compile failed",
+    );
+  });
+
+  it("falls back with sanitized errors when DeepSeek provider fails", async () => {
+    const patch = await buildCompilePatch({
+      source: page("page_compilepkg29", "GC Secret", "GC secret update."),
+      candidates: [
+        page("page_compilepkg30", "Garbage Collection", "GC target."),
+      ],
+      deepseekApiKey: "secret-test-key",
+      provider: {
+        model: "deepseek-v4-pro",
+        completeJson: async () => {
+          throw new Error(
+            "Authorization Bearer secret-test-key failed at https://signed.example/token",
+          );
+        },
+      },
+      now: new Date("2026-05-16T00:00:00.000Z"),
+    });
+
+    expect(patch.compileMeta.provider).toBe("heuristic");
+    expect(patch.compileMeta.degradedReason).toContain("[redacted]");
+    expect(patch.compileMeta.degradedReason).not.toContain("secret-test-key");
+    expect(patch.compileMeta.degradedReason).not.toContain("Bearer");
+  });
+
+  it("falls back when DeepSeek create changes are schema-incompatible", async () => {
+    const provider = {
+      model: "deepseek-v4-pro",
+      completeJson: async (call: { responseSchemaName: string }) => {
+        if (call.responseSchemaName === "segment") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              units: [
+                {
+                  id: "su_badcreate",
+                  sourceChunkIds: ["page_compilepkg31:c0"],
+                  text: "New topic.",
+                  kind: "concept",
+                },
+              ],
+            }),
+          };
+        }
+        if (call.responseSchemaName === "classify") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              relation: "supersede",
+              confidence: 0.8,
+              reasoning: "Replacement.",
+            }),
+          };
+        }
+        return {
+          model: "deepseek-v4-pro",
+          content: JSON.stringify({
+            changes: [
+              {
+                type: "create",
+                newPageId: "not-a-page-id",
+                relation: "supersede",
+                content:
+                  '---\nid: not-a-page-id\n---\n<!-- akb:derived source=su_badcreate method=supersede patch=patch_page_compilepkg31 promptHash="sha256:llm" modelId="deepseek-v4-pro" compiledAt="2026-05-16T00:00:00.000Z" -->\nNew topic.',
+              },
+            ],
+          }),
+        };
+      },
+    };
+
+    const patch = await buildCompilePatch({
+      source: page("page_compilepkg31", "New Topic", "New topic."),
+      candidates: [page("page_compilepkg32", "Old Topic", "Old topic.")],
+      provider,
+      now: new Date("2026-05-16T00:00:00.000Z"),
+    });
+
+    expect(patch.compileMeta.provider).toBe("heuristic");
+    expect(patch.compileMeta.degradedReason).toContain(
+      "DeepSeek compile failed",
+    );
+  });
+
   it("emits a staged degraded patch when DeepSeek credentials are absent", () => {
     const source = page(
       "page_compilepkg01",

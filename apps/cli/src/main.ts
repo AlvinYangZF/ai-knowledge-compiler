@@ -14,6 +14,7 @@ import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   buildHeuristicCompilePatch,
+  buildCompilePatch as buildProviderCompilePatch,
   type CompilePageInput,
 } from "@akb/compile";
 import {
@@ -2434,9 +2435,10 @@ async function compileCommand(options: CompileOptions): Promise<void> {
   }
 
   for (const sourceRef of sourceRefs) {
-    const patch = buildCompilePatch(vaultDir, sourceRef, {
+    const patch = await buildCompilePatch(vaultDir, sourceRef, {
       model: options.model ?? config.llm?.model,
       apiKeyEnv: config.llm?.api_key_env,
+      baseUrl: config.llm?.base_url,
     });
     if (options.dryRun) {
       console.log(
@@ -2452,6 +2454,11 @@ async function compileCommand(options: CompileOptions): Promise<void> {
     writeFileSync(patchPath, stringifyYaml(patch));
     clearCompileDisabled(vaultDir, patch.source?.pageId ?? sourceRef);
     console.log(`Compiled ${patch.source?.pageId ?? sourceRef} -> ${patch.id}`);
+    if (patch.compileMeta?.degraded === true) {
+      console.log(
+        `Warning: compile degraded (${String(patch.compileMeta.degradedReason ?? "unknown reason")}).`,
+      );
+    }
     for (const change of patch.changes ?? []) {
       const targetPage =
         change.type === "create" ? change.newPageId : change.pageId;
@@ -2485,7 +2492,7 @@ function compileReplayCommand(patchId: string): void {
   if (!patch.source?.pageId) {
     throw new Error(`Patch has no source page id: ${patchId}`);
   }
-  const replayed = buildCompilePatch(vaultDir, patch.source.pageId, {
+  const replayed = buildHeuristicPatchFromVault(vaultDir, patch.source.pageId, {
     model: String(patch.compileMeta?.modelId ?? "heuristic-v0.1"),
     apiKeyEnv:
       typeof patch.compileMeta?.apiKeyEnv === "string"
@@ -3244,6 +3251,28 @@ function compileDisabledPath(vaultDir: string): string {
 function buildCompilePatch(
   vaultDir: string,
   sourceRef: string,
+  options: { model?: string; apiKeyEnv?: string; baseUrl?: string } = {},
+): Promise<PatchDocument> {
+  const sourceFile = resolvePageFile(vaultDir, sourceRef);
+  if (!sourceFile) {
+    throw new Error(`Compile source not found: ${sourceRef}`);
+  }
+  const model = options.model ?? "heuristic-v0.1";
+  const apiKeyEnv = options.apiKeyEnv ?? "DEEPSEEK_API_KEY";
+  const source = pageFromFile(vaultDir, sourceFile);
+  return buildProviderCompilePatch({
+    source,
+    candidates: scanVaultPages(vaultDir),
+    model,
+    baseUrl: options.baseUrl,
+    apiKeyEnv,
+    deepseekApiKey: process.env[apiKeyEnv],
+  }) as Promise<PatchDocument>;
+}
+
+function buildHeuristicPatchFromVault(
+  vaultDir: string,
+  sourceRef: string,
   options: { model?: string; apiKeyEnv?: string } = {},
 ): PatchDocument {
   const sourceFile = resolvePageFile(vaultDir, sourceRef);
@@ -3252,9 +3281,8 @@ function buildCompilePatch(
   }
   const model = options.model ?? "heuristic-v0.1";
   const apiKeyEnv = options.apiKeyEnv ?? "DEEPSEEK_API_KEY";
-  const source = pageFromFile(vaultDir, sourceFile);
   return buildHeuristicCompilePatch({
-    source,
+    source: pageFromFile(vaultDir, sourceFile),
     candidates: scanVaultPages(vaultDir),
     model,
     apiKeyEnv,
