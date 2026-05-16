@@ -135,6 +135,10 @@ interface ProjectionRebuildOptions {
   all?: boolean;
 }
 
+interface LintOptions {
+  now?: string;
+}
+
 interface LintReport {
   lowConfidence: Array<{ page: Page; score: number }>;
   stale: Array<{ page: Page; lastVerifiedAt: string }>;
@@ -283,7 +287,10 @@ export async function run(argv = process.argv): Promise<void> {
       0.08,
     )
     .action(evalCompileCommand);
-  program.command("lint").action(lintCommand);
+  program
+    .command("lint")
+    .option("--now <timestamp>", "clock timestamp for deterministic lint")
+    .action(lintCommand);
   program
     .command("decay")
     .option("--run", "write sparse decay checkpoints")
@@ -605,13 +612,20 @@ async function searchCommand(
 function rankConfidenceStateForResults(
   vaultDir: string,
   results: SearchResult[],
+  now?: Date,
 ): Map<PageId, RankConfidenceState> {
   const states = loadProjectedRankConfidenceState(
     vaultDir,
     results.map((result) => result.page_id),
   );
   for (const result of results) {
-    const events = loadConfidenceEvents(vaultDir, result.path, result.page_id);
+    const projectedEvents = now
+      ? loadProjectedConfidenceEvents(vaultDir, result.page_id)
+      : [];
+    const events = [
+      ...loadConfidenceEvents(vaultDir, result.path, result.page_id),
+      ...projectedEvents,
+    ];
     if (events.length === 0) {
       continue;
     }
@@ -620,6 +634,7 @@ function rankConfidenceStateForResults(
       .at(-1)?.timestamp;
     const projected = states.get(result.page_id);
     if (
+      !now &&
       projected &&
       latestLedgerEventAt &&
       projected.lastEventAt &&
@@ -627,7 +642,7 @@ function rankConfidenceStateForResults(
     ) {
       continue;
     }
-    const state = computeConfidenceState(events);
+    const state = computeConfidenceState(events, { now });
     states.set(result.page_id, {
       score: state.score,
       supersededBy: state.supersededBy,
@@ -637,6 +652,23 @@ function rankConfidenceStateForResults(
     });
   }
   return states;
+}
+
+function loadProjectedConfidenceEvents(
+  vaultDir: string,
+  pageId: PageId,
+): ReturnType<typeof loadConfidenceEvents> {
+  const projection = new ConfidenceProjection({
+    dbPath: join(vaultDir, ".akb", "index.db"),
+    readonly: true,
+  });
+  try {
+    return projection.getEvents(pageId);
+  } catch {
+    return [];
+  } finally {
+    projection.close();
+  }
 }
 
 function loadProjectedRankConfidenceState(
@@ -1024,10 +1056,10 @@ function compileEvalPageInput(
   return pageFromFile(vaultDir, file);
 }
 
-async function lintCommand(): Promise<void> {
+async function lintCommand(options: LintOptions): Promise<void> {
   const vaultDir = process.cwd();
   assertVault(vaultDir);
-  const report = buildLintReport(vaultDir);
+  const report = buildLintReport(vaultDir, parseOptionalNow(options.now));
   writeLintReports(vaultDir, report);
   printLintReport(report);
   if (
@@ -1039,7 +1071,7 @@ async function lintCommand(): Promise<void> {
   }
 }
 
-function buildLintReport(vaultDir: string): LintReport {
+function buildLintReport(vaultDir: string, now?: Date): LintReport {
   const pages = scanVaultPages(vaultDir);
   const lookup = pageLookup(pages.map((item) => item.page));
   const confidence = rankConfidenceStateForResults(
@@ -1052,6 +1084,7 @@ function buildLintReport(vaultDir: string): LintReport {
       snippet: "",
       citation: { line_start: 1, line_end: 1 },
     })),
+    now,
   );
   const knownPageIds = new Set(pages.map((item) => String(item.page.id)));
   const chunksByPage = new Map<PageId, ReturnType<typeof chunkByHeaders>>();
@@ -1091,7 +1124,10 @@ function buildLintReport(vaultDir: string): LintReport {
     if (state && state.score < 0.5) {
       lowConfidence.push({ page: item.page, score: state.score });
     }
-    if (state?.lastVerifiedAt && isOlderThanDays(state.lastVerifiedAt, 180)) {
+    if (
+      state?.lastVerifiedAt &&
+      isOlderThanDays(state.lastVerifiedAt, 180, now)
+    ) {
       stale.push({ page: item.page, lastVerifiedAt: state.lastVerifiedAt });
     }
     const events = loadConfidenceEvents(vaultDir, item.page.path, item.page.id);
@@ -1268,6 +1304,19 @@ function writeLintReports(vaultDir: string, report: LintReport): void {
     ),
   );
   writeFileSync(
+    join(lintDir, "stale.md"),
+    renderLintTable(
+      "Stale Verification",
+      ["Page", "Path", "Last Verified At", "Suggestion"],
+      report.stale.map((issue) => [
+        issue.page.id,
+        issue.page.path,
+        issue.lastVerifiedAt,
+        "re-verify or supersede this page",
+      ]),
+    ),
+  );
+  writeFileSync(
     join(lintDir, "orphan-pages.md"),
     renderLintTable(
       "Orphan Pages",
@@ -1348,6 +1397,11 @@ function renderLintSuggestions(report: LintReport): string {
   for (const issue of report.lowConfidence) {
     lines.push(
       `- ${issue.page.id} (${issue.score.toFixed(4)}): consider supersede or re-verify.`,
+    );
+  }
+  for (const issue of report.stale) {
+    lines.push(
+      `- ${issue.page.id}: re-verify stale page last verified at ${issue.lastVerifiedAt}.`,
     );
   }
   for (const page of report.orphanPages) {
@@ -2716,12 +2770,16 @@ function findSupersessionCycles(pages: Page[]): PageId[][] {
   return cycles;
 }
 
-function isOlderThanDays(timestamp: string, days: number): boolean {
+function isOlderThanDays(
+  timestamp: string,
+  days: number,
+  now = new Date(),
+): boolean {
   const time = new Date(timestamp).getTime();
   if (!Number.isFinite(time)) {
     return false;
   }
-  return Date.now() - time > days * 24 * 60 * 60 * 1000;
+  return now.getTime() - time > days * 24 * 60 * 60 * 1000;
 }
 
 function pageFromFile(

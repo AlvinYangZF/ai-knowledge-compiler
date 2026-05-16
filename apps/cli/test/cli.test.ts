@@ -1071,6 +1071,68 @@ describe("akb CLI", () => {
     );
   });
 
+  it("lint uses an injected clock for decay-based warnings", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "old-runbook.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_lintdecay001",
+        "title: Old Runbook",
+        "type: runbook",
+        "---",
+        "# Old Runbook",
+        "",
+        "This runbook has not been refreshed in a long time.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+    writeFileSync(
+      join(vault, "pages", ".page_lintdecay001.ledger.jsonl"),
+      [
+        JSON.stringify({
+          id: "evt_lintdecay001",
+          kind: "source_added",
+          pageId: "page_lintdecay001",
+          timestamp: "2026-01-01T00:00:00.000Z",
+          actor: "system",
+          actorId: "akb-test",
+          sourceId: "src_lintdecay001",
+          sourceWeight: 0.8,
+        }),
+        JSON.stringify({
+          id: "evt_lintdecay002",
+          kind: "verified",
+          pageId: "page_lintdecay001",
+          timestamp: "2026-01-01T00:00:00.000Z",
+          actor: "human",
+          actorId: "reviewer",
+          verifierType: "human",
+        }),
+        "",
+      ].join("\n"),
+    );
+    runCli(["projection", "rebuild", "--confidence"], vault);
+    rmSync(join(vault, "pages", ".page_lintdecay001.ledger.jsonl"));
+
+    const output = runCli(["lint", "--now", "2026-08-01T00:00:00.000Z"], vault);
+    const report = readFileSync(
+      join(vault, ".akb", "lint", "low-confidence.md"),
+      "utf8",
+    );
+    const staleReport = readFileSync(
+      join(vault, ".akb", "lint", "stale.md"),
+      "utf8",
+    );
+
+    expect(output).toContain("page_lintdecay001");
+    expect(output).toContain("stale");
+    expect(report).toContain("page_lintdecay001");
+    expect(staleReport).toContain("page_lintdecay001");
+  });
+
   it("lint reports orphan pages and writes suggestion reports", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
