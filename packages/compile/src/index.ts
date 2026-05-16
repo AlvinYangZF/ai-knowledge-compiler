@@ -85,7 +85,7 @@ export type CompilePatchChange =
       type: "modify";
       pageId: string;
       operation: "append_section";
-      relation: "extend";
+      relation: "extend" | "contradict";
       classifyConfidence: number;
       reasoning: string;
       content: string;
@@ -216,10 +216,16 @@ export function buildHeuristicCompilePatch(
     .filter((item) => item.page.id !== source.page.id)
     .map((item) => ({
       item,
-      score: lexicalRelatedness(source, item),
+      score:
+        lexicalRelatedness(source, item) + explicitTitleMention(source, item),
     }))
     .filter((candidate) => candidate.score > 0)
-    .sort((a, b) => b.score - a.score);
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        String(a.item.page.id).localeCompare(String(b.item.page.id)) ||
+        a.item.page.path.localeCompare(b.item.page.path),
+    );
   const target = candidates[0]?.item;
   const patchId = `patch_${source.page.id}`;
   const synthesizePromptHash = stablePromptHash("synthesize/heuristic-v0.1");
@@ -233,24 +239,77 @@ export function buildHeuristicCompilePatch(
   const changes: CompilePatchChange[] = [];
 
   if (target) {
-    changes.push({
-      type: "modify",
-      pageId: target.page.id,
-      operation: "append_section",
-      relation: "extend",
-      classifyConfidence: 0.7,
-      reasoning: `${source.page.title} shares terms with ${target.page.title}`,
-      content: [
-        `## ${source.page.title} (compiled)`,
-        "",
-        `<!-- akb:derived source=${source.page.id}:c0 method=extend patch=${patchId} promptHash="${synthesizePromptHash}" modelId="${model}" compiledAt="${timestamp}" -->`,
-        source.body.trim(),
-      ].join("\n"),
-      confidenceImpact: {
-        kind: "source_added",
-        sourceWeight: 0.8,
-      },
-    });
+    const relation = heuristicRelation(source, target);
+    if (relation === "supersede") {
+      const newPageId = stablePageId(
+        `${source.page.id}:supersedes:${target.page.id}`,
+      );
+      changes.push({
+        type: "create",
+        newPageId,
+        path: `pages/compiled/${slugify(source.page.title)}.md`,
+        relation: "supersede",
+        classifyConfidence: 0.72,
+        reasoning: `${source.page.title} explicitly supersedes ${target.page.title}`,
+        supersedes: target.page.id,
+        content: [
+          "---",
+          `id: ${newPageId}`,
+          `title: ${source.page.title}`,
+          `supersedes: ${target.page.id}`,
+          "---",
+          `# ${source.page.title}`,
+          "",
+          `> Supersedes [[${target.page.id}]].`,
+          "",
+          `<!-- akb:derived source=${source.page.id}:c0 method=supersede patch=${patchId} promptHash="${synthesizePromptHash}" modelId="${model}" compiledAt="${timestamp}" -->`,
+          source.body.trim(),
+        ].join("\n"),
+        confidenceImpact: {
+          kind: "supersedes",
+          supersededPageId: target.page.id,
+        },
+      });
+    } else if (relation === "contradict") {
+      changes.push({
+        type: "modify",
+        pageId: target.page.id,
+        operation: "append_section",
+        relation: "contradict",
+        classifyConfidence: 0.68,
+        reasoning: `${source.page.title} explicitly conflicts with ${target.page.title}`,
+        content: [
+          `## Contradiction: ${source.page.title}`,
+          "",
+          "> [!contradiction] Conflicting source",
+          `> <!-- akb:derived source=${source.page.id}:c0 method=contradict patch=${patchId} promptHash="${synthesizePromptHash}" modelId="${model}" compiledAt="${timestamp}" -->`,
+          `> ${source.body.trim().replace(/\n+/g, " ")}`,
+        ].join("\n"),
+        confidenceImpact: {
+          kind: "contradicted_by",
+          severity: "major",
+        },
+      });
+    } else {
+      changes.push({
+        type: "modify",
+        pageId: target.page.id,
+        operation: "append_section",
+        relation: "extend",
+        classifyConfidence: 0.7,
+        reasoning: `${source.page.title} shares terms with ${target.page.title}`,
+        content: [
+          `## ${source.page.title} (compiled)`,
+          "",
+          `<!-- akb:derived source=${source.page.id}:c0 method=extend patch=${patchId} promptHash="${synthesizePromptHash}" modelId="${model}" compiledAt="${timestamp}" -->`,
+          source.body.trim(),
+        ].join("\n"),
+        confidenceImpact: {
+          kind: "source_added",
+          sourceWeight: 0.8,
+        },
+      });
+    }
   } else {
     changes.push({
       type: "confidence_only",
@@ -312,11 +371,19 @@ export function buildHeuristicCompilePatch(
       derivedChunks: target
         ? [
             {
-              chunkId: targetChunkId,
+              chunkId:
+                changes[0]?.type === "create"
+                  ? `${changes[0].newPageId}:c0`
+                  : targetChunkId,
               derivedFrom: {
                 sourceUnitIds: [`${source.page.id}:su0`],
                 sourceChunkIds: [`${source.page.id}:c0`],
-                method: "extend",
+                method:
+                  changes[0]?.relation === "supersede"
+                    ? "supersede"
+                    : changes[0]?.relation === "contradict"
+                      ? "contradict"
+                      : "extend",
                 promptHash: synthesizePromptHash,
                 modelId: model,
                 compiledAt: timestamp,
@@ -341,6 +408,53 @@ function lexicalRelatedness(
     }
   }
   return score;
+}
+
+function explicitTitleMention(
+  source: CompilePageInput,
+  target: CompilePageInput,
+): number {
+  return `${source.page.title}\n${source.body}`
+    .toLowerCase()
+    .includes(target.page.title.toLowerCase())
+    ? 100
+    : 0;
+}
+
+function heuristicRelation(
+  source: CompilePageInput,
+  target: CompilePageInput,
+): "extend" | "contradict" | "supersede" {
+  const text = `${source.page.title}\n${source.body}`.toLowerCase();
+  const targetTerms = termsForPage(target.page, target.body);
+  const mentionsTarget =
+    text.includes(target.page.title.toLowerCase()) ||
+    [...targetTerms].some((term) => text.includes(term));
+  if (
+    mentionsTarget &&
+    /\b(supersedes|supersede|replaces|replacement)\b/.test(text)
+  ) {
+    return "supersede";
+  }
+  if (
+    mentionsTarget &&
+    /\b(contradicts|contradict|conflicts|conflict)\b/.test(text)
+  ) {
+    return "contradict";
+  }
+  return "extend";
+}
+
+function stablePageId(input: string): string {
+  return `page_${stableId("src", input).slice("src_".length)}`;
+}
+
+function slugify(value: string): string {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || "compiled-page";
 }
 
 function termsForPage(page: Page, body: string): Set<string> {

@@ -84,6 +84,102 @@ describe("compile pipeline", () => {
     });
   });
 
+  it("emits contradiction notes for explicit conflicting sources", () => {
+    const source = page(
+      "page_compilepkg04",
+      "Adaptive GC Update",
+      "This contradicts the fixed threshold guidance. Use a 5% threshold instead.",
+    );
+    const target = page(
+      "page_compilepkg05",
+      "Garbage Collection",
+      "Garbage collection uses a fixed 10% threshold.",
+    );
+
+    const patch = buildHeuristicCompilePatch({
+      source,
+      candidates: [target],
+      now: new Date("2026-05-16T00:00:00.000Z"),
+    });
+
+    expect(patch.changes[0]).toMatchObject({
+      type: "modify",
+      pageId: "page_compilepkg05",
+      relation: "contradict",
+      confidenceImpact: {
+        kind: "contradicted_by",
+        severity: "major",
+      },
+    });
+    expect(patch.changes[0]).toHaveProperty("content");
+    expect(JSON.stringify(patch.changes[0])).toContain("[!contradiction]");
+    expect(patch.lineage.derivedChunks[0].derivedFrom.method).toBe(
+      "contradict",
+    );
+  });
+
+  it("emits create supersede changes for explicit replacement sources", () => {
+    const source = page(
+      "page_compilepkg06",
+      "Adaptive GC",
+      "This supersedes Garbage Collection. Adaptive thresholds replace the fixed threshold model.",
+    );
+    const target = page(
+      "page_compilepkg07",
+      "Garbage Collection",
+      "Garbage collection uses a fixed threshold.",
+    );
+
+    const patch = buildHeuristicCompilePatch({
+      source,
+      candidates: [target],
+      now: new Date("2026-05-16T00:00:00.000Z"),
+    });
+
+    expect(patch.changes[0]).toMatchObject({
+      type: "create",
+      relation: "supersede",
+      supersedes: "page_compilepkg07",
+      confidenceImpact: {
+        kind: "supersedes",
+        supersededPageId: "page_compilepkg07",
+      },
+    });
+    expect(JSON.stringify(patch.changes[0])).toContain(
+      "Supersedes [[page_compilepkg07]]",
+    );
+    expect(patch.lineage.derivedChunks[0].derivedFrom.method).toBe("supersede");
+  });
+
+  it("breaks equal relatedness ties deterministically", () => {
+    const source = page(
+      "page_compilepkg08",
+      "GC Source",
+      "Garbage collection note.",
+    );
+    const later = page(
+      "page_compilepkg10",
+      "Garbage Collection B",
+      "Garbage collection target.",
+    );
+    const earlier = page(
+      "page_compilepkg09",
+      "Garbage Collection A",
+      "Garbage collection target.",
+    );
+
+    const patch = buildHeuristicCompilePatch({
+      source,
+      candidates: [later, earlier],
+      now: new Date("2026-05-16T00:00:00.000Z"),
+    });
+
+    expect(patch.changes[0]).toMatchObject({
+      type: "modify",
+      pageId: "page_compilepkg09",
+    });
+  });
+
   it("calls DeepSeek chat completions with deterministic compile settings", async () => {
     const requests: Array<{ url: string; init: RequestInit }> = [];
     const provider = new DeepSeekCompileProvider({

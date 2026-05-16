@@ -1309,6 +1309,94 @@ describe("akb CLI", () => {
     expect(reverse).toContain("page_compile00001");
   });
 
+  it("applies heuristic contradiction and supersede compile patches", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const target = join(dir, "gc.md");
+    const contradiction = join(dir, "gc-conflict.md");
+    const supersede = join(dir, "adaptive-gc.md");
+    writeFileSync(
+      target,
+      [
+        "---",
+        "id: page_gctarget0001",
+        "title: Garbage Collection",
+        "---",
+        "# Garbage Collection",
+        "",
+        "Garbage collection uses a fixed 10% threshold.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      contradiction,
+      [
+        "---",
+        "id: page_contra000001",
+        "title: GC Conflict",
+        "---",
+        "# GC Conflict",
+        "",
+        "This contradicts Garbage Collection. Use a 5% threshold instead.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      supersede,
+      [
+        "---",
+        "id: page_supers000001",
+        "title: Adaptive GC",
+        "---",
+        "# Adaptive GC",
+        "",
+        "This supersedes Garbage Collection. Adaptive thresholds replace the fixed threshold model.",
+      ].join("\n"),
+    );
+    runCli(["ingest", target, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", contradiction, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", supersede, "--no-commit", "--no-compile"], vault);
+
+    const contradictOutput = runCli(
+      ["compile", "--source", "page_contra000001"],
+      vault,
+    );
+    expect(contradictOutput).toContain("modify page_gctarget0001 (contradict)");
+    runCli(["patch", "apply", "patch_page_contra000001", "--no-commit"], vault);
+    expect(readFileSync(join(vault, "pages", "gc.md"), "utf8")).toContain(
+      "[!contradiction]",
+    );
+    expect(
+      readFileSync(
+        join(vault, "pages", ".page_gctarget0001.ledger.jsonl"),
+        "utf8",
+      ),
+    ).toContain('"kind":"contradicted_by"');
+
+    const supersedeOutput = runCli(
+      ["compile", "--source", "page_supers000001"],
+      vault,
+    );
+    expect(supersedeOutput).toContain("create ");
+    expect(supersedeOutput).toContain("(supersede)");
+    const supersedePatch = readFileSync(
+      join(vault, ".akb", "patches", "patch_page_supers000001.yaml"),
+      "utf8",
+    );
+    expect(supersedePatch).toContain("path: pages/compiled/adaptive-gc.md");
+    runCli(["patch", "apply", "patch_page_supers000001", "--no-commit"], vault);
+    expect(existsSync(join(vault, "pages", "compiled", "adaptive-gc.md"))).toBe(
+      true,
+    );
+    expect(
+      readFileSync(join(vault, "pages", "compiled", "adaptive-gc.md"), "utf8"),
+    ).toContain("supersedes: page_gctarget0001");
+    expect(
+      readFileSync(
+        join(vault, "pages", ".page_gctarget0001.ledger.jsonl"),
+        "utf8",
+      ),
+    ).toContain('"kind":"superseded_by"');
+  });
+
   it("ingest compiles by default and tracks compile-disabled sources", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
