@@ -102,6 +102,59 @@ describe("akb CLI", () => {
     expect(evalOutput).toContain("must-hit pass rate");
   });
 
+  it("answers questions with citations from ranked retrieval", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "gc-answer.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_answer000001",
+        "title: Answer Source",
+        "---",
+        "# Answer Source",
+        "",
+        "Garbage collection reclaims NAND blocks when free block count is low.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+
+    const payload = JSON.parse(
+      runCli(
+        ["ask", "garbage collection reclaims blocks?", "--format", "json"],
+        vault,
+      ),
+    );
+
+    expect(payload.degraded).toBe(true);
+    expect(payload.answer).toContain("Garbage collection reclaims NAND blocks");
+    expect(payload.citations[0]).toMatchObject({
+      page_id: "page_answer000001",
+      title: "Answer Source",
+    });
+    expect(payload.citations[0].line_start).toBeGreaterThan(1);
+
+    const text = runCli(["ask", "garbage collection reclaims blocks?"], vault);
+    expect(text).toContain("Extractive answer");
+    expect(text).toContain("[1] page_answer000001");
+    expect(text).toContain("Warning:");
+  });
+
+  it("does not fabricate ask answers without evidence", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+
+    const payload = JSON.parse(
+      runCli(["ask", "missing topic", "--format", "json"], vault),
+    );
+
+    expect(payload.answer).toBeNull();
+    expect(payload.no_evidence).toBe(true);
+    expect(payload.citations).toEqual([]);
+    expect(payload.degraded_reason).toContain("No indexed knowledge matched");
+  });
+
   it("skips empty and non-UTF-8 markdown files during ingest", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);

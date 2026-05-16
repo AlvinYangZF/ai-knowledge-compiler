@@ -61,6 +61,8 @@ interface SearchOptions {
   includeSuperseded?: boolean;
 }
 
+interface AskOptions extends SearchOptions {}
+
 interface EvalOptions {
   set?: string;
   output?: string;
@@ -273,6 +275,13 @@ export async function run(argv = process.argv): Promise<void> {
     .option("--format <format>", "text or json", parseFormat, "text")
     .option("--include-superseded", "include historical superseded pages")
     .action(searchCommand);
+  program
+    .command("ask")
+    .argument("<question>")
+    .option("--top-k <n>", "number of cited results", parsePositiveInt, 5)
+    .option("--format <format>", "text or json", parseFormat, "text")
+    .option("--include-superseded", "include historical superseded pages")
+    .action(askCommand);
   const evalCmd = program
     .command("eval")
     .option("--set <path>", "golden set path")
@@ -580,36 +589,107 @@ async function searchCommand(
   const vaultDir = process.cwd();
   assertVault(vaultDir);
   const start = performance.now();
+  const results = rankedResultsForQuery(vaultDir, query, options);
+  const elapsedMs = Math.round(performance.now() - start);
+  if (options.format === "json") {
+    console.log(
+      JSON.stringify({ query, results, elapsed_ms: elapsedMs }, null, 2),
+    );
+    return;
+  }
+  for (const [offset, result] of results.entries()) {
+    const flags =
+      result.flags.length > 0 ? ` flags=${result.flags.join(",")}` : "";
+    console.log(
+      `[${offset + 1}] ${result.page_id}  ${result.path}  L${result.citation.line_start}-L${result.citation.line_end}  score=${result.final_score.toFixed(2)} bm25=${result.score.toFixed(2)}${flags}`,
+    );
+    console.log(`    ${result.title}`);
+    console.log(`    > ${result.snippet.replace(/\s+/g, " ")}`);
+    console.log("");
+  }
+  console.log(`${results.length} results in ${elapsedMs}ms.`);
+}
+
+function rankedResultsForQuery(
+  vaultDir: string,
+  query: string,
+  options: SearchOptions,
+): ReturnType<typeof rankSearchResults> {
   const index = new SearchIndex({ dbPath: join(vaultDir, ".akb", "index.db") });
   try {
     const topK = options.topK ?? 5;
     const rawResults = index.search(query, { topK: Math.max(topK * 10, 50) });
-    const results = rankSearchResults({
+    return rankSearchResults({
       rawResults,
       confidenceState: rankConfidenceStateForResults(vaultDir, rawResults),
       options: { includeSuperseded: options.includeSuperseded === true },
     }).slice(0, topK);
-    const elapsedMs = Math.round(performance.now() - start);
-    if (options.format === "json") {
-      console.log(
-        JSON.stringify({ query, results, elapsed_ms: elapsedMs }, null, 2),
-      );
-      return;
-    }
-    for (const [offset, result] of results.entries()) {
-      const flags =
-        result.flags.length > 0 ? ` flags=${result.flags.join(",")}` : "";
-      console.log(
-        `[${offset + 1}] ${result.page_id}  ${result.path}  L${result.citation.line_start}-L${result.citation.line_end}  score=${result.final_score.toFixed(2)} bm25=${result.score.toFixed(2)}${flags}`,
-      );
-      console.log(`    ${result.title}`);
-      console.log(`    > ${result.snippet.replace(/\s+/g, " ")}`);
-      console.log("");
-    }
-    console.log(`${results.length} results in ${elapsedMs}ms.`);
   } finally {
     index.close();
   }
+}
+
+async function askCommand(
+  question: string,
+  options: AskOptions,
+): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const start = performance.now();
+  const results = rankedResultsForQuery(vaultDir, question, options);
+  const noEvidence = results.length === 0;
+  const answer = noEvidence ? null : extractiveAnswer(results);
+  const citations = results.map((result, index) => ({
+    ref: index + 1,
+    page_id: result.page_id,
+    path: result.path,
+    title: result.title,
+    line_start: result.citation.line_start,
+    line_end: result.citation.line_end,
+    flags: result.flags,
+  }));
+  const payload = {
+    question,
+    answer,
+    citations,
+    no_evidence: noEvidence,
+    degraded: true,
+    degraded_reason: noEvidence
+      ? `No indexed knowledge matched: ${question}`
+      : "LLM answer generation not configured; used extractive retrieval answer",
+    elapsed_ms: Math.round(performance.now() - start),
+  };
+  if (options.format === "json") {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  console.log(
+    noEvidence ? "No evidence found." : "Extractive answer (degraded):",
+  );
+  if (answer) {
+    console.log(answer);
+  }
+  console.log("");
+  for (const citation of citations) {
+    console.log(
+      `[${citation.ref}] ${citation.page_id} ${citation.path} L${citation.line_start}-${citation.line_end}`,
+    );
+  }
+  console.log("");
+  console.log(`Warning: ${payload.degraded_reason}.`);
+}
+
+function extractiveAnswer(
+  results: ReturnType<typeof rankSearchResults>,
+): string {
+  return results
+    .slice(0, 3)
+    .map((result, index) => `${cleanSnippet(result.snippet)} [${index + 1}]`)
+    .join(" ");
+}
+
+function cleanSnippet(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
 }
 
 function rankConfidenceStateForResults(
