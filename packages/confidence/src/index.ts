@@ -71,6 +71,12 @@ export const ConfidenceEventSchema = z
       reason: z.string().min(1).optional(),
     }),
     EventBaseSchema.extend({
+      kind: z.literal("supersedes_removed"),
+      supersededPageId: PageIdSchema,
+      replacementPageId: PageIdSchema.optional(),
+      reason: z.string().min(1).optional(),
+    }),
+    EventBaseSchema.extend({
       kind: z.literal("decay_checkpoint"),
       daysSinceLastEvent: z.number().nonnegative(),
       appliedDecay: z.number().nonnegative(),

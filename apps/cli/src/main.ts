@@ -2295,15 +2295,67 @@ async function supersedeCommand(
     throw new Error("A page cannot supersede itself");
   }
   const existingOldState = confidenceStateForPage(vaultDir, oldPage);
-  if (options.unlink) {
+  const written = new Set<string>();
+  const newPageSupersedes = newPageBefore.frontmatter.supersedes;
+  if (
+    typeof newPageSupersedes === "string" &&
+    newPageSupersedes !== oldPage.id
+  ) {
     throw new Error(
-      "--unlink supersession replacement is not implemented yet; refusing to leave a split supersession chain.",
+      `${newPageBefore.id} already supersedes ${newPageSupersedes}. Use --unlink on that chain before reusing it as a superseder.`,
     );
   }
   if (existingOldState?.supersededBy && !options.unlink) {
     throw new Error(
       `${oldPage.id} is already superseded by ${existingOldState.supersededBy}. Use --unlink to replace the supersession link.`,
     );
+  }
+  if (existingOldState?.supersededBy && options.unlink) {
+    const previousSupersederFile = resolvePageFile(
+      vaultDir,
+      existingOldState.supersededBy,
+    );
+    if (!previousSupersederFile) {
+      throw new Error(
+        `Cannot unlink missing superseder page: ${existingOldState.supersededBy}`,
+      );
+    }
+    const previousSuperseder = pageFromFile(vaultDir, previousSupersederFile);
+    if (previousSuperseder.page.frontmatter.supersedes !== oldPage.id) {
+      throw new Error(
+        `${previousSuperseder.page.id} does not actively supersede ${oldPage.id}`,
+      );
+    }
+    const unlinkTimestamp = new Date().toISOString();
+    const unlinkEvent = parseConfidenceEvent({
+      id: stableId(
+        "evt",
+        `${previousSuperseder.page.id}:supersedes_removed:${oldPage.id}:${newPageBefore.id}:${unlinkTimestamp}`,
+      ),
+      kind: "supersedes_removed",
+      pageId: previousSuperseder.page.id,
+      timestamp: unlinkTimestamp,
+      actor: "human",
+      actorId: humanActorId(),
+      supersededPageId: oldPage.id,
+      replacementPageId: newPageBefore.id,
+      reason: options.reason ?? `replaced by ${newPageBefore.id}`,
+    });
+    written.add(
+      toPosix(
+        relative(
+          vaultDir,
+          appendConfidenceEventAndUpdateProjection(
+            vaultDir,
+            previousSuperseder.page,
+            unlinkEvent,
+          ),
+        ),
+      ),
+    );
+    unlinkSupersedingPage(previousSupersederFile, oldPage.id);
+    written.add(previousSuperseder.page.path);
+    upsertPageFileInIndex(vaultDir, previousSupersederFile);
   }
 
   const timestamp = new Date().toISOString();
@@ -2334,7 +2386,6 @@ async function supersedeCommand(
     reason: options.reason,
   });
 
-  const written = new Set<string>();
   written.add(
     toPosix(
       relative(
@@ -2358,13 +2409,7 @@ async function supersedeCommand(
 
   updateSupersedingPage(vaultDir, newFile, oldPage.id);
   written.add(newPageBefore.path);
-  const { page, body, bodyStartLine } = pageFromFile(vaultDir, newFile);
-  const index = new SearchIndex({ dbPath: join(vaultDir, ".akb", "index.db") });
-  try {
-    index.upsertPage(page, body, { bodyStartLine });
-  } finally {
-    index.close();
-  }
+  upsertPageFileInIndex(vaultDir, newFile);
 
   if (options.commit !== false) {
     await commitFiles(vaultDir, [...written], `supersede ${oldPage.id}`);
@@ -3028,6 +3073,15 @@ function summarizeConfidenceEvent(event: ConfidenceEvent) {
       superseded_page_id: event.supersededPageId,
       reason: event.reason,
       summary: `${event.supersededPageId}${event.reason ? `: ${event.reason}` : ""}`,
+    };
+  }
+  if (event.kind === "supersedes_removed") {
+    return {
+      ...base,
+      superseded_page_id: event.supersededPageId,
+      replacement_page_id: event.replacementPageId,
+      reason: event.reason,
+      summary: `${event.supersededPageId} removed${event.replacementPageId ? `, replaced by ${event.replacementPageId}` : ""}`,
     };
   }
   if (event.kind === "decay_checkpoint") {
@@ -3727,12 +3781,49 @@ function updateSupersedingPage(
   pageFromFile(vaultDir, file);
 }
 
+function unlinkSupersedingPage(file: string, supersededPageId: PageId): void {
+  const content = readFileSync(file, "utf8");
+  const parsed = parseMarkdown(content);
+  const nextFrontmatter = { ...parsed.frontmatter };
+  delete nextFrontmatter.supersedes;
+  const frontmatter = normalizeLooseFrontmatter({
+    ...nextFrontmatter,
+    updated_at: new Date().toISOString().slice(0, 10),
+  });
+  writeMarkdownFile(
+    file,
+    frontmatter,
+    removeSupersedeNotice(parsed.body, supersededPageId),
+  );
+}
+
 function addSupersedeNotice(body: string, supersededPageId: PageId): string {
   const notice = `> Supersedes [[${supersededPageId}]].`;
   if (body.includes(notice)) {
     return body;
   }
   return `${notice}\n\n${body.trimStart()}`;
+}
+
+function removeSupersedeNotice(body: string, supersededPageId: PageId): string {
+  const noticePattern = new RegExp(
+    `^>\\s*Supersedes\\s+\\[\\[${escapeRegExp(supersededPageId)}\\]\\](?:[\\s,.].*)?$`,
+  );
+  return body
+    .split("\n")
+    .filter((line) => !noticePattern.test(line))
+    .join("\n")
+    .replace(/^\s*\n/, "");
+}
+
+function upsertPageFileInIndex(vaultDir: string, file: string): void {
+  const { page, body, bodyStartLine } = pageFromFile(vaultDir, file);
+  const index = new SearchIndex({ dbPath: join(vaultDir, ".akb", "index.db") });
+  try {
+    index.upsertPage(page, body, { bodyStartLine });
+  } finally {
+    index.close();
+  }
 }
 
 function writeMarkdownFile(

@@ -1523,7 +1523,7 @@ describe("akb CLI", () => {
     expect(failure).toContain("already superseded");
     expect(failure).toContain("--unlink");
 
-    const unlinkFailure = runCliFailure(
+    const unlinkOutput = runCli(
       [
         "supersede",
         "page_chainold0001",
@@ -1534,7 +1534,93 @@ describe("akb CLI", () => {
       ],
       vault,
     );
-    expect(unlinkFailure).toContain("not implemented");
+    expect(unlinkOutput).toContain(
+      "Superseded page_chainold0001 by page_chainnext001",
+    );
+
+    const oldReport = JSON.parse(
+      runCli(
+        ["confidence", "show", "page_chainold0001", "--format", "json"],
+        vault,
+      ),
+    );
+    const previousReport = JSON.parse(
+      runCli(
+        ["confidence", "show", "page_chainnew0001", "--format", "json"],
+        vault,
+      ),
+    );
+    const previousSuperseder = readFileSync(
+      join(vault, "pages", "new.md"),
+      "utf8",
+    );
+    const nextSuperseder = readFileSync(
+      join(vault, "pages", "next.md"),
+      "utf8",
+    );
+
+    expect(oldReport.superseded_by).toBe("page_chainnext001");
+    expect(previousReport.events.at(-1)).toMatchObject({
+      kind: "supersedes_removed",
+      superseded_page_id: "page_chainold0001",
+      replacement_page_id: "page_chainnext001",
+    });
+    expect(previousSuperseder).not.toContain("supersedes: page_chainold0001");
+    expect(previousSuperseder).not.toContain(
+      "> Supersedes [[page_chainold0001]].",
+    );
+    expect(nextSuperseder).toContain("supersedes: page_chainold0001");
+    expect(nextSuperseder).toContain("> Supersedes [[page_chainold0001]].");
+  });
+
+  it("rejects reusing a page that already supersedes another page", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    for (const [filename, pageId, title] of [
+      ["old-a.md", "page_reuseold0001", "Old A"],
+      ["old-b.md", "page_reuseold0002", "Old B"],
+      ["new.md", "page_reusenew0001", "Reusable New"],
+    ]) {
+      writeFileSync(
+        join(dir, filename),
+        [
+          "---",
+          `id: ${pageId}`,
+          `title: ${title}`,
+          'created_at: "2026-05-01"',
+          `source_path: "./${filename}"`,
+          "---",
+          `# ${title}`,
+          "",
+          `${title} content.`,
+        ].join("\n"),
+      );
+      runCli(["ingest", join(dir, filename), "--no-commit"], vault);
+    }
+    runCli(["migrate", "to-v0.1", "--no-commit"], vault);
+    runCli(
+      [
+        "supersede",
+        "page_reuseold0001",
+        "--by",
+        "page_reusenew0001",
+        "--no-commit",
+      ],
+      vault,
+    );
+
+    const failure = runCliFailure(
+      [
+        "supersede",
+        "page_reuseold0002",
+        "--by",
+        "page_reusenew0001",
+        "--no-commit",
+      ],
+      vault,
+    );
+
+    expect(failure).toContain("already supersedes page_reuseold0001");
   });
 
   it("applies confidence-aware ranking to search JSON output", () => {
