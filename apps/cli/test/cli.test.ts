@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1492,6 +1493,190 @@ describe("akb CLI", () => {
     expect(
       existsSync(join(vault, "pages", ".page_atomic000001.ledger.jsonl")),
     ).toBe(false);
+  });
+
+  it("applies create patches and records supersede confidence events", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const existing = join(dir, "old-gc.md");
+    writeFileSync(
+      existing,
+      [
+        "---",
+        "id: page_oldcreate001",
+        "title: Old GC",
+        "---",
+        "# Old GC",
+        "",
+        "Old garbage collection threshold.",
+      ].join("\n"),
+    );
+    runCli(["ingest", existing, "--no-commit", "--no-compile"], vault);
+    const patchPath = join(vault, ".akb", "patches", "patch_create.yaml");
+    writeFileSync(
+      patchPath,
+      [
+        "id: patch_create",
+        "status: proposed",
+        "source:",
+        "  pageId: page_oldcreate001",
+        "changes:",
+        "  - type: create",
+        "    newPageId: page_newcreate001",
+        "    path: pages/adaptive-gc.md",
+        "    relation: supersede",
+        "    classifyConfidence: 0.91",
+        "    reasoning: Adaptive GC supersedes the old threshold model.",
+        "    supersedes: page_oldcreate001",
+        "    content: |",
+        "      ---",
+        "      id: page_newcreate001",
+        "      title: Adaptive GC",
+        "      supersedes: page_oldcreate001",
+        "      ---",
+        "      # Adaptive GC",
+        "      ",
+        "      <!-- akb:derived source=page_oldcreate001:c0 method=supersede -->",
+        "      Adaptive garbage collection replaces the old threshold model.",
+        "    confidenceImpact:",
+        "      kind: supersedes",
+        "      supersededPageId: page_oldcreate001",
+      ].join("\n"),
+    );
+
+    const output = runCli(
+      ["patch", "apply", "patch_create", "--no-commit"],
+      vault,
+    );
+
+    expect(output).toContain("Applied patch_create");
+    expect(
+      readFileSync(join(vault, "pages", "adaptive-gc.md"), "utf8"),
+    ).toContain("id: page_newcreate001");
+    expect(
+      readFileSync(
+        join(vault, "pages", ".page_newcreate001.ledger.jsonl"),
+        "utf8",
+      ),
+    ).toContain('"kind":"supersedes"');
+    expect(
+      readFileSync(
+        join(vault, "pages", ".page_oldcreate001.ledger.jsonl"),
+        "utf8",
+      ),
+    ).toContain('"kind":"superseded_by"');
+    expect(
+      existsSync(
+        join(vault, ".akb", "patches", "applied", "patch_create.yaml"),
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects unsafe or inconsistent create patches before writing pages", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const existing = join(dir, "old-gc.md");
+    writeFileSync(
+      existing,
+      [
+        "---",
+        "id: page_oldunsafe001",
+        "title: Old Unsafe",
+        "---",
+        "# Old Unsafe",
+        "",
+        "Old unsafe source.",
+      ].join("\n"),
+    );
+    runCli(["ingest", existing, "--no-commit", "--no-compile"], vault);
+
+    const duplicatePatch = join(
+      vault,
+      ".akb",
+      "patches",
+      "patch_dupe_create.yaml",
+    );
+    writeFileSync(
+      duplicatePatch,
+      [
+        "id: patch_dupe_create",
+        "status: proposed",
+        "changes:",
+        "  - type: create",
+        "    newPageId: page_newunsafe001",
+        "    path: pages/unsafe-one.md",
+        "    relation: new",
+        "    classifyConfidence: 0.8",
+        "    reasoning: duplicate id one",
+        "    content: |",
+        "      # Unsafe One",
+        "  - type: create",
+        "    newPageId: page_newunsafe001",
+        "    path: pages/unsafe-two.md",
+        "    relation: new",
+        "    classifyConfidence: 0.8",
+        "    reasoning: duplicate id two",
+        "    content: |",
+        "      # Unsafe Two",
+      ].join("\n"),
+    );
+    expect(
+      runCliFailure(["patch", "apply", "patch_dupe_create"], vault),
+    ).toContain("duplicate create page id");
+    expect(existsSync(join(vault, "pages", "unsafe-one.md"))).toBe(false);
+
+    const mismatchPatch = join(
+      vault,
+      ".akb",
+      "patches",
+      "patch_bad_relation.yaml",
+    );
+    writeFileSync(
+      mismatchPatch,
+      [
+        "id: patch_bad_relation",
+        "status: proposed",
+        "changes:",
+        "  - type: create",
+        "    newPageId: page_newunsafe002",
+        "    path: pages/unsafe-relation.md",
+        "    relation: new",
+        "    supersedes: page_oldunsafe001",
+        "    classifyConfidence: 0.8",
+        "    reasoning: inconsistent supersede fields",
+        "    content: |",
+        "      # Unsafe Relation",
+      ].join("\n"),
+    );
+    expect(
+      runCliFailure(["patch", "apply", "patch_bad_relation"], vault),
+    ).toContain("new create cannot supersede");
+    expect(existsSync(join(vault, "pages", "unsafe-relation.md"))).toBe(false);
+
+    const outsideDir = join(dir, "outside");
+    mkdirSync(outsideDir);
+    symlinkSync(outsideDir, join(vault, "pages", "outside-link"));
+    const symlinkPatch = join(vault, ".akb", "patches", "patch_symlink.yaml");
+    writeFileSync(
+      symlinkPatch,
+      [
+        "id: patch_symlink",
+        "status: proposed",
+        "changes:",
+        "  - type: create",
+        "    newPageId: page_newunsafe003",
+        "    path: pages/outside-link/escape.md",
+        "    relation: new",
+        "    classifyConfidence: 0.8",
+        "    reasoning: symlink traversal attempt",
+        "    content: |",
+        "      # Escape",
+      ].join("\n"),
+    );
+    expect(runCliFailure(["patch", "apply", "patch_symlink"], vault)).toContain(
+      "invalid create path",
+    );
+    expect(existsSync(join(outsideDir, "escape.md"))).toBe(false);
   });
 
   it("rejects patches with unresolved derived source chunks", () => {

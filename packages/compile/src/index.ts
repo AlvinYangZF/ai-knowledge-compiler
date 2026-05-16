@@ -96,6 +96,17 @@ export type CompilePatchChange =
       pageId: string;
       relation: "duplicate";
       confidenceImpact: Record<string, unknown>;
+    }
+  | {
+      type: "create";
+      newPageId: string;
+      path?: string;
+      relation: "new" | "supersede";
+      classifyConfidence: number;
+      reasoning: string;
+      supersedes?: string;
+      content: string;
+      confidenceImpact?: Record<string, unknown>;
     };
 
 const PIPELINE_STAGES = [

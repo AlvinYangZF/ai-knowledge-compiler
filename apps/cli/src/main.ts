@@ -4,6 +4,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -193,6 +194,17 @@ type PatchChange =
       pageId: string;
       relation: "duplicate";
       confidenceImpact: Record<string, unknown>;
+    }
+  | {
+      type: "create";
+      newPageId: string;
+      path?: string;
+      relation: "new" | "supersede";
+      classifyConfidence: number;
+      reasoning: string;
+      supersedes?: string;
+      content: string;
+      confidenceImpact?: Record<string, unknown>;
     };
 
 let currentArgv = process.argv;
@@ -1907,7 +1919,9 @@ async function compileCommand(options: CompileOptions): Promise<void> {
     clearCompileDisabled(vaultDir, patch.source?.pageId ?? sourceRef);
     console.log(`Compiled ${patch.source?.pageId ?? sourceRef} -> ${patch.id}`);
     for (const change of patch.changes ?? []) {
-      console.log(`  - ${change.type} ${change.pageId} (${change.relation})`);
+      const targetPage =
+        change.type === "create" ? change.newPageId : change.pageId;
+      console.log(`  - ${change.type} ${targetPage} (${change.relation})`);
     }
   }
 }
@@ -2023,6 +2037,77 @@ async function patchApplyCommand(
           ),
         ),
       );
+    } else if (change.type === "create") {
+      const targetRelative = createChangeRelativePath(change);
+      assertCreatePathInsidePages(vaultDir, targetRelative);
+      const file = join(vaultDir, targetRelative);
+      mkdirSync(dirname(file), { recursive: true });
+      const content = ensureFrontmatter(change.content, {
+        id: change.newPageId as PageId,
+      });
+      writeFileSync(file, content);
+      written.add(targetRelative);
+      const created = pageFromFile(vaultDir, file);
+      appendPatchConfidenceEvent(vaultDir, created.page, change, patch);
+      written.add(
+        toPosix(
+          relative(
+            vaultDir,
+            ledgerPathForPageLocal(
+              vaultDir,
+              created.page.path,
+              created.page.id,
+            ),
+          ),
+        ),
+      );
+      if (change.supersedes) {
+        const supersededFile = resolvePageFile(vaultDir, change.supersedes);
+        if (!supersededFile) {
+          throw new Error(`Patch target page not found: ${change.supersedes}`);
+        }
+        const superseded = pageFromFile(vaultDir, supersededFile);
+        appendPatchConfidenceEvent(
+          vaultDir,
+          superseded.page,
+          {
+            type: "modify",
+            pageId: String(superseded.page.id),
+            operation: "append_section",
+            relation: "supersede",
+            classifyConfidence: change.classifyConfidence,
+            reasoning: change.reasoning,
+            content: "",
+            confidenceImpact: {
+              kind: "superseded_by",
+              supersederPageId: created.page.id,
+            },
+          },
+          patch,
+        );
+        written.add(
+          toPosix(
+            relative(
+              vaultDir,
+              ledgerPathForPageLocal(
+                vaultDir,
+                superseded.page.path,
+                superseded.page.id,
+              ),
+            ),
+          ),
+        );
+      }
+      const index = new SearchIndex({
+        dbPath: join(vaultDir, ".akb", "index.db"),
+      });
+      try {
+        index.upsertPage(created.page, created.body, {
+          bodyStartLine: created.bodyStartLine,
+        });
+      } finally {
+        index.close();
+      }
     }
   }
   patch.status = "applied";
@@ -2718,10 +2803,10 @@ function parsePatchChange(change: unknown): PatchChange {
   if (!isRecord(change)) {
     throw new Error("Invalid patch: change must be an object");
   }
-  if (!isValidPageId(change.pageId)) {
-    throw new Error("Invalid patch: invalid change pageId");
-  }
   if (change.type === "modify") {
+    if (!isValidPageId(change.pageId)) {
+      throw new Error("Invalid patch: invalid change pageId");
+    }
     if (change.operation !== "append_section") {
       throw new Error("Invalid patch: unsupported modify operation");
     }
@@ -2744,6 +2829,9 @@ function parsePatchChange(change: unknown): PatchChange {
     return change as PatchChange;
   }
   if (change.type === "confidence_only") {
+    if (!isValidPageId(change.pageId)) {
+      throw new Error("Invalid patch: invalid change pageId");
+    }
     if (change.relation !== "duplicate") {
       throw new Error(
         "Invalid patch: confidence_only relation must be duplicate",
@@ -2754,6 +2842,43 @@ function parsePatchChange(change: unknown): PatchChange {
     }
     return change as PatchChange;
   }
+  if (change.type === "create") {
+    if (!isValidPageId(change.newPageId)) {
+      throw new Error("Invalid patch: invalid newPageId");
+    }
+    if (change.relation !== "new" && change.relation !== "supersede") {
+      throw new Error("Invalid patch: unsupported create relation");
+    }
+    if (change.path !== undefined && typeof change.path !== "string") {
+      throw new Error("Invalid patch: create path must be a string");
+    }
+    if (typeof change.content !== "string") {
+      throw new Error("Invalid patch: create content must be a string");
+    }
+    if (
+      typeof change.classifyConfidence !== "number" ||
+      change.classifyConfidence < 0 ||
+      change.classifyConfidence > 1
+    ) {
+      throw new Error("Invalid patch: classifyConfidence must be 0-1");
+    }
+    if (typeof change.reasoning !== "string") {
+      throw new Error("Invalid patch: reasoning must be a string");
+    }
+    if (change.supersedes !== undefined && !isValidPageId(change.supersedes)) {
+      throw new Error("Invalid patch: invalid supersedes pageId");
+    }
+    if (change.relation === "supersede" && !change.supersedes) {
+      throw new Error("Invalid patch: supersede create requires supersedes");
+    }
+    if (
+      change.confidenceImpact !== undefined &&
+      !isRecord(change.confidenceImpact)
+    ) {
+      throw new Error("Invalid patch: confidenceImpact must be an object");
+    }
+    return change as PatchChange;
+  }
   throw new Error("Invalid patch: unsupported change type");
 }
 
@@ -2761,7 +2886,74 @@ function validatePatchForApply(vaultDir: string, patch: PatchDocument): void {
   if (patch.status !== "proposed") {
     throw new Error(`Invalid patch: ${patch.id} is not proposed`);
   }
+  const createPageIds = new Set<string>();
+  const createPaths = new Set<string>();
   for (const change of patch.changes ?? []) {
+    if (change.type === "create") {
+      if (createPageIds.has(change.newPageId)) {
+        throw new Error(
+          `Invalid patch: duplicate create page id ${change.newPageId}`,
+        );
+      }
+      createPageIds.add(change.newPageId);
+      if (findPagePathById(vaultDir, change.newPageId as PageId)) {
+        throw new Error(
+          `Invalid patch: page already exists ${change.newPageId}`,
+        );
+      }
+      const targetRelative = createChangeRelativePath(change);
+      assertCreatePathInsidePages(vaultDir, targetRelative);
+      if (createPaths.has(targetRelative)) {
+        throw new Error(
+          `Invalid patch: duplicate create path ${targetRelative}`,
+        );
+      }
+      createPaths.add(targetRelative);
+      if (existsSync(join(vaultDir, targetRelative))) {
+        throw new Error(`Invalid patch: target path exists ${targetRelative}`);
+      }
+      const content = ensureFrontmatter(change.content, {
+        id: change.newPageId as PageId,
+      });
+      const frontmatter = normalizeFrontmatter(
+        parseMarkdown(content).frontmatter,
+      );
+      if (frontmatter.id !== change.newPageId) {
+        throw new Error("Invalid patch: create content id mismatch");
+      }
+      if (change.supersedes && !resolvePageFile(vaultDir, change.supersedes)) {
+        throw new Error(
+          `Invalid patch: target page not found ${change.supersedes}`,
+        );
+      }
+      if (change.relation === "new" && change.supersedes) {
+        throw new Error("Invalid patch: new create cannot supersede");
+      }
+      if (change.relation === "supersede") {
+        const impact = change.confidenceImpact;
+        if (
+          !isRecord(impact) ||
+          impact.kind !== "supersedes" ||
+          impact.supersededPageId !== change.supersedes
+        ) {
+          throw new Error(
+            "Invalid patch: supersede create requires matching confidenceImpact",
+          );
+        }
+      }
+      for (const source of extractDerivedSources(change.content)) {
+        if (source.includes(":c")) {
+          if (!sourceChunkExists(vaultDir, source)) {
+            throw new Error(
+              `Invalid patch: unresolved derived source ${source}`,
+            );
+          }
+        } else if (!lineageUnitExists(patch, source)) {
+          throw new Error(`Invalid patch: unresolved derived source ${source}`);
+        }
+      }
+      continue;
+    }
     if (!resolvePageFile(vaultDir, change.pageId)) {
       throw new Error(`Invalid patch: target page not found ${change.pageId}`);
     }
@@ -2829,6 +3021,49 @@ function sourceChunkExists(vaultDir: string, chunkId: string): boolean {
   );
 }
 
+function createChangeRelativePath(
+  change: Extract<PatchChange, { type: "create" }>,
+): string {
+  const rawPath =
+    typeof change.path === "string" && change.path.length > 0
+      ? change.path
+      : `pages/${change.newPageId}.md`;
+  const normalized = toPosix(rawPath);
+  if (
+    normalized.startsWith("/") ||
+    !normalized.startsWith("pages/") ||
+    normalized.includes("../") ||
+    normalized.includes("/..") ||
+    !normalized.endsWith(".md")
+  ) {
+    throw new Error("Invalid patch: invalid create path");
+  }
+  return normalized;
+}
+
+function assertCreatePathInsidePages(
+  vaultDir: string,
+  targetRelative: string,
+): void {
+  const pagesRoot = realpathSync(join(vaultDir, "pages"));
+  const targetParent = join(vaultDir, dirname(targetRelative));
+  let existingAncestor = targetParent;
+  while (!existsSync(existingAncestor)) {
+    const parent = dirname(existingAncestor);
+    if (parent === existingAncestor) {
+      throw new Error("Invalid patch: invalid create path");
+    }
+    existingAncestor = parent;
+  }
+  const ancestorRealPath = realpathSync(existingAncestor);
+  if (
+    ancestorRealPath !== pagesRoot &&
+    !ancestorRealPath.startsWith(`${pagesRoot}/`)
+  ) {
+    throw new Error("Invalid patch: invalid create path");
+  }
+}
+
 function normalizedCompilePatch(patch: PatchDocument): string {
   const compileMeta = { ...patch.compileMeta };
   const promptHashes = isRecord(compileMeta.promptHashes)
@@ -2856,7 +3091,12 @@ function normalizedCompilePatch(patch: PatchDocument): string {
             ...change,
             content: normalizeVolatileCompileText(change.content),
           }
-        : change,
+        : change.type === "create"
+          ? {
+              ...change,
+              content: normalizeVolatileCompileText(change.content),
+            }
+          : change,
     ),
     lineage: {
       ...patch.lineage,
