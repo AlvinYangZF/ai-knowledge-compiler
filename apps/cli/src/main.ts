@@ -73,6 +73,10 @@ interface ConfidenceShowOptions {
   format?: "text" | "json";
 }
 
+interface ConfidenceRecomputeOptions extends ConfidenceShowOptions {
+  now?: string;
+}
+
 interface ProjectionRebuildOptions {
   confidence?: boolean;
   all?: boolean;
@@ -239,6 +243,12 @@ export async function run(argv = process.argv): Promise<void> {
     .argument("<page-id-or-path>")
     .option("--format <format>", "text or json", parseFormat, "text")
     .action(confidenceShowCommand);
+  confidence
+    .command("recompute")
+    .argument("<page-id-or-path>")
+    .option("--format <format>", "text or json", parseFormat, "text")
+    .option("--now <timestamp>", "clock timestamp for deterministic replay")
+    .action(confidenceRecomputeCommand);
   const projection = program.command("projection");
   projection
     .command("rebuild")
@@ -1186,6 +1196,63 @@ async function confidenceShowCommand(
   console.log(`  last event: ${state.lastEventAt}`);
 }
 
+async function confidenceRecomputeCommand(
+  pageIdOrPath: string,
+  options: ConfidenceRecomputeOptions,
+): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const file = resolvePageFile(vaultDir, pageIdOrPath);
+  if (!file) {
+    throw new Error(`Page not found: ${pageIdOrPath}`);
+  }
+  const now = parseOptionalNow(options.now);
+  const { page } = pageFromFile(vaultDir, file);
+  const events = loadConfidenceEvents(vaultDir, page.path, page.id);
+  if (events.length === 0) {
+    throw new Error(`No confidence ledger found for ${page.id}`);
+  }
+  const state = computeConfidenceState(events, {
+    now,
+    pageType:
+      typeof page.frontmatter.type === "string"
+        ? page.frontmatter.type
+        : undefined,
+  });
+  const report = {
+    page_id: state.pageId,
+    events_replayed: events.length,
+    score: state.score,
+    source_count: state.sourceCount,
+    contradiction_count: state.contradictionCount,
+    superseded_by: state.supersededBy,
+    last_verified_at: state.lastVerifiedAt,
+    last_event_at: state.lastEventAt,
+    computed_at: state.computedAt,
+    explanation: {
+      base: state.explanation.base,
+      source_strength: state.explanation.sourceStrength,
+      contradiction_penalty: state.explanation.contradictionPenalty,
+      time_decay: state.explanation.timeDecay,
+      verification_boost: state.explanation.verificationBoost,
+    },
+  };
+
+  if (options.format === "json") {
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+
+  console.log(
+    `Recomputed ${state.pageId} from ${events.length} event${events.length === 1 ? "" : "s"}.`,
+  );
+  console.log(`  score: ${state.score.toFixed(4)}`);
+  console.log(`  sources: ${state.sourceCount}`);
+  console.log(`  contradictions: ${state.contradictionCount}`);
+  console.log(`  last event: ${state.lastEventAt}`);
+  console.log(`  computed at: ${state.computedAt}`);
+}
+
 async function compileCommand(options: CompileOptions): Promise<void> {
   const vaultDir = process.cwd();
   assertVault(vaultDir);
@@ -1730,6 +1797,26 @@ function normalizeEventTimestamp(value: unknown): string {
     return new Date(value).toISOString();
   }
   return new Date().toISOString();
+}
+
+function parseOptionalNow(value: string | undefined): Date | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(
+      value,
+    )
+  ) {
+    throw new Error(
+      `Invalid --now timestamp: ${value} (expected ISO timestamp with timezone)`,
+    );
+  }
+  const now = new Date(value);
+  if (!Number.isFinite(now.getTime())) {
+    throw new Error(`Invalid --now timestamp: ${value}`);
+  }
+  return now;
 }
 
 function stableId(prefix: "evt" | "src", input: string): string {

@@ -212,6 +212,122 @@ describe("akb CLI", () => {
     expect(report.explanation.source_strength).toBeGreaterThan(0);
   });
 
+  it("recomputes confidence state by replaying the JSONL ledger", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "recompute.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_recompute001",
+        "title: Confidence Recompute",
+        'created_at: "2026-05-01"',
+        'source_path: "./recompute.md"',
+        "---",
+        "# Confidence Recompute",
+        "",
+        "This page should be replayable from its confidence ledger.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+
+    const sourceAdded = {
+      id: "evt_recompute001",
+      kind: "source_added",
+      pageId: "page_recompute001",
+      timestamp: "2026-05-01T00:00:00.000Z",
+      actor: "system",
+      actorId: "akb-test",
+      sourceId: "src_recompute001",
+      sourceWeight: 0.8,
+    };
+    const contradicted = {
+      id: "evt_recompute002",
+      kind: "contradicted_by",
+      pageId: "page_recompute001",
+      timestamp: "2026-05-02T00:00:00.000Z",
+      actor: "system",
+      actorId: "akb-test",
+      bySourceId: "src_recompute002",
+      severity: "major",
+    };
+    const ledgerPath = join(vault, "pages", ".page_recompute001.ledger.jsonl");
+    writeFileSync(
+      ledgerPath,
+      `${JSON.stringify(sourceAdded)}\n${JSON.stringify(contradicted)}\n`,
+    );
+
+    const contradictedReport = JSON.parse(
+      runCli(
+        [
+          "confidence",
+          "recompute",
+          "page_recompute001",
+          "--format",
+          "json",
+          "--now",
+          "2026-05-16T00:00:00.000Z",
+        ],
+        vault,
+      ),
+    );
+    expect(contradictedReport.events_replayed).toBe(2);
+    expect(contradictedReport.contradiction_count).toBe(1);
+
+    const repeatedReport = JSON.parse(
+      runCli(
+        [
+          "confidence",
+          "recompute",
+          "page_recompute001",
+          "--format",
+          "json",
+          "--now",
+          "2026-05-16T00:00:00.000Z",
+        ],
+        vault,
+      ),
+    );
+    expect(repeatedReport).toEqual(contradictedReport);
+
+    runCli(["projection", "rebuild", "--confidence"], vault);
+    writeFileSync(ledgerPath, `${JSON.stringify(sourceAdded)}\n`);
+    const replayedEarlierState = JSON.parse(
+      runCli(
+        [
+          "confidence",
+          "recompute",
+          "page_recompute001",
+          "--format",
+          "json",
+          "--now",
+          "2026-05-16T00:00:00.000Z",
+        ],
+        vault,
+      ),
+    );
+
+    expect(replayedEarlierState.events_replayed).toBe(1);
+    expect(replayedEarlierState.contradiction_count).toBe(0);
+    expect(replayedEarlierState.computed_at).toBe("2026-05-16T00:00:00.000Z");
+    expect(replayedEarlierState.score).toBeGreaterThan(
+      contradictedReport.score,
+    );
+
+    const invalidNow = runCliFailure(
+      [
+        "confidence",
+        "recompute",
+        "page_recompute001",
+        "--now",
+        "2026-05-16T00:00:00",
+      ],
+      vault,
+    );
+    expect(invalidNow).toContain("Invalid --now timestamp");
+  });
+
   it("verifies a page by appending a confidence ledger event", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
