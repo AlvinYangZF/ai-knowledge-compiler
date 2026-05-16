@@ -3192,20 +3192,45 @@ function compileStatusCommand(): void {
   console.log(`  compile-disabled: ${disabled}`);
 }
 
-function compileReplayCommand(patchId: string): void {
+async function compileReplayCommand(patchId: string): Promise<void> {
   const vaultDir = process.cwd();
   assertVault(vaultDir);
+  const config = readVaultConfig(vaultDir);
   const patch = readPatch(vaultDir, patchId);
   if (!patch.source?.pageId) {
     throw new Error(`Patch has no source page id: ${patchId}`);
   }
-  const replayed = buildHeuristicPatchFromVault(vaultDir, patch.source.pageId, {
-    model: String(patch.compileMeta?.modelId ?? "heuristic-v0.1"),
-    apiKeyEnv:
-      typeof patch.compileMeta?.apiKeyEnv === "string"
-        ? patch.compileMeta.apiKeyEnv
-        : "DEEPSEEK_API_KEY",
-  });
+  const apiKeyEnv =
+    typeof patch.compileMeta?.apiKeyEnv === "string"
+      ? patch.compileMeta.apiKeyEnv
+      : (config.llm?.api_key_env ?? "DEEPSEEK_API_KEY");
+  const isDeepSeekPatch =
+    patch.compileMeta?.provider === "deepseek" &&
+    patch.compileMeta?.degraded !== true;
+  const model = isDeepSeekPatch
+    ? String(
+        patch.compileMeta?.modelId ?? config.llm?.model ?? "deepseek-v4-flash",
+      )
+    : String(patch.compileMeta?.modelId ?? "heuristic-v0.1");
+  const replayed = isDeepSeekPatch
+    ? await buildCompilePatch(vaultDir, patch.source.pageId, {
+        model,
+        apiKeyEnv,
+        baseUrl: config.llm?.base_url,
+      })
+    : buildHeuristicPatchFromVault(vaultDir, patch.source.pageId, {
+        model,
+        apiKeyEnv,
+      });
+  if (
+    isDeepSeekPatch &&
+    (replayed.compileMeta?.provider !== "deepseek" ||
+      replayed.compileMeta?.degraded === true)
+  ) {
+    throw new Error(
+      `Replay requires successful DeepSeek replay for ${patch.id}`,
+    );
+  }
   if (normalizedCompilePatch(patch) !== normalizedCompilePatch(replayed)) {
     throw new Error(`Replay differed for ${patch.id}`);
   }
@@ -4775,6 +4800,7 @@ function normalizedCompilePatch(patch: PatchDocument): string {
     compileMeta: {
       provider: compileMeta.provider,
       modelId: compileMeta.modelId,
+      resolvedModelId: compileMeta.resolvedModelId,
       promptHashes: {
         segment: promptHashes.segment,
         classify: promptHashes.classify,

@@ -54,6 +54,7 @@ export interface CompilePatchDocument {
   compileMeta: {
     provider: "deepseek" | "heuristic";
     modelId: string;
+    resolvedModelId?: string;
     apiKeyEnv: string;
     promptHashes: {
       segment: string;
@@ -378,7 +379,8 @@ async function buildDeepSeekCompilePatch(
     },
     compileMeta: {
       provider: "deepseek",
-      modelId: resolvedModel,
+      modelId: model,
+      ...(resolvedModel !== model ? { resolvedModelId: resolvedModel } : {}),
       apiKeyEnv: opts.apiKeyEnv ?? "DEEPSEEK_API_KEY",
       promptHashes,
       pipelineVersion: "compile/0.1",

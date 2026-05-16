@@ -52,6 +52,20 @@ function runCliWithEnvAsync(
   });
 }
 
+async function runCliWithEnvFailureAsync(
+  args: string[],
+  cwd: string,
+  env: Record<string, string>,
+): Promise<string> {
+  try {
+    await runCliWithEnvAsync(args, cwd, env);
+  } catch (error) {
+    const failure = error as { stderr?: string; stdout?: string };
+    return `${failure.stdout ?? ""}${failure.stderr ?? ""}`;
+  }
+  throw new Error("Expected command to fail");
+}
+
 function runCliFailure(args: string[], cwd: string): string {
   try {
     runCli(args, cwd);
@@ -2748,6 +2762,336 @@ describe("akb CLI", () => {
       vault,
     );
     expect(reverse).toContain("page_compile00001");
+  });
+
+  it("replays DeepSeek-backed compile patches through the configured provider", async () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const existing = join(dir, "gc-llm-target.md");
+    const incoming = join(dir, "gc-llm-update.md");
+    writeFileSync(
+      existing,
+      [
+        "---",
+        "id: page_compilellm01",
+        "title: Garbage Collection",
+        "aliases:",
+        "  - garbage collection",
+        "---",
+        "# Garbage Collection",
+        "",
+        "## Threshold Policy",
+        "",
+        "Garbage collection uses a fixed threshold policy.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      incoming,
+      [
+        "---",
+        "id: page_compilellm02",
+        "title: Adaptive GC",
+        "tags:",
+        "  - garbage collection",
+        "---",
+        "# Adaptive GC",
+        "",
+        "Adaptive garbage collection changes threshold policy.",
+      ].join("\n"),
+    );
+    runCli(["ingest", existing, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", incoming, "--no-commit", "--no-compile"], vault);
+
+    const requests: Array<{
+      model?: string;
+      messages?: Array<{ content?: string }>;
+    }> = [];
+    const server = createServer((request, response) => {
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => {
+        body += chunk;
+      });
+      request.on("end", () => {
+        const payload = JSON.parse(body) as {
+          model?: string;
+          messages?: Array<{ content?: string }>;
+        };
+        requests.push(payload);
+        const system = payload.messages?.[0]?.content ?? "";
+        let content: unknown;
+        if (system.includes("Segment the source")) {
+          content = {
+            units: [
+              {
+                id: "su_gc",
+                sourceChunkIds: ["page_compilellm02:c0"],
+                text: "Adaptive garbage collection changes threshold policy.",
+                kind: "claim_cluster",
+                lineRange: { start: 1, end: 1 },
+              },
+            ],
+          };
+        } else if (system.includes("Classify the relation")) {
+          content = {
+            relation: "merge",
+            confidence: 0.91,
+            reasoning: "Both pages describe garbage collection thresholds.",
+          };
+        } else {
+          content = {
+            changes: [
+              {
+                type: "modify",
+                pageId: "page_compilellm01",
+                operation: "replace_section",
+                targetSection: "Threshold Policy",
+                relation: "merge",
+                classifyConfidence: 0.91,
+                reasoning: "Merged threshold policy update.",
+                content:
+                  '## Threshold Policy\n\n<!-- akb:derived source=su_gc method=merge patch=patch_page_compilellm02 promptHash="sha256:llm" modelId="deepseek-v4-pro" compiledAt="2026-05-16T00:00:00.000Z" -->\nAdaptive garbage collection changes threshold policy.',
+                confidenceImpact: {
+                  kind: "source_added",
+                  sourceWeight: 0.8,
+                },
+              },
+            ],
+          };
+        }
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(
+          JSON.stringify({
+            model: "deepseek-v4-pro-routed",
+            choices: [{ message: { content: JSON.stringify(content) } }],
+          }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    const address = server.address() as AddressInfo;
+    try {
+      writeFileSync(
+        join(vault, ".akb", "config.yaml"),
+        [
+          'version: "0.0"',
+          "workspace:",
+          '  name: "vault"',
+          '  vault_dir: "."',
+          "index:",
+          '  engine: "sqlite-fts5"',
+          '  path: ".akb/index.db"',
+          "mcp:",
+          '  host: "127.0.0.1"',
+          "  port: 8765",
+          "llm:",
+          `  base_url: "http://127.0.0.1:${address.port}"`,
+          '  model: "deepseek-v4-pro"',
+          '  api_key_env: "AKB_TEST_DEEPSEEK_KEY"',
+          "",
+        ].join("\n"),
+      );
+
+      const compileOutput = await runCliWithEnvAsync(
+        ["compile", "--source", "page_compilellm02"],
+        vault,
+        { AKB_TEST_DEEPSEEK_KEY: "test-key" },
+      );
+      expect(compileOutput).toContain(
+        "Compiled page_compilellm02 -> patch_page_compilellm02",
+      );
+      const patch = readFileSync(
+        join(vault, ".akb", "patches", "patch_page_compilellm02.yaml"),
+        "utf8",
+      );
+      expect(patch).toContain("provider: deepseek");
+      expect(patch).toContain("modelId: deepseek-v4-pro");
+      expect(patch).toContain("resolvedModelId: deepseek-v4-pro-routed");
+      expect(patch).toContain("degraded: false");
+      writeFileSync(
+        join(vault, ".akb", "config.yaml"),
+        [
+          'version: "0.0"',
+          "workspace:",
+          '  name: "vault"',
+          '  vault_dir: "."',
+          "index:",
+          '  engine: "sqlite-fts5"',
+          '  path: ".akb/index.db"',
+          "mcp:",
+          '  host: "127.0.0.1"',
+          "  port: 8765",
+          "llm:",
+          `  base_url: "http://127.0.0.1:${address.port}"`,
+          '  model: "deepseek-v4-other"',
+          '  api_key_env: "AKB_TEST_DEEPSEEK_KEY"',
+          "",
+        ].join("\n"),
+      );
+
+      const replayOutput = await runCliWithEnvAsync(
+        ["compile", "replay", "patch_page_compilellm02"],
+        vault,
+        { AKB_TEST_DEEPSEEK_KEY: "test-key" },
+      );
+
+      expect(replayOutput).toContain("Replay matched patch_page_compilellm02");
+      expect(requests).toHaveLength(6);
+      expect(requests.map((request) => request.model)).toEqual([
+        "deepseek-v4-pro",
+        "deepseek-v4-pro",
+        "deepseek-v4-pro",
+        "deepseek-v4-pro",
+        "deepseek-v4-pro",
+        "deepseek-v4-pro",
+      ]);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("rejects degraded replay for DeepSeek-backed compile patches", async () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const existing = join(dir, "gc-llm-target.md");
+    const incoming = join(dir, "gc-llm-update.md");
+    writeFileSync(
+      existing,
+      [
+        "---",
+        "id: page_replayllm001",
+        "title: Garbage Collection",
+        "aliases:",
+        "  - garbage collection",
+        "---",
+        "# Garbage Collection",
+        "",
+        "Garbage collection uses a fixed threshold policy.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      incoming,
+      [
+        "---",
+        "id: page_replayllm002",
+        "title: Adaptive GC",
+        "tags:",
+        "  - garbage collection",
+        "---",
+        "# Adaptive GC",
+        "",
+        "Adaptive garbage collection changes threshold policy.",
+      ].join("\n"),
+    );
+    runCli(["ingest", existing, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", incoming, "--no-commit", "--no-compile"], vault);
+
+    const server = createServer((request, response) => {
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => {
+        body += chunk;
+      });
+      request.on("end", () => {
+        const payload = JSON.parse(body) as {
+          messages?: Array<{ content?: string }>;
+        };
+        const system = payload.messages?.[0]?.content ?? "";
+        let content: unknown;
+        if (system.includes("Segment the source")) {
+          content = {
+            units: [
+              {
+                id: "su_gc",
+                sourceChunkIds: ["page_replayllm002:c0"],
+                text: "Adaptive garbage collection changes threshold policy.",
+                kind: "claim_cluster",
+              },
+            ],
+          };
+        } else if (system.includes("Classify the relation")) {
+          content = {
+            relation: "merge",
+            confidence: 0.91,
+            reasoning: "Both pages describe garbage collection thresholds.",
+          };
+        } else {
+          content = {
+            changes: [
+              {
+                type: "modify",
+                pageId: "page_replayllm001",
+                operation: "append_section",
+                relation: "merge",
+                classifyConfidence: 0.91,
+                reasoning: "Merged threshold policy update.",
+                content:
+                  '## Adaptive GC (compiled)\n\n<!-- akb:derived source=su_gc method=merge patch=patch_page_replayllm002 promptHash="sha256:llm" modelId="deepseek-v4-pro" compiledAt="2026-05-16T00:00:00.000Z" -->\nAdaptive garbage collection changes threshold policy.',
+                confidenceImpact: {
+                  kind: "source_added",
+                  sourceWeight: 0.8,
+                },
+              },
+            ],
+          };
+        }
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(
+          JSON.stringify({
+            model: "deepseek-v4-pro-routed",
+            choices: [{ message: { content: JSON.stringify(content) } }],
+          }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    const address = server.address() as AddressInfo;
+    try {
+      writeFileSync(
+        join(vault, ".akb", "config.yaml"),
+        [
+          'version: "0.0"',
+          "workspace:",
+          '  name: "vault"',
+          '  vault_dir: "."',
+          "index:",
+          '  engine: "sqlite-fts5"',
+          '  path: ".akb/index.db"',
+          "mcp:",
+          '  host: "127.0.0.1"',
+          "  port: 8765",
+          "llm:",
+          `  base_url: "http://127.0.0.1:${address.port}"`,
+          '  model: "deepseek-v4-pro"',
+          '  api_key_env: "AKB_TEST_DEEPSEEK_KEY"',
+          "",
+        ].join("\n"),
+      );
+
+      await runCliWithEnvAsync(
+        ["compile", "--source", "page_replayllm002"],
+        vault,
+        { AKB_TEST_DEEPSEEK_KEY: "test-key" },
+      );
+
+      const failure = await runCliWithEnvFailureAsync(
+        ["compile", "replay", "patch_page_replayllm002"],
+        vault,
+        { AKB_TEST_DEEPSEEK_KEY: "" },
+      );
+
+      expect(failure).toContain(
+        "Replay requires successful DeepSeek replay for patch_page_replayllm002",
+      );
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("uses llm config for compile metadata", () => {

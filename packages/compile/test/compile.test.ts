@@ -98,7 +98,8 @@ describe("compile pipeline", () => {
     expect(calls).toEqual(["segment", "classify", "synthesize"]);
     expect(patch.compileMeta.provider).toBe("deepseek");
     expect(patch.compileMeta.degraded).toBe(false);
-    expect(patch.compileMeta.modelId).toBe("deepseek-v4-pro-routed");
+    expect(patch.compileMeta.modelId).toBe("deepseek-v4-pro");
+    expect(patch.compileMeta.resolvedModelId).toBe("deepseek-v4-pro-routed");
     expect(patch.compileMeta.llmCallCount).toBe(3);
     expect(patch.compileMeta.stages).toEqual([
       { name: "segment", provider: "deepseek", degraded: false },
