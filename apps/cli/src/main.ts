@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { execFileSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -196,11 +197,18 @@ interface PatchApplyOptions {
   reviewed?: boolean;
 }
 
+interface PatchRejectOptions {
+  reason?: string;
+  commit?: boolean;
+}
+
 interface PatchDocument {
   id: string;
   status: "proposed" | "applied" | "rejected";
   source?: { sourceId?: string; pageId?: string; ingestPath?: string };
   compileMeta?: Record<string, unknown>;
+  rejectReason?: string;
+  rejectedAt?: string;
   changes?: PatchChange[];
   lineage?: {
     units?: Array<{
@@ -401,6 +409,12 @@ export async function run(argv = process.argv): Promise<void> {
     .option("--reviewed", "confirm close review for low-confidence changes")
     .option("--no-commit", "skip git commit")
     .action(patchApplyCommand);
+  patch
+    .command("reject")
+    .argument("<patch-id>")
+    .option("--reason <reason>", "human-readable rejection reason")
+    .option("--no-commit", "skip git commit")
+    .action(patchRejectCommand);
   program
     .command("lineage")
     .argument("[chunk-or-page]")
@@ -3144,6 +3158,50 @@ async function patchApplyCommand(
     await commitFiles(vaultDir, [...written], `apply ${patch.id}`);
   }
   console.log(`Applied ${patch.id}.`);
+}
+
+async function patchRejectCommand(
+  patchId: string,
+  options: PatchRejectOptions,
+): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const patch = readPatch(vaultDir, patchId, "proposed");
+  patch.status = "rejected";
+  patch.rejectedAt = new Date().toISOString();
+  if (options.reason) {
+    patch.rejectReason = options.reason;
+  }
+  const proposedPath = patchPathFor(vaultDir, patch.id, "proposed");
+  const rejectedPath = patchPathFor(vaultDir, patch.id, "rejected");
+  const proposedRelative = toPosix(relative(vaultDir, proposedPath));
+  if (existsSync(rejectedPath)) {
+    throw new Error(`Rejected patch already exists: ${patch.id}`);
+  }
+  const proposedWasTracked = isGitTrackedPath(vaultDir, proposedRelative);
+  mkdirSync(dirname(rejectedPath), { recursive: true });
+  writeFileSync(proposedPath, stringifyYaml(patch));
+  renameSync(proposedPath, rejectedPath);
+  const written = [toPosix(relative(vaultDir, rejectedPath))];
+  if (proposedWasTracked) {
+    written.push(proposedRelative);
+  }
+  if (options.commit !== false) {
+    await commitFiles(vaultDir, written, `reject ${patch.id}`);
+  }
+  console.log(`Rejected ${patch.id}.`);
+}
+
+function isGitTrackedPath(vaultDir: string, path: string): boolean {
+  try {
+    execFileSync("git", ["ls-files", "--error-unmatch", "--", path], {
+      cwd: vaultDir,
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function lineageCommand(

@@ -2934,6 +2934,147 @@ describe("akb CLI", () => {
     ).toContain("Low Confidence Addition");
   });
 
+  it("rejects proposed patches without writing markdown or confidence ledger", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const target = join(dir, "reject-target.md");
+    writeFileSync(
+      target,
+      [
+        "---",
+        "id: page_reject000001",
+        "title: Reject Target",
+        "---",
+        "# Reject Target",
+        "",
+        "Rejected patch target.",
+      ].join("\n"),
+    );
+    runCli(["ingest", target, "--no-commit", "--no-compile"], vault);
+    const before = readFileSync(
+      join(vault, "pages", "reject-target.md"),
+      "utf8",
+    );
+    writeFileSync(
+      join(vault, ".akb", "patches", "patch_reject_me.yaml"),
+      [
+        "id: patch_reject_me",
+        "status: proposed",
+        "changes:",
+        "  - type: modify",
+        "    pageId: page_reject000001",
+        "    operation: append_section",
+        "    relation: extend",
+        "    classifyConfidence: 0.9",
+        "    reasoning: should be rejected",
+        "    content: |",
+        "      ## Should Not Land",
+        "      Rejected content.",
+        "    confidenceImpact:",
+        "      kind: source_added",
+        "      sourceWeight: 0.8",
+      ].join("\n"),
+    );
+
+    const output = runCli(
+      [
+        "patch",
+        "reject",
+        "patch_reject_me",
+        "--reason",
+        "not relevant",
+        "--no-commit",
+      ],
+      vault,
+    );
+    const rejectedPatch = readFileSync(
+      join(vault, ".akb", "patches", "rejected", "patch_reject_me.yaml"),
+      "utf8",
+    );
+
+    expect(output).toContain("Rejected patch_reject_me");
+    expect(
+      existsSync(join(vault, ".akb", "patches", "patch_reject_me.yaml")),
+    ).toBe(false);
+    expect(rejectedPatch).toContain("status: rejected");
+    expect(rejectedPatch).toContain("rejectReason: not relevant");
+    expect(readFileSync(join(vault, "pages", "reject-target.md"), "utf8")).toBe(
+      before,
+    );
+    expect(
+      existsSync(join(vault, "pages", ".page_reject000001.ledger.jsonl")),
+    ).toBe(false);
+
+    const list = runCli(["patch", "list"], vault);
+    expect(list).toContain("patch_reject_me rejected");
+    expect(
+      runCliFailure(["patch", "apply", "patch_reject_me"], vault),
+    ).toContain("Patch not found");
+  });
+
+  it("reject commits remove tracked proposed patches", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const patchPath = join(
+      vault,
+      ".akb",
+      "patches",
+      "patch_tracked_reject.yaml",
+    );
+    writeFileSync(
+      patchPath,
+      ["id: patch_tracked_reject", "status: proposed", "changes: []"].join(
+        "\n",
+      ),
+    );
+    execFileSync("git", ["add", ".akb/patches/patch_tracked_reject.yaml"], {
+      cwd: vault,
+    });
+    execFileSync("git", ["commit", "-m", "track proposed patch"], {
+      cwd: vault,
+      stdio: "ignore",
+    });
+
+    runCli(["patch", "reject", "patch_tracked_reject"], vault);
+
+    const status = execFileSync("git", ["status", "--short"], {
+      cwd: vault,
+      encoding: "utf8",
+    });
+    const tree = execFileSync("git", ["ls-tree", "-r", "--name-only", "HEAD"], {
+      cwd: vault,
+      encoding: "utf8",
+    });
+    expect(status).toBe("");
+    expect(tree).not.toContain(".akb/patches/patch_tracked_reject.yaml");
+    expect(tree).toContain(".akb/patches/rejected/patch_tracked_reject.yaml");
+  });
+
+  it("reject commits untracked proposed patches from compile output", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    writeFileSync(
+      join(vault, ".akb", "patches", "patch_untracked_reject.yaml"),
+      ["id: patch_untracked_reject", "status: proposed", "changes: []"].join(
+        "\n",
+      ),
+    );
+
+    runCli(["patch", "reject", "patch_untracked_reject"], vault);
+
+    const status = execFileSync("git", ["status", "--short"], {
+      cwd: vault,
+      encoding: "utf8",
+    });
+    const tree = execFileSync("git", ["ls-tree", "-r", "--name-only", "HEAD"], {
+      cwd: vault,
+      encoding: "utf8",
+    });
+    expect(status).toBe("");
+    expect(tree).not.toContain(".akb/patches/patch_untracked_reject.yaml");
+    expect(tree).toContain(".akb/patches/rejected/patch_untracked_reject.yaml");
+  });
+
   it("rejects non-finite patch classify confidence", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
