@@ -394,4 +394,75 @@ describe("akb CLI", () => {
     );
     expect(oldReport.superseded_by).toBe("page_new000000001");
   });
+
+  it("applies confidence-aware ranking to search JSON output", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const oldSource = join(dir, "old-search.md");
+    const newSource = join(dir, "new-search.md");
+    writeFileSync(
+      oldSource,
+      [
+        "---",
+        "id: page_oldsearch001",
+        "title: Old Search Result",
+        'source_path: "./old-search.md"',
+        "---",
+        "# Old Search Result",
+        "",
+        "Threshold threshold threshold policy.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      newSource,
+      [
+        "---",
+        "id: page_newsearch001",
+        "title: New Search Result",
+        'source_path: "./new-search.md"',
+        "---",
+        "# New Search Result",
+        "",
+        "Threshold policy.",
+      ].join("\n"),
+    );
+    runCli(["ingest", oldSource, "--no-commit"], vault);
+    runCli(["ingest", newSource, "--no-commit"], vault);
+    runCli(["migrate", "to-v0.1", "--no-commit"], vault);
+    runCli(
+      [
+        "supersede",
+        "page_oldsearch001",
+        "--by",
+        "page_newsearch001",
+        "--no-commit",
+      ],
+      vault,
+    );
+    runCli(["index", "--rebuild"], vault);
+
+    const ranked = JSON.parse(
+      runCli(["search", "threshold", "--format", "json"], vault),
+    );
+    expect(
+      ranked.results.map((item: { page_id: string }) => item.page_id),
+    ).toContain("page_newsearch001");
+    expect(
+      ranked.results.map((item: { page_id: string }) => item.page_id),
+    ).not.toContain("page_oldsearch001");
+    expect(ranked.results[0]).toHaveProperty("final_score");
+    expect(ranked.results[0]).toHaveProperty("component_scores.confidence");
+    expect(ranked.results[0]).toHaveProperty("flags");
+
+    const withHistory = JSON.parse(
+      runCli(
+        ["search", "threshold", "--format", "json", "--include-superseded"],
+        vault,
+      ),
+    );
+    const oldResult = withHistory.results.find(
+      (item: { page_id: string }) => item.page_id === "page_oldsearch001",
+    );
+    expect(oldResult.flags).toContain("SUPERSEDED");
+  });
 });

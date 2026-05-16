@@ -20,7 +20,7 @@ describe("akb MCP server", () => {
       join(dir, "pages", "mcp.md"),
       [
         "---",
-        "id: page_mcp00000000",
+        "id: page_mcp000000000",
         "title: MCP Search Page",
         "tags:",
         "  - mcp",
@@ -32,11 +32,11 @@ describe("akb MCP server", () => {
     );
     const index = new SearchIndex({ dbPath: join(dir, ".akb", "index.db") });
     const page: Page = {
-      id: "page_mcp00000000" as never,
+      id: "page_mcp000000000" as never,
       path: "pages/mcp.md",
       title: "MCP Search Page",
       frontmatter: {
-        id: "page_mcp00000000" as never,
+        id: "page_mcp000000000" as never,
         title: "MCP Search Page",
         tags: ["mcp"],
         aliases: [],
@@ -77,14 +77,14 @@ describe("akb MCP server", () => {
     const searchPayload = JSON.parse(
       search.content[0].type === "text" ? search.content[0].text : "",
     );
-    expect(searchPayload.results[0].page_id).toBe("page_mcp00000000");
+    expect(searchPayload.results[0].page_id).toBe("page_mcp000000000");
     expect(searchPayload.results[0].citation.line_start).toBeGreaterThanOrEqual(
       7,
     );
 
     const page = await client.callTool({
       name: "get_page",
-      arguments: { page_id_or_path: "page_mcp00000000" },
+      arguments: { page_id_or_path: "page_mcp000000000" },
     });
     const pagePayload = JSON.parse(
       page.content[0].type === "text" ? page.content[0].text : "",
@@ -95,6 +95,47 @@ describe("akb MCP server", () => {
 
     await client.close();
     await server.close();
+  });
+
+  it("returns confidence-aware ranked search payloads", async () => {
+    writeFileSync(
+      join(dir, "pages", ".page_mcp000000000.ledger.jsonl"),
+      `${JSON.stringify({
+        id: "evt_mcp000000001",
+        kind: "source_added",
+        pageId: "page_mcp000000000",
+        timestamp: "2026-05-01T00:00:00.000Z",
+        actor: "system",
+        actorId: "akb-test",
+        sourceId: "src_mcp000000001",
+        sourceWeight: 0.1,
+      })}\n`,
+    );
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const server = createAkbMcpServer(dir);
+    const client = new Client({ name: "akb-test-client", version: "0.0.0" });
+
+    try {
+      await Promise.all([
+        server.connect(serverTransport),
+        client.connect(clientTransport),
+      ]);
+      const search = await client.callTool({
+        name: "search_knowledge",
+        arguments: { query: "citation data", top_k: 1 },
+      });
+      const payload = JSON.parse(
+        search.content[0].type === "text" ? search.content[0].text : "",
+      );
+
+      expect(payload.results[0]).toHaveProperty("final_score");
+      expect(payload.results[0]).toHaveProperty("component_scores.confidence");
+      expect(payload.results[0].flags).toContain("NEEDS_REVIEW");
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
 
   it("exposes search_knowledge over streamable HTTP", async () => {
@@ -120,7 +161,7 @@ describe("akb MCP server", () => {
       const payload = JSON.parse(
         result.content[0].type === "text" ? result.content[0].text : "",
       );
-      expect(payload.results[0].page_id).toBe("page_mcp00000000");
+      expect(payload.results[0].page_id).toBe("page_mcp000000000");
     } finally {
       await client.close();
       await new Promise<void>((resolve) => httpServer.close(() => resolve()));

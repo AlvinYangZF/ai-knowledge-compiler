@@ -16,12 +16,13 @@ import {
   loadConfidenceEvents,
   parseConfidenceEvent,
 } from "@akb/confidence";
-import type { Page, PageFrontmatter, PageId } from "@akb/core";
+import type { Page, PageFrontmatter, PageId, SearchResult } from "@akb/core";
 import { ConfigSchema, PageFrontmatterSchema } from "@akb/core";
 import { loadGoldenSet, runEval } from "@akb/eval-harness";
 import { commitFiles, initVault } from "@akb/git-store";
 import { ensureFrontmatter, parseMarkdown } from "@akb/markdown-engine";
 import { serveMcp } from "@akb/mcp-server";
+import { type RankConfidenceState, rankSearchResults } from "@akb/ranker";
 import { SearchIndex } from "@akb/search-engine";
 import { Command, InvalidArgumentError } from "commander";
 import { stringify as stringifyYaml } from "yaml";
@@ -40,6 +41,7 @@ interface IndexOptions {
 interface SearchOptions {
   topK?: number;
   format?: "text" | "json";
+  includeSuperseded?: boolean;
 }
 
 interface EvalOptions {
@@ -96,6 +98,7 @@ export async function run(argv = process.argv): Promise<void> {
     .argument("<query>")
     .option("--top-k <n>", "number of results", parsePositiveInt, 5)
     .option("--format <format>", "text or json", parseFormat, "text")
+    .option("--include-superseded", "include historical superseded pages")
     .action(searchCommand);
   program
     .command("eval")
@@ -315,7 +318,13 @@ async function searchCommand(
   const start = performance.now();
   const index = new SearchIndex({ dbPath: join(vaultDir, ".akb", "index.db") });
   try {
-    const results = index.search(query, { topK: options.topK ?? 5 });
+    const topK = options.topK ?? 5;
+    const rawResults = index.search(query, { topK: Math.max(topK * 10, 50) });
+    const results = rankSearchResults({
+      rawResults,
+      confidenceState: rankConfidenceStateForResults(vaultDir, rawResults),
+      options: { includeSuperseded: options.includeSuperseded === true },
+    }).slice(0, topK);
     const elapsedMs = Math.round(performance.now() - start);
     if (options.format === "json") {
       console.log(
@@ -324,8 +333,10 @@ async function searchCommand(
       return;
     }
     for (const [offset, result] of results.entries()) {
+      const flags =
+        result.flags.length > 0 ? ` flags=${result.flags.join(",")}` : "";
       console.log(
-        `[${offset + 1}] ${result.page_id}  ${result.path}  L${result.citation.line_start}-L${result.citation.line_end}  score=${result.score.toFixed(2)}`,
+        `[${offset + 1}] ${result.page_id}  ${result.path}  L${result.citation.line_start}-L${result.citation.line_end}  score=${result.final_score.toFixed(2)} bm25=${result.score.toFixed(2)}${flags}`,
       );
       console.log(`    ${result.title}`);
       console.log(`    > ${result.snippet.replace(/\s+/g, " ")}`);
@@ -335,6 +346,27 @@ async function searchCommand(
   } finally {
     index.close();
   }
+}
+
+function rankConfidenceStateForResults(
+  vaultDir: string,
+  results: SearchResult[],
+): Map<PageId, RankConfidenceState> {
+  const states = new Map<PageId, RankConfidenceState>();
+  for (const result of results) {
+    const events = loadConfidenceEvents(vaultDir, result.path, result.page_id);
+    if (events.length === 0) {
+      continue;
+    }
+    const state = computeConfidenceState(events);
+    states.set(result.page_id, {
+      score: state.score,
+      supersededBy: state.supersededBy,
+      lastVerifiedAt: state.lastVerifiedAt,
+      lastEventAt: state.lastEventAt,
+    });
+  }
+  return states;
 }
 
 async function evalCommand(options: EvalOptions): Promise<void> {

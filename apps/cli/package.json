@@ -17,6 +17,7 @@
     "@akb/git-store": "workspace:*",
     "@akb/markdown-engine": "workspace:*",
     "@akb/mcp-server": "workspace:*",
+    "@akb/ranker": "workspace:*",
     "@akb/search-engine": "workspace:*",
     "commander": "^14.0.2",
     "yaml": "^2.8.1"

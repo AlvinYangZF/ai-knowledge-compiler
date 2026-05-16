@@ -7,10 +7,12 @@
   },
   "include": ["src/**/*"],
   "references": [
+    { "path": "../../packages/confidence" },
     { "path": "../../packages/core" },
     { "path": "../../packages/eval-harness" },
     { "path": "../../packages/git-store" },
     { "path": "../../packages/markdown-engine" },
+    { "path": "../../packages/ranker" },
     { "path": "../../packages/search-engine" },
     { "path": "../mcp-server" }
   ]

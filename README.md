@@ -3,7 +3,7 @@
 > **The persistent, auditable memory layer for coding agents.**
 > coding agent 的可审计持久记忆层。
 
-> ⚠️ **状态：v0.0 本地闭环可运行**。当前已有 TypeScript monorepo、核心类型、Markdown ingest、SQLite FTS5 搜索、CLI、eval harness、MCP server、sample vault 和端到端 demo。v0.0 还不是 npm 发布版本，接口仍可能调整。
+> ⚠️ **状态：v0.0 本地闭环可运行，v0.1 confidence 起步中**。当前已有 TypeScript monorepo、核心类型、Markdown ingest、SQLite FTS5 搜索、confidence-aware ranker、CLI、eval harness、MCP server、sample vault 和端到端 demo。v0.0 还不是 npm 发布版本，接口仍可能调整。
 
 ---
 
@@ -175,7 +175,7 @@ Claude Code MCP 配置示例：
 
 ### v0.1 — 知识不腐烂 + 知识自己长在一起（~3-4 个月）
 
-- **Confidence Ledger**（~21 天）—— append-only 事件流、时间衰减、来源权重、supersession 链、confidence-aware retrieval、runtime verification。详见 [docs/v0.1-confidence-ledger.md](docs/v0.1-confidence-ledger.md)
+- **Confidence Ledger**（~21 天）—— append-only 事件流、时间衰减、来源权重、supersession 链、confidence-aware retrieval、runtime verification。当前已实现 JSONL ledger、基础 score materialization、verify/supersede CLI，以及 `packages/ranker` 对 CLI/MCP 搜索结果做 confidence-aware rerank。详见 [docs/v0.1-confidence-ledger.md](docs/v0.1-confidence-ledger.md)
 - **LLM Compile**（~27 天）—— 5 阶段 pipeline、关系判定、patch-as-proposal、chunk lineage、replay。详见 [docs/v0.1-llm-compile.md](docs/v0.1-llm-compile.md)
 - Patch workflow、vector search、hybrid retrieval、`akb ask`
 

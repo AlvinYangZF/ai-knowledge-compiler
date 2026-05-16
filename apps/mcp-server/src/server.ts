@@ -1,6 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { createServer, type Server as HttpServer } from "node:http";
 import { join, resolve } from "node:path";
+import { computeConfidenceState, loadConfidenceEvents } from "@akb/confidence";
+import type { PageId, SearchResult } from "@akb/core";
+import { type RankConfidenceState, rankSearchResults } from "@akb/ranker";
 import { SearchIndex } from "@akb/search-engine";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -43,11 +46,19 @@ export function createAkbMcpServer(cwd = process.cwd()): McpServer {
           .string()
           .describe("Search query in natural language or keywords."),
         top_k: z.number().int().min(1).max(20).default(5),
+        include_superseded: z.boolean().default(false),
       },
     },
-    async ({ query, top_k }) => {
+    async ({ query, top_k, include_superseded }) => {
       const started = performance.now();
-      const results = index.search(query, { topK: top_k });
+      const rawResults = index.search(query, {
+        topK: Math.max(top_k * 10, 50),
+      });
+      const results = rankSearchResults({
+        rawResults,
+        confidenceState: rankConfidenceStateForResults(cwd, rawResults),
+        options: { includeSuperseded: include_superseded },
+      }).slice(0, top_k);
       const payload = {
         query,
         results,
@@ -102,6 +113,27 @@ export function createAkbMcpServer(cwd = process.cwd()): McpServer {
   process.once("SIGINT", () => void close());
   process.once("SIGTERM", () => void close());
   return server;
+}
+
+function rankConfidenceStateForResults(
+  vaultDir: string,
+  results: SearchResult[],
+): Map<PageId, RankConfidenceState> {
+  const states = new Map<PageId, RankConfidenceState>();
+  for (const result of results) {
+    const events = loadConfidenceEvents(vaultDir, result.path, result.page_id);
+    if (events.length === 0) {
+      continue;
+    }
+    const state = computeConfidenceState(events);
+    states.set(result.page_id, {
+      score: state.score,
+      supersededBy: state.supersededBy,
+      lastVerifiedAt: state.lastVerifiedAt,
+      lastEventAt: state.lastEventAt,
+    });
+  }
+  return states;
 }
 
 export async function startHttpMcpServer(opts: {

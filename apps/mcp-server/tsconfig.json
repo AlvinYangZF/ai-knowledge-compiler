@@ -6,5 +6,9 @@
     "composite": true
   },
   "include": ["src/**/*"],
-  "references": [{ "path": "../../packages/search-engine" }]
+  "references": [
+    { "path": "../../packages/confidence" },
+    { "path": "../../packages/ranker" },
+    { "path": "../../packages/search-engine" }
+  ]
 }

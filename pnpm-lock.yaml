@@ -47,6 +47,9 @@ importers:
       '@akb/mcp-server':
         specifier: workspace:*
         version: link:../mcp-server
+      '@akb/ranker':
+        specifier: workspace:*
+        version: link:../../packages/ranker
       '@akb/search-engine':
         specifier: workspace:*
         version: link:../../packages/search-engine
@@ -59,6 +62,12 @@ importers:
 
   apps/mcp-server:
     dependencies:
+      '@akb/confidence':
+        specifier: workspace:*
+        version: link:../../packages/confidence
+      '@akb/ranker':
+        specifier: workspace:*
+        version: link:../../packages/ranker
       '@akb/search-engine':
         specifier: workspace:*
         version: link:../../packages/search-engine
@@ -120,6 +129,12 @@ importers:
       '@types/mdast':
         specifier: ^4.0.4
         version: 4.0.4
+
+  packages/ranker:
+    dependencies:
+      '@akb/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/search-engine:
     dependencies:

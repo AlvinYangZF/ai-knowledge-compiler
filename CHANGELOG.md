@@ -15,3 +15,4 @@
 - Added `akb migrate to-v0.1` and `akb confidence show` as the first CLI surface for confidence ledgers.
 - Added `akb verify` to append `verified` confidence ledger events and dry-run low-confidence checks.
 - Added `akb supersede` to create supersession ledger links and update the superseding page.
+- Added `@akb/ranker` and wired confidence-aware reranking into CLI and MCP search results, including `final_score`, component scores, confidence flags, and default filtering of superseded pages.

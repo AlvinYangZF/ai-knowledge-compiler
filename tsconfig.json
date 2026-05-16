@@ -5,6 +5,7 @@
     { "path": "packages/confidence" },
     { "path": "packages/git-store" },
     { "path": "packages/markdown-engine" },
+    { "path": "packages/ranker" },
     { "path": "packages/search-engine" },
     { "path": "packages/eval-harness" },
     { "path": "apps/mcp-server" },

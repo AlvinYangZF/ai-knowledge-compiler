@@ -14,8 +14,10 @@
     "baseUrl": ".",
     "paths": {
       "@akb/core": ["packages/core/src/index.ts"],
+      "@akb/confidence": ["packages/confidence/src/index.ts"],
       "@akb/git-store": ["packages/git-store/src/index.ts"],
       "@akb/markdown-engine": ["packages/markdown-engine/src/index.ts"],
+      "@akb/ranker": ["packages/ranker/src/index.ts"],
       "@akb/search-engine": ["packages/search-engine/src/index.ts"],
       "@akb/eval-harness": ["packages/eval-harness/src/index.ts"],
       "@akb/mcp-server": ["apps/mcp-server/src/server.ts"]
