@@ -745,6 +745,55 @@ describe("akb CLI", () => {
     expect(report.explanation.verification_boost).toBe(0.02);
   });
 
+  it("records human verification events with an explicit actor id", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "human-verify.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_humanverify1",
+        "title: Human Verify",
+        'created_at: "2026-05-01"',
+        'source_path: "./human-verify.md"',
+        "---",
+        "# Human Verify",
+        "",
+        "This page should receive a human verification actor id.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+    runCli(["migrate", "to-v0.1", "--no-commit"], vault);
+
+    runCli(
+      [
+        "verify",
+        "page_humanverify1",
+        "--reason",
+        "reviewed locally",
+        "--no-commit",
+      ],
+      vault,
+    );
+
+    const events = readFileSync(
+      join(vault, "pages", ".page_humanverify1.ledger.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+
+    expect(events.at(-1)).toMatchObject({
+      kind: "verified",
+      actor: "human",
+      actorId: "human:local",
+      verifierType: "human",
+      verifierId: "human:local",
+    });
+  });
+
   it("reports low-confidence pages during verify dry-run without writing events", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
@@ -847,12 +896,14 @@ describe("akb CLI", () => {
     expect(oldEvents.at(-1)).toMatchObject({
       kind: "superseded_by",
       pageId: "page_old000000001",
+      actorId: "human:local",
       supersederPageId: "page_new000000001",
       reason: "adaptive model supersedes fixed threshold",
     });
     expect(newEvents.at(-1)).toMatchObject({
       kind: "supersedes",
       pageId: "page_new000000001",
+      actorId: "human:local",
       supersededPageId: "page_old000000001",
       reason: "adaptive model supersedes fixed threshold",
     });
@@ -866,6 +917,71 @@ describe("akb CLI", () => {
       ),
     );
     expect(oldReport.superseded_by).toBe("page_new000000001");
+    expect(oldReport.score).toBeLessThanOrEqual(0.3);
+  });
+
+  it("rejects replacing an existing supersession without unlink", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    for (const [filename, pageId, title] of [
+      ["old.md", "page_chainold0001", "Old Model"],
+      ["new.md", "page_chainnew0001", "New Model"],
+      ["next.md", "page_chainnext001", "Next Model"],
+    ]) {
+      writeFileSync(
+        join(dir, filename),
+        [
+          "---",
+          `id: ${pageId}`,
+          `title: ${title}`,
+          'created_at: "2026-05-01"',
+          `source_path: "./${filename}"`,
+          "---",
+          `# ${title}`,
+          "",
+          `${title} content.`,
+        ].join("\n"),
+      );
+      runCli(["ingest", join(dir, filename), "--no-commit"], vault);
+    }
+    runCli(["migrate", "to-v0.1", "--no-commit"], vault);
+    runCli(
+      [
+        "supersede",
+        "page_chainold0001",
+        "--by",
+        "page_chainnew0001",
+        "--no-commit",
+      ],
+      vault,
+    );
+
+    const failure = runCliFailure(
+      [
+        "supersede",
+        "page_chainold0001",
+        "--by",
+        "page_chainnext001",
+        "--no-commit",
+      ],
+      vault,
+    );
+
+    expect(failure).toContain("already superseded");
+    expect(failure).toContain("--unlink");
+
+    const unlinkFailure = runCliFailure(
+      [
+        "supersede",
+        "page_chainold0001",
+        "--by",
+        "page_chainnext001",
+        "--unlink",
+        "--no-commit",
+      ],
+      vault,
+    );
+    expect(unlinkFailure).toContain("not implemented");
   });
 
   it("applies confidence-aware ranking to search JSON output", () => {
@@ -2988,6 +3104,143 @@ describe("akb CLI", () => {
       "invalid create path",
     );
     expect(existsSync(join(outsideDir, "escape.md"))).toBe(false);
+  });
+
+  it("rejects create supersede patches for pages already superseded", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    for (const [filename, pageId, title] of [
+      ["old-superseded.md", "page_patchold0001", "Patch Old"],
+      ["current-superseder.md", "page_patchcur0001", "Patch Current"],
+    ]) {
+      writeFileSync(
+        join(dir, filename),
+        [
+          "---",
+          `id: ${pageId}`,
+          `title: ${title}`,
+          'source_path: "./fixture.md"',
+          "---",
+          `# ${title}`,
+          "",
+          `${title} content.`,
+        ].join("\n"),
+      );
+      runCli(["ingest", join(dir, filename), "--no-commit"], vault);
+    }
+    runCli(["migrate", "to-v0.1", "--no-commit"], vault);
+    runCli(
+      [
+        "supersede",
+        "page_patchold0001",
+        "--by",
+        "page_patchcur0001",
+        "--no-commit",
+      ],
+      vault,
+    );
+
+    writeFileSync(
+      join(vault, ".akb", "patches", "patch_resupersede.yaml"),
+      [
+        "id: patch_resupersede",
+        "status: proposed",
+        "changes:",
+        "  - type: create",
+        "    newPageId: page_patchnew0001",
+        "    path: pages/patch-new.md",
+        "    relation: supersede",
+        "    supersedes: page_patchold0001",
+        "    classifyConfidence: 0.8",
+        "    reasoning: should not replace an existing supersession",
+        "    content: |",
+        "      # Patch New",
+        "      <!-- akb:derived source=page_patchold0001:c0 method=supersede patch=patch_resupersede -->",
+        "      New replacement content.",
+        "    confidenceImpact:",
+        "      kind: supersedes",
+        "      supersededPageId: page_patchold0001",
+      ].join("\n"),
+    );
+
+    const failure = runCliFailure(
+      ["patch", "apply", "patch_resupersede", "--no-commit"],
+      vault,
+    );
+
+    expect(failure).toContain("already superseded");
+    expect(existsSync(join(vault, "pages", "patch-new.md"))).toBe(false);
+  });
+
+  it("rejects modify patches that re-supersede an already superseded page", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    for (const [filename, pageId, title] of [
+      ["old-mod-superseded.md", "page_modold000001", "Modify Old"],
+      ["current-mod-superseder.md", "page_modcur000001", "Modify Current"],
+      ["next-mod-superseder.md", "page_modnext00001", "Modify Next"],
+    ]) {
+      writeFileSync(
+        join(dir, filename),
+        [
+          "---",
+          `id: ${pageId}`,
+          `title: ${title}`,
+          'source_path: "./fixture.md"',
+          "---",
+          `# ${title}`,
+          "",
+          `${title} content.`,
+        ].join("\n"),
+      );
+      runCli(["ingest", join(dir, filename), "--no-commit"], vault);
+    }
+    runCli(["migrate", "to-v0.1", "--no-commit"], vault);
+    runCli(
+      [
+        "supersede",
+        "page_modold000001",
+        "--by",
+        "page_modcur000001",
+        "--no-commit",
+      ],
+      vault,
+    );
+    const before = readFileSync(
+      join(vault, "pages", "old-mod-superseded.md"),
+      "utf8",
+    );
+
+    writeFileSync(
+      join(vault, ".akb", "patches", "patch_resupersede_modify.yaml"),
+      [
+        "id: patch_resupersede_modify",
+        "status: proposed",
+        "changes:",
+        "  - type: modify",
+        "    pageId: page_modold000001",
+        "    operation: append_section",
+        "    relation: supersede",
+        "    classifyConfidence: 0.8",
+        "    reasoning: should not re-supersede",
+        "    content: |",
+        "      ## Should Not Land",
+        "      This content must not be written.",
+        "    confidenceImpact:",
+        "      kind: superseded_by",
+        "      supersederPageId: page_modnext00001",
+      ].join("\n"),
+    );
+
+    const failure = runCliFailure(
+      ["patch", "apply", "patch_resupersede_modify", "--no-commit"],
+      vault,
+    );
+
+    expect(failure).toContain("already superseded");
+    expect(
+      readFileSync(join(vault, "pages", "old-mod-superseded.md"), "utf8"),
+    ).toBe(before);
   });
 
   it("rejects patches with unresolved derived source chunks", () => {

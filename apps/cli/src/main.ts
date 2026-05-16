@@ -121,6 +121,7 @@ interface VerifyOptions {
 interface SupersedeOptions {
   by: string;
   reason?: string;
+  unlink?: boolean;
   commit?: boolean;
 }
 
@@ -343,6 +344,7 @@ export async function run(argv = process.argv): Promise<void> {
       "page that supersedes the old page",
     )
     .option("--reason <reason>", "human-readable supersession reason")
+    .option("--unlink", "allow replacing an existing supersession link")
     .option("--no-commit", "skip git commit")
     .action(supersedeCommand);
   const migrate = program.command("migrate");
@@ -1960,7 +1962,9 @@ async function verifyCommand(
   const written = new Set<string>();
   for (const file of targets) {
     const { page } = pageFromFile(vaultDir, file);
-    const actorId = options.byAgent ? `agent:${options.byAgent}` : undefined;
+    const actorId = options.byAgent
+      ? `agent:${options.byAgent}`
+      : humanActorId();
     const event = parseConfidenceEvent({
       id: stableId(
         "evt",
@@ -1972,7 +1976,7 @@ async function verifyCommand(
       actor: options.byAgent ? "agent" : "human",
       actorId,
       verifierType: options.byAgent ? "agent" : "human",
-      verifierId: options.byAgent,
+      verifierId: options.byAgent ?? actorId,
       reason: options.reason,
     });
     const ledgerPath = appendConfidenceEvent(vaultDir, page.path, event);
@@ -2008,6 +2012,17 @@ async function supersedeCommand(
   if (oldPage.id === newPageBefore.id) {
     throw new Error("A page cannot supersede itself");
   }
+  const existingOldState = confidenceStateForPage(vaultDir, oldPage);
+  if (options.unlink) {
+    throw new Error(
+      "--unlink supersession replacement is not implemented yet; refusing to leave a split supersession chain.",
+    );
+  }
+  if (existingOldState?.supersededBy && !options.unlink) {
+    throw new Error(
+      `${oldPage.id} is already superseded by ${existingOldState.supersededBy}. Use --unlink to replace the supersession link.`,
+    );
+  }
 
   const timestamp = new Date().toISOString();
   const oldEvent = parseConfidenceEvent({
@@ -2019,6 +2034,7 @@ async function supersedeCommand(
     pageId: oldPage.id,
     timestamp,
     actor: "human",
+    actorId: humanActorId(),
     supersederPageId: newPageBefore.id,
     reason: options.reason,
   });
@@ -2031,6 +2047,7 @@ async function supersedeCommand(
     pageId: newPageBefore.id,
     timestamp,
     actor: "human",
+    actorId: humanActorId(),
     supersededPageId: oldPage.id,
     reason: options.reason,
   });
@@ -2120,7 +2137,9 @@ async function migrateToV01Command(options: MigrateOptions): Promise<void> {
         pageId: item.page.id,
         timestamp: normalizeEventTimestamp(lastVerifiedAt),
         actor: "human",
+        actorId: humanActorId(),
         verifierType: "human",
+        verifierId: humanActorId(),
       });
       appendConfidenceEvent(vaultDir, item.page.path, verified);
     }
@@ -2133,6 +2152,22 @@ async function migrateToV01Command(options: MigrateOptions): Promise<void> {
   console.log(
     `Migrated ${written.length} page${written.length === 1 ? "" : "s"} to v0.1 confidence ledgers (${skipped} skipped).`,
   );
+}
+
+function confidenceStateForPage(
+  vaultDir: string,
+  page: Page,
+): ConfidenceState | undefined {
+  const events = loadConfidenceEvents(vaultDir, page.path, page.id);
+  if (events.length === 0) {
+    return undefined;
+  }
+  return computeConfidenceState(events, {
+    pageType:
+      typeof page.frontmatter.type === "string"
+        ? page.frontmatter.type
+        : undefined,
+  });
 }
 
 const sourceTypeWeights: Record<string, number> = {
@@ -3194,6 +3229,10 @@ function normalizeEventTimestamp(value: unknown): string {
   return new Date().toISOString();
 }
 
+function humanActorId(): string {
+  return "human:local";
+}
+
 function parseOptionalNow(value: string | undefined): Date | undefined {
   if (!value) {
     return undefined;
@@ -3593,6 +3632,7 @@ function validatePatchForApply(vaultDir: string, patch: PatchDocument): void {
   const createPageIds = new Set<string>();
   const createPaths = new Set<string>();
   for (const change of patch.changes ?? []) {
+    validateSupersededByImpactTarget(vaultDir, change);
     if (change.type === "create") {
       if (createPageIds.has(change.newPageId)) {
         throw new Error(
@@ -3696,6 +3736,47 @@ function validatePatchForApply(vaultDir: string, patch: PatchDocument): void {
         throw new Error(`Invalid patch: unresolved lineage source ${chunkId}`);
       }
     }
+  }
+}
+
+function validateSupersededByImpactTarget(
+  vaultDir: string,
+  change: PatchChange,
+): void {
+  const impact = change.confidenceImpact;
+  if (
+    change.type === "create" &&
+    change.supersedes &&
+    change.relation === "supersede"
+  ) {
+    assertPageIsNotAlreadySuperseded(vaultDir, change.supersedes);
+    return;
+  }
+  if (!isRecord(impact) || impact.kind !== "superseded_by") {
+    return;
+  }
+  const pageId =
+    change.type === "create" ? impact.supersededPageId : change.pageId;
+  if (typeof pageId !== "string") {
+    return;
+  }
+  assertPageIsNotAlreadySuperseded(vaultDir, pageId);
+}
+
+function assertPageIsNotAlreadySuperseded(
+  vaultDir: string,
+  pageId: string,
+): void {
+  const file = resolvePageFile(vaultDir, pageId);
+  if (!file) {
+    return;
+  }
+  const page = pageFromFile(vaultDir, file).page;
+  const state = confidenceStateForPage(vaultDir, page);
+  if (state?.supersededBy) {
+    throw new Error(
+      `Invalid patch: ${pageId} is already superseded by ${state.supersededBy}`,
+    );
   }
 }
 

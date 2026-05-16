@@ -80,13 +80,12 @@ export const ConfidenceEventSchema = z
       });
     }
     if (
-      event.kind === "verified" &&
-      event.verifierType === "agent" &&
+      (event.kind === "verified" || event.kind === "contradicted_by") &&
       !event.actorId
     ) {
       ctx.addIssue({
         code: "custom",
-        message: "agent verified events require actorId",
+        message: `${event.kind} confidence events require actorId`,
         path: ["actorId"],
       });
     }
@@ -264,13 +263,14 @@ export function computeConfidenceState(
     now,
     opts.pageType ?? "note",
   );
-  const score = clamp01(
+  const uncappedScore = clamp01(
     manualBase +
       sourceStrength -
       contradictionPenalty -
       timeDecay +
       verificationBoost,
   );
+  const score = supersededBy ? Math.min(uncappedScore, 0.3) : uncappedScore;
 
   return {
     pageId,

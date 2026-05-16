@@ -59,6 +59,31 @@ describe("confidence ledger", () => {
     ).toThrow("actorId");
   });
 
+  it("requires actorId for verification and contradiction events", () => {
+    expect(() =>
+      parseConfidenceEvent({
+        id: "evt_000000000003",
+        kind: "verified",
+        pageId: "page_conf00000000",
+        timestamp: "2026-05-15T12:00:00.000Z",
+        actor: "human",
+        verifierType: "human",
+      }),
+    ).toThrow("actorId");
+
+    expect(() =>
+      parseConfidenceEvent({
+        id: "evt_000000000004",
+        kind: "contradicted_by",
+        pageId: "page_conf00000000",
+        timestamp: "2026-05-15T12:00:00.000Z",
+        actor: "system",
+        bySourceId: "src_000000000001",
+        severity: "major",
+      }),
+    ).toThrow("actorId");
+  });
+
   it("computes explainable confidence state from events", () => {
     const state = computeConfidenceState(
       [
@@ -104,6 +129,46 @@ describe("confidence ledger", () => {
     expect(state.explanation.sourceStrength).toBeGreaterThan(0);
     expect(state.explanation.contradictionPenalty).toBe(0.1);
     expect(state.explanation.verificationBoost).toBe(0.05);
+  });
+
+  it("caps superseded page confidence at historical confidence", () => {
+    const state = computeConfidenceState(
+      [
+        parseConfidenceEvent({
+          id: "evt_000000000001",
+          kind: "source_added",
+          pageId: "page_conf00000000",
+          timestamp: "2026-05-01T12:00:00.000Z",
+          actor: "system",
+          actorId: "akb-ingest",
+          sourceId: "src_000000000001",
+          sourceWeight: 1,
+        }),
+        parseConfidenceEvent({
+          id: "evt_000000000002",
+          kind: "verified",
+          pageId: "page_conf00000000",
+          timestamp: "2026-05-02T12:00:00.000Z",
+          actor: "human",
+          actorId: "human:local",
+          verifierType: "human",
+          verifierId: "human:local",
+        }),
+        parseConfidenceEvent({
+          id: "evt_000000000003",
+          kind: "superseded_by",
+          pageId: "page_conf00000000",
+          timestamp: "2026-05-03T12:00:00.000Z",
+          actor: "human",
+          actorId: "human:local",
+          supersederPageId: "page_conf00000001",
+        }),
+      ],
+      { now: new Date("2026-05-04T00:00:00.000Z") },
+    );
+
+    expect(state.supersededBy).toBe("page_conf00000001");
+    expect(state.score).toBeLessThanOrEqual(0.3);
   });
 
   it("weights verification boost by actor identity", () => {
@@ -160,6 +225,7 @@ describe("confidence ledger", () => {
           pageId: "page_verifywt0001",
           timestamp: "2026-05-03T12:00:00.000Z",
           actor: "human",
+          actorId: "alvin@example.com",
           verifierType: "human",
           verifierId: "alvin@example.com",
         }),
