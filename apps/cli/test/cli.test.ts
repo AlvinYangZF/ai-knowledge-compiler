@@ -959,6 +959,71 @@ describe("akb CLI", () => {
     expect(text).toContain("out supersedes -> page_graphold0001");
   });
 
+  it("builds a static web UI snapshot for the vault", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "web-ui-page.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_webui0000001",
+        "title: Web UI Page",
+        "references:",
+        "  - src/web-ui.ts",
+        "---",
+        "# Web UI Page",
+        "",
+        "Web UI snapshot content.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+    writeFileSync(
+      join(vault, "pages", ".page_webui0000001.ledger.jsonl"),
+      `${JSON.stringify({
+        id: "evt_webui0000001",
+        kind: "source_added",
+        pageId: "page_webui0000001",
+        timestamp: "2026-05-01T00:00:00.000Z",
+        actor: "system",
+        actorId: "akb-test",
+        sourceId: "src_webui0000001",
+        sourceWeight: 1,
+      })}\n`,
+    );
+    mkdirSync(join(vault, ".akb", "patches"), { recursive: true });
+    writeFileSync(
+      join(vault, ".akb", "patches", "patch_web_ui.yaml"),
+      [
+        "id: patch_web_ui",
+        "status: proposed",
+        "changes:",
+        "  - type: modify",
+        "    pageId: page_webui0000001",
+        "    operation: append_section",
+        "    relation: extend",
+        "    classifyConfidence: 0.8",
+        "    reasoning: web ui test patch",
+        "    content: |",
+        "      ## Added",
+        "      Patch content.",
+      ].join("\n"),
+    );
+
+    const output = runCli(["web", "build", "--output", ".akb/web"], vault);
+    const html = readFileSync(join(vault, ".akb", "web", "index.html"), "utf8");
+
+    expect(output).toContain("Wrote web UI .akb/web/index.html.");
+    expect(html).toContain("AKB Vault");
+    expect(html).toContain("Pages");
+    expect(html).toContain("Confidence");
+    expect(html).toContain("Patches");
+    expect(html).toContain("Relation Graph");
+    expect(html).toContain("Web UI Page");
+    expect(html).toContain("patch_web_ui");
+    expect(html).toContain("window.__AKB_DATA__");
+  });
+
   it("skips empty and non-UTF-8 markdown files during ingest", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);

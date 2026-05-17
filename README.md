@@ -348,6 +348,14 @@ node "$AKB" graph show page_gc0000000000
 
 Graph projection 从 Markdown 派生，不入 git；当前包含 `wiki_link`、`references` 和 `supersedes` 三类边。
 
+生成静态 Web UI：
+
+```bash
+node "$AKB" web build --output .akb/web
+```
+
+`web build` 会生成 `.akb/web/index.html`，内嵌当前 vault 的页面、confidence、section report、patch、lineage、eval 和 relation graph snapshot。这个文件是本地 review 产物，不需要提交。
+
 ### Eval / Benchmark / Demo
 
 ```bash
@@ -426,7 +434,7 @@ pnpm demo
 
 - Section-level confidence ledger events（当前 v0.1 已有按 header 的只读 report）
 - Code intelligence —— codebase 反向解析成设计文档 / ADR
-- GraphRAG traversal、Web UI、团队协作
+- GraphRAG traversal、团队协作
 
 ---
 

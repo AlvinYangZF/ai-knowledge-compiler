@@ -80,6 +80,10 @@ interface GraphOptions {
   output?: string;
 }
 
+interface WebBuildOptions {
+  output?: string;
+}
+
 interface RelationGraphNode {
   id: string;
   kind: "page" | "file";
@@ -439,6 +443,11 @@ export async function run(argv = process.argv): Promise<void> {
     .argument("<page-id-or-path-or-file>")
     .option("--format <format>", "text or json", parseFormat, "text")
     .action(graphShowCommand);
+  const web = program.command("web");
+  web
+    .command("build")
+    .option("--output <dir>", "write static web UI to a directory", ".akb/web")
+    .action(webBuildCommand);
   const evalCmd = program
     .command("eval")
     .option("--set <path>", "golden set path")
@@ -1260,6 +1269,290 @@ function resolveGraphNodeId(
     return fileNode;
   }
   return target;
+}
+
+async function webBuildCommand(options: WebBuildOptions): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const outputDir = resolve(vaultDir, options.output ?? ".akb/web");
+  mkdirSync(outputDir, { recursive: true });
+  const indexPath = join(outputDir, "index.html");
+  writeFileSync(indexPath, renderWebIndex(buildWebSnapshot(vaultDir)));
+  console.log(`Wrote web UI ${toPosix(relative(vaultDir, indexPath))}.`);
+}
+
+function buildWebSnapshot(vaultDir: string) {
+  const pages = scanVaultPages(vaultDir).map((item) => {
+    const confidence = confidenceSummaryForPage(
+      vaultDir,
+      item.page,
+      undefined,
+      false,
+    );
+    return {
+      id: item.page.id,
+      path: item.page.path,
+      title: item.page.title,
+      type:
+        typeof item.page.frontmatter.type === "string"
+          ? item.page.frontmatter.type
+          : "note",
+      references: pageFileReferences(item.page),
+      confidence,
+      sections: markdownSections(item.body, item.bodyStartLine).map(
+        (section) => ({
+          id: section.section_id,
+          heading: section.heading,
+          level: section.level,
+          line_start: section.line_start,
+          line_end: section.line_end,
+          derived_marker_count: derivedMarkerCount(section.content),
+        }),
+      ),
+      body: item.body.trimEnd(),
+    };
+  });
+  return {
+    schema_version: "web-snapshot/0.1",
+    generated_at: new Date().toISOString(),
+    pages,
+    patches: loadAllPatches(vaultDir).map((patch) => ({
+      id: patch.id,
+      status: patch.status,
+      source_page_id: patch.source?.pageId,
+      degraded: patch.compileMeta?.degraded === true,
+      changes: (patch.changes ?? []).map(contextPatchChangeSummary),
+    })),
+    graph: buildRelationGraph(vaultDir),
+    eval_reports: loadEvalReportSummaries(vaultDir),
+  };
+}
+
+function loadEvalReportSummaries(vaultDir: string) {
+  const evalDir = join(vaultDir, ".akb", "eval");
+  if (!existsSync(evalDir)) {
+    return [];
+  }
+  return readdirSync(evalDir)
+    .filter((file) => file.endsWith(".json"))
+    .sort()
+    .flatMap((file) => {
+      try {
+        const payload = JSON.parse(readFileSync(join(evalDir, file), "utf8"));
+        return [
+          {
+            path: toPosix(join(".akb", "eval", file)),
+            total:
+              typeof payload.total === "number" ? payload.total : undefined,
+            failures: Array.isArray(payload.failures)
+              ? payload.failures.length
+              : undefined,
+            schema_version:
+              typeof payload.schema_version === "string"
+                ? payload.schema_version
+                : undefined,
+          },
+        ];
+      } catch {
+        return [];
+      }
+    });
+}
+
+function renderWebIndex(snapshot: ReturnType<typeof buildWebSnapshot>): string {
+  const data = JSON.stringify(snapshot).replace(/</g, "\\u003c");
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AKB Vault</title>
+<style>
+:root { color-scheme: light; --ink: #17201b; --muted: #5c6b63; --line: #d8e0da; --panel: #f7faf8; --accent: #1f7a5b; --warn: #9a5b00; --bad: #9b2f2f; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #ffffff; }
+header { min-height: 104px; padding: 24px 32px 18px; border-bottom: 1px solid var(--line); background: #f5f8f6; }
+h1 { margin: 0; font-size: 28px; font-weight: 720; letter-spacing: 0; }
+.subtitle { margin-top: 6px; color: var(--muted); font-size: 14px; }
+.metrics { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 18px; }
+.metric { border: 1px solid var(--line); background: white; padding: 10px 12px; min-width: 128px; border-radius: 6px; }
+.metric strong { display: block; font-size: 20px; }
+.metric span { color: var(--muted); font-size: 12px; }
+.shell { display: grid; grid-template-columns: 320px 1fr; min-height: calc(100vh - 104px); }
+aside { border-right: 1px solid var(--line); padding: 16px; background: var(--panel); overflow: auto; }
+main { padding: 20px 28px 36px; min-width: 0; }
+input { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 9px 10px; font-size: 14px; background: white; }
+.tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
+button { border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 8px 10px; font-size: 14px; cursor: pointer; color: var(--ink); }
+button.active { border-color: var(--accent); color: var(--accent); background: #edf7f2; }
+.page-list { margin-top: 14px; display: grid; gap: 8px; }
+.page-item { width: 100%; text-align: left; display: block; }
+.page-item .title { font-weight: 650; display: block; overflow-wrap: anywhere; }
+.page-item .meta { color: var(--muted); font-size: 12px; display: block; margin-top: 2px; overflow-wrap: anywhere; }
+section.view { display: none; }
+section.view.active { display: block; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.panel { border: 1px solid var(--line); border-radius: 6px; padding: 14px; background: #fff; }
+.panel h2, .panel h3 { margin: 0 0 10px; letter-spacing: 0; }
+.panel h2 { font-size: 20px; }
+.panel h3 { font-size: 15px; }
+.muted { color: var(--muted); }
+.status { font-weight: 700; color: var(--accent); }
+.status.warn { color: var(--warn); }
+.status.bad { color: var(--bad); }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; border-bottom: 1px solid var(--line); padding: 8px 6px; vertical-align: top; }
+@media (max-width: 760px) { .shell { grid-template-columns: 1fr; } aside { border-right: 0; border-bottom: 1px solid var(--line); } main { padding: 16px; } header { padding: 20px 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>AKB Vault</h1>
+  <div class="subtitle">Static review UI for pages, Confidence Ledger state, patches, lineage, eval results, and relation graph projection.</div>
+  <div class="metrics">
+    <div class="metric"><strong id="metric-pages">0</strong><span>Pages</span></div>
+    <div class="metric"><strong id="metric-patches">0</strong><span>Patches</span></div>
+    <div class="metric"><strong id="metric-edges">0</strong><span>Graph Edges</span></div>
+    <div class="metric"><strong id="metric-eval">0</strong><span>Eval Reports</span></div>
+  </div>
+</header>
+<div class="shell">
+  <aside>
+    <input id="filter" placeholder="Filter pages">
+    <div id="page-list" class="page-list"></div>
+  </aside>
+  <main>
+    <div class="tabs">
+      <button data-tab="page" class="active">Pages</button>
+      <button data-tab="confidence">Confidence</button>
+      <button data-tab="patches">Patches</button>
+      <button data-tab="lineage">Lineage</button>
+      <button data-tab="eval">Eval</button>
+      <button data-tab="graph">Relation Graph</button>
+    </div>
+    <section id="view-page" class="view active"></section>
+    <section id="view-confidence" class="view"></section>
+    <section id="view-patches" class="view"></section>
+    <section id="view-lineage" class="view"></section>
+    <section id="view-eval" class="view"></section>
+    <section id="view-graph" class="view"></section>
+  </main>
+</div>
+<script>window.__AKB_DATA__ = ${data};</script>
+<script>
+const data = window.__AKB_DATA__;
+let selectedId = data.pages[0]?.id ?? null;
+let activeTab = "page";
+const byId = new Map(data.pages.map((page) => [page.id, page]));
+const $ = (id) => document.getElementById(id);
+const text = (value) => value == null || value === "" ? "-" : String(value);
+function statusClass(flags) { return flags?.length ? (flags.includes("NEEDS_REVIEW") || flags.includes("SUPERSEDED") ? "bad" : "warn") : ""; }
+function setText(id, value) { $(id).textContent = String(value); }
+function renderShell() {
+  setText("metric-pages", data.pages.length);
+  setText("metric-patches", data.patches.length);
+  setText("metric-edges", data.graph.edges.length);
+  setText("metric-eval", data.eval_reports.length);
+  renderPageList();
+  renderActiveView();
+}
+function renderPageList() {
+  const query = $("filter").value.toLowerCase();
+  const list = $("page-list");
+  list.textContent = "";
+  data.pages.filter((page) => [page.title, page.path, page.id].join(" ").toLowerCase().includes(query)).forEach((page) => {
+    const button = document.createElement("button");
+    button.className = "page-item" + (page.id === selectedId ? " active" : "");
+    const title = document.createElement("span");
+    title.className = "title";
+    title.textContent = page.title;
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent = page.path + " | " + text(page.confidence.score?.toFixed?.(4));
+    button.append(title, meta);
+    button.onclick = () => { selectedId = page.id; renderShell(); };
+    list.append(button);
+  });
+}
+function panel(title, content) {
+  const div = document.createElement("div");
+  div.className = "panel";
+  const h = document.createElement("h2");
+  h.textContent = title;
+  div.append(h, content);
+  return div;
+}
+function renderActiveView() {
+  document.querySelectorAll(".tabs button").forEach((button) => button.classList.toggle("active", button.dataset.tab === activeTab));
+  document.querySelectorAll("section.view").forEach((view) => view.classList.toggle("active", view.id === "view-" + activeTab));
+  const page = byId.get(selectedId);
+  renderPage(page);
+  renderConfidence(page);
+  renderPatches(page);
+  renderLineage(page);
+  renderEval();
+  renderGraph(page);
+}
+function renderPage(page) {
+  const root = $("view-page");
+  root.textContent = "";
+  if (!page) return;
+  const pre = document.createElement("pre");
+  pre.textContent = page.body;
+  root.append(panel(page.title, pre));
+}
+function renderConfidence(page) {
+  const root = $("view-confidence");
+  root.textContent = "";
+  if (!page) return;
+  const wrap = document.createElement("div");
+  wrap.className = "grid";
+  const summary = document.createElement("div");
+  summary.innerHTML = "<p>Score: <strong>" + text(page.confidence.score?.toFixed?.(4)) + "</strong></p><p>Status: <span class='status " + statusClass(page.confidence.status.flags) + "'>" + (page.confidence.status.flags.join(", ") || "OK") + "</span></p><p class='muted'>" + page.path + "</p>";
+  wrap.append(panel("Confidence", summary));
+  const sections = document.createElement("div");
+  sections.innerHTML = "<table><thead><tr><th>Section</th><th>Lines</th><th>Derived</th></tr></thead><tbody>" + page.sections.map((section) => "<tr><td>" + section.id + "<br><span class='muted'>" + section.heading + "</span></td><td>" + section.line_start + "-" + section.line_end + "</td><td>" + section.derived_marker_count + "</td></tr>").join("") + "</tbody></table>";
+  wrap.append(panel("Sections", sections));
+  root.append(wrap);
+}
+function renderPatches(page) {
+  const root = $("view-patches");
+  root.textContent = "";
+  const rows = data.patches.filter((patch) => !page || patch.source_page_id === page.id || patch.changes.some((change) => change.page_id === page.id || change.new_page_id === page.id));
+  const table = document.createElement("div");
+  table.innerHTML = "<table><thead><tr><th>Patch</th><th>Status</th><th>Changes</th><th>Degraded</th></tr></thead><tbody>" + rows.map((patch) => "<tr><td>" + patch.id + "</td><td>" + patch.status + "</td><td>" + patch.changes.length + "</td><td>" + patch.degraded + "</td></tr>").join("") + "</tbody></table>";
+  root.append(panel("Patches", table));
+}
+function renderLineage(page) {
+  const root = $("view-lineage");
+  root.textContent = "";
+  const pre = document.createElement("pre");
+  pre.textContent = page ? page.sections.map((section) => section.id + " lines " + section.line_start + "-" + section.line_end + " derived=" + section.derived_marker_count).join("\\n") : "";
+  root.append(panel("Lineage", pre));
+}
+function renderEval() {
+  const root = $("view-eval");
+  root.textContent = "";
+  const table = document.createElement("div");
+  table.innerHTML = "<table><thead><tr><th>Report</th><th>Total</th><th>Failures</th><th>Schema</th></tr></thead><tbody>" + data.eval_reports.map((report) => "<tr><td>" + report.path + "</td><td>" + text(report.total) + "</td><td>" + text(report.failures) + "</td><td>" + text(report.schema_version) + "</td></tr>").join("") + "</tbody></table>";
+  root.append(panel("Eval", table));
+}
+function renderGraph(page) {
+  const root = $("view-graph");
+  root.textContent = "";
+  const rows = data.graph.edges.filter((edge) => !page || edge.from === page.id || edge.to === page.id);
+  const table = document.createElement("div");
+  table.innerHTML = "<table><thead><tr><th>From</th><th>Relation</th><th>To</th></tr></thead><tbody>" + rows.map((edge) => "<tr><td>" + edge.from + "</td><td>" + edge.relation + "</td><td>" + edge.to + "</td></tr>").join("") + "</tbody></table>";
+  root.append(panel("Relation Graph", table));
+}
+document.querySelectorAll(".tabs button").forEach((button) => button.onclick = () => { activeTab = button.dataset.tab; renderActiveView(); });
+$("filter").oninput = renderPageList;
+renderShell();
+</script>
+</body>
+</html>
+`;
 }
 
 function askRetrievalFallbackQueries(question: string): string[] {

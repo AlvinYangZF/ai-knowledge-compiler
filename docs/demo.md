@@ -625,6 +625,16 @@ node "$AKB" graph show <page-id-or-path>
 
 `.akb/graph/relations.json` 是投影文件，可以随时从 Markdown 重建，不需要提交。
 
+### 11.2 生成静态 Web UI
+
+如果想用浏览器查看当前 vault 快照，可以生成静态 Web UI：
+
+```bash
+node "$AKB" web build --output .akb/web
+```
+
+生成结果是 `.akb/web/index.html`。这个页面内嵌当前 vault 的页面列表、正文、confidence 状态、section report、patch 摘要、lineage 摘要、eval report 摘要和 relation graph。它是本地 review 产物，可以直接打开，不需要提交到 git。
+
 ## 12. 生成 context pack 给 agent 使用
 
 当你要开启一个 coding agent session，或者想把某个问题相关的知识打包给外部工具时，可以生成 context pack：
@@ -751,6 +761,7 @@ must-hit pass rate:  5/5 (100%)
 - chunk lineage / reverse lineage
 - context pack
 - relation graph projection
+- static Web UI snapshot
 - MCP stdio / HTTP server
 - eval harness 和 search benchmark
 
@@ -760,7 +771,6 @@ must-hit pass rate:  5/5 (100%)
 
 - code intelligence：从 codebase 反向生成设计文档、ADR 和上下文包
 - GraphRAG traversal
-- Web UI：查看页面、confidence 事件、patch、lineage 和 eval 结果
 - 团队协作工作流：patch reviewer、PR check、知识库质量门禁
 
 ## 18. 常用验证命令
