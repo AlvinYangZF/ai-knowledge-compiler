@@ -99,7 +99,7 @@ Rollback uses the previous stable image tag.
 
 ## 3. 配置大模型 API Key
 
-如果希望 `ingest` 后的 `compile` 阶段直接使用大模型能力，需要先在 `.akb/config.yaml` 中配置 LLM provider 和 API key。`akb` 支持 DeepSeek、OpenAI 和 Anthropic；新配置建议直接写 `api_key`，不要再使用 `api_key_env`。
+如果希望 `ingest` 后的 `compile` 阶段直接使用大模型能力，需要先在 `.akb/config.yaml` 中配置 LLM provider、model 和 API key 环境变量名。`akb` 支持 DeepSeek、OpenAI 和 Anthropic；真实 API key 只放在本机环境变量中，不写入配置文件，避免误提交到远端。
 
 DeepSeek 示例：
 
@@ -108,7 +108,7 @@ llm:
   provider: "deepseek"
   base_url: "https://api.deepseek.com"
   model: "deepseek-v4-flash"
-  api_key: "sk-..."
+  api_key_env: "DEEPSEEK_API_KEY"
 ```
 
 OpenAI 示例：
@@ -118,7 +118,7 @@ llm:
   provider: "openai"
   base_url: "https://api.openai.com/v1"
   model: "gpt-4.1-mini"
-  api_key: "sk-..."
+  api_key_env: "OPENAI_API_KEY"
 ```
 
 Anthropic 示例：
@@ -128,18 +128,26 @@ llm:
   provider: "anthropic"
   base_url: "https://api.anthropic.com/v1"
   model: "claude-sonnet-4-20250514"
-  api_key: "sk-ant-..."
+  api_key_env: "ANTHROPIC_API_KEY"
 ```
 
-`api_key` 是 secret，不要把包含真实 key 的 `.akb/config.yaml` 提交到公共仓库。如果你只是第一次批量导入 Markdown，建议仍然先用 `--no-compile`，确认页面结构和索引正常后，再对少量关键页面运行 `compile`。
+设置本机环境变量：
 
-如果暂时不配置 API key，`ask` 会降级为 extractive answer；`compile` 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。
+```bash
+export DEEPSEEK_API_KEY="sk-..."
+export OPENAI_API_KEY="sk-..."
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+只需要设置你实际使用的 provider 对应的 key。如果你只是第一次批量导入 Markdown，建议仍然先用 `--no-compile`，确认页面结构和索引正常后，再对少量关键页面运行 `compile`。
+
+如果暂时不设置 API key 环境变量，`ask` 会降级为 extractive answer；`compile` 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。
 
 ## 4. 导入 Markdown
 
 重要：`ingest` 默认会在导入后继续执行 `compile`，为每个新页面生成 reviewable patch。首次批量导入自己的目录时，建议先加 `--no-compile`，只完成导入和索引，确认页面结构正常后再按需运行 compile。
 
-如果没有配置 `llm.api_key`，`compile` 不会调用大模型，而是走 degraded heuristic fallback。但对大量 Markdown 文件来说，导入后逐页 compile 仍然可能很慢，因为每个 source 都要扫描 vault 里的候选页面。若已经配置了 API key，则默认 compile 会对每个 source 调用 LLM，更应该避免在首次大目录导入时自动触发。
+如果没有设置对应 API key 环境变量，`compile` 不会调用大模型，而是走 degraded heuristic fallback。但对大量 Markdown 文件来说，导入后逐页 compile 仍然可能很慢，因为每个 source 都要扫描 vault 里的候选页面。若已经设置了 API key，则默认 compile 会对每个 source 调用 LLM，更应该避免在首次大目录导入时自动触发。
 
 导入单个文件：
 
@@ -253,7 +261,7 @@ node "$AKB" ask "deploy rollback" --hybrid --format json
 node "$AKB" ask "如何回滚生产部署？" --hybrid
 ```
 
-API key 配置方式见第 3 节。不要把包含真实 key 的配置文件提交到公共仓库。
+API key 配置方式见第 3 节。不要把真实 key 写入配置文件或提交到远端。
 
 ## 7. 启用 Confidence Ledger
 
@@ -337,7 +345,7 @@ node "$AKB" compile --source <page-id-or-path>
 node "$AKB" compile --all-pending
 ```
 
-如果没有配置 `llm.api_key`，compile 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。配置 DeepSeek、OpenAI 或 Anthropic 后，compile 会跑 provider-backed pipeline，并记录 pinned `modelId`、`promptHashes` 和 `resolvedModelId`。
+如果没有设置对应 API key 环境变量，compile 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。配置 DeepSeek、OpenAI 或 Anthropic 后，compile 会跑 provider-backed pipeline，并记录 pinned `modelId`、`promptHashes` 和 `resolvedModelId`。
 
 查看 patch：
 

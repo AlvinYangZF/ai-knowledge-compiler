@@ -67,22 +67,26 @@ const LlmProviderSchema = z.enum(["deepseek", "openai", "anthropic"]);
 function llmDefaults(provider: z.infer<typeof LlmProviderSchema>): {
   base_url: string;
   model: string;
+  api_key_env: string;
 } {
   if (provider === "openai") {
     return {
       base_url: "https://api.openai.com/v1",
       model: "gpt-4.1-mini",
+      api_key_env: "OPENAI_API_KEY",
     };
   }
   if (provider === "anthropic") {
     return {
       base_url: "https://api.anthropic.com/v1",
       model: "claude-sonnet-4-20250514",
+      api_key_env: "ANTHROPIC_API_KEY",
     };
   }
   return {
     base_url: "https://api.deepseek.com",
     model: "deepseek-v4-flash",
+    api_key_env: "DEEPSEEK_API_KEY",
   };
 }
 
@@ -91,15 +95,16 @@ const LlmConfigSchema = z
     provider: LlmProviderSchema.default("deepseek"),
     base_url: z.string().min(1).optional(),
     model: z.string().min(1).optional(),
-    api_key: z.string().min(1).optional(),
     api_key_env: z.string().min(1).optional(),
   })
+  .strict()
   .transform((value) => {
     const defaults = llmDefaults(value.provider);
     return {
       ...value,
       base_url: value.base_url ?? defaults.base_url,
       model: value.model ?? defaults.model,
+      api_key_env: value.api_key_env ?? defaults.api_key_env,
     };
   });
 

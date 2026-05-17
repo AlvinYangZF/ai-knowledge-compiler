@@ -1203,7 +1203,7 @@ function heuristicDegradedReason(
   if (opts.apiKeyEnv) {
     return `${opts.apiKeyEnv} not set`;
   }
-  return `llm.api_key not configured for ${providerName}`;
+  return `llm.api_key_env not configured for ${providerName}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

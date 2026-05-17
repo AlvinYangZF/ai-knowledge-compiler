@@ -20,35 +20,35 @@ describe("core schemas", () => {
       index: { engine: "sqlite-fts5", path: ".akb/index.db" },
       mcp: { host: "127.0.0.1", port: 8765 },
       sources: { authority_domains: ["*.usenix.org"] },
-      llm: { provider: "deepseek", api_key: "deepseek-test-key" },
+      llm: { provider: "deepseek" },
     });
 
     expect(config.sources?.authority_domains).toEqual(["*.usenix.org"]);
     expect(config.llm?.model).toBe("deepseek-v4-flash");
-    expect(config.llm?.api_key).toBe("deepseek-test-key");
+    expect(config.llm?.api_key_env).toBe("DEEPSEEK_API_KEY");
   });
 
-  it("defaults provider-specific llm endpoints and keeps legacy env key support", () => {
+  it("defaults provider-specific llm endpoints and api key env vars", () => {
     const openai = ConfigSchema.parse({
       version: "0.0",
       workspace: { name: "demo", vault_dir: "." },
       index: { engine: "sqlite-fts5", path: ".akb/index.db" },
       mcp: { host: "127.0.0.1", port: 8765 },
-      llm: { provider: "openai", api_key: "openai-test-key" },
+      llm: { provider: "openai" },
     });
     const anthropic = ConfigSchema.parse({
       version: "0.0",
       workspace: { name: "demo", vault_dir: "." },
       index: { engine: "sqlite-fts5", path: ".akb/index.db" },
       mcp: { host: "127.0.0.1", port: 8765 },
-      llm: { provider: "anthropic", api_key_env: "ANTHROPIC_API_KEY" },
+      llm: { provider: "anthropic" },
     });
 
     expect(openai.llm).toMatchObject({
       provider: "openai",
       base_url: "https://api.openai.com/v1",
       model: "gpt-4.1-mini",
-      api_key: "openai-test-key",
+      api_key_env: "OPENAI_API_KEY",
     });
     expect(anthropic.llm).toMatchObject({
       provider: "anthropic",
@@ -56,6 +56,18 @@ describe("core schemas", () => {
       model: "claude-sonnet-4-20250514",
       api_key_env: "ANTHROPIC_API_KEY",
     });
+  });
+
+  it("rejects direct llm api keys in config files", () => {
+    expect(() =>
+      ConfigSchema.parse({
+        version: "0.0",
+        workspace: { name: "demo", vault_dir: "." },
+        index: { engine: "sqlite-fts5", path: ".akb/index.db" },
+        mcp: { host: "127.0.0.1", port: 8765 },
+        llm: { provider: "deepseek", api_key: "deepseek-test-key" },
+      }),
+    ).toThrow(/api_key/);
   });
 
   it("defaults optional frontmatter arrays", () => {

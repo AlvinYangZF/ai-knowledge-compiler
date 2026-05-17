@@ -271,7 +271,7 @@ describe("akb CLI", () => {
           "llm:",
           `  base_url: "http://127.0.0.1:${address.port}"`,
           '  model: "deepseek-v4-pro"',
-          '  api_key: "test-key"',
+          '  api_key_env: "AKB_TEST_DEEPSEEK_KEY"',
           "",
         ].join("\n"),
       );
@@ -280,7 +280,7 @@ describe("akb CLI", () => {
         await runCliWithEnvAsync(
           ["ask", "garbage collection reclaims blocks?", "--format", "json"],
           vault,
-          {},
+          { AKB_TEST_DEEPSEEK_KEY: "test-key" },
         ),
       );
 
@@ -390,7 +390,7 @@ describe("akb CLI", () => {
           '  provider: "anthropic"',
           `  base_url: "http://127.0.0.1:${address.port}"`,
           '  model: "claude-sonnet-4-20250514"',
-          '  api_key: "anthropic-test-key"',
+          '  api_key_env: "AKB_TEST_ANTHROPIC_KEY"',
           "",
         ].join("\n"),
       );
@@ -399,7 +399,7 @@ describe("akb CLI", () => {
         await runCliWithEnvAsync(
           ["ask", "garbage collection reclaims blocks?", "--format", "json"],
           vault,
-          {},
+          { AKB_TEST_ANTHROPIC_KEY: "anthropic-test-key" },
         ),
       );
 
@@ -484,7 +484,7 @@ describe("akb CLI", () => {
           "llm:",
           `  base_url: "http://127.0.0.1:${address.port}"`,
           '  model: "deepseek-v4-pro"',
-          '  api_key: "test-key"',
+          '  api_key_env: "AKB_TEST_DEEPSEEK_KEY"',
           "",
         ].join("\n"),
       );
@@ -493,7 +493,7 @@ describe("akb CLI", () => {
         await runCliWithEnvAsync(
           ["ask", "garbage collection reclaims blocks?", "--format", "json"],
           vault,
-          {},
+          { AKB_TEST_DEEPSEEK_KEY: "test-key" },
         ),
       );
 
@@ -568,7 +568,7 @@ describe("akb CLI", () => {
           "llm:",
           `  base_url: "http://127.0.0.1:${address.port}"`,
           '  model: "deepseek-v4-pro"',
-          '  api_key: "test-key"',
+          '  api_key_env: "AKB_TEST_DEEPSEEK_KEY"',
           "",
         ].join("\n"),
       );
@@ -577,7 +577,7 @@ describe("akb CLI", () => {
         await runCliWithEnvAsync(
           ["ask", "garbage collection reclaims blocks?", "--format", "json"],
           vault,
-          {},
+          { AKB_TEST_DEEPSEEK_KEY: "test-key" },
         ),
       );
 
@@ -3083,7 +3083,7 @@ describe("akb CLI", () => {
           "llm:",
           `  base_url: "http://127.0.0.1:${address.port}"`,
           '  model: "deepseek-v4-pro"',
-          '  api_key: "test-key"',
+          '  api_key_env: "AKB_TEST_DEEPSEEK_KEY"',
           "",
         ].join("\n"),
       );
@@ -3091,7 +3091,7 @@ describe("akb CLI", () => {
       const compileOutput = await runCliWithEnvAsync(
         ["compile", "--source", "page_compilellm02"],
         vault,
-        {},
+        { AKB_TEST_DEEPSEEK_KEY: "test-key" },
       );
       expect(compileOutput).toContain(
         "Compiled page_compilellm02 -> patch_page_compilellm02",
@@ -3120,7 +3120,7 @@ describe("akb CLI", () => {
           "llm:",
           `  base_url: "http://127.0.0.1:${address.port}"`,
           '  model: "deepseek-v4-other"',
-          '  api_key: "test-key"',
+          '  api_key_env: "AKB_TEST_DEEPSEEK_KEY"',
           "",
         ].join("\n"),
       );
@@ -3128,7 +3128,7 @@ describe("akb CLI", () => {
       const replayOutput = await runCliWithEnvAsync(
         ["compile", "replay", "patch_page_compilellm02"],
         vault,
-        {},
+        { AKB_TEST_DEEPSEEK_KEY: "test-key" },
       );
 
       expect(replayOutput).toContain("Replay matched patch_page_compilellm02");
@@ -3262,7 +3262,7 @@ describe("akb CLI", () => {
           "llm:",
           `  base_url: "http://127.0.0.1:${address.port}"`,
           '  model: "deepseek-v4-pro"',
-          '  api_key: "test-key"',
+          '  api_key_env: "AKB_TEST_DEEPSEEK_KEY"',
           "",
         ].join("\n"),
       );
@@ -3270,7 +3270,7 @@ describe("akb CLI", () => {
       await runCliWithEnvAsync(
         ["compile", "--source", "page_replayllm002"],
         vault,
-        {},
+        { AKB_TEST_DEEPSEEK_KEY: "test-key" },
       );
       writeFileSync(
         join(vault, ".akb", "config.yaml"),
@@ -3288,6 +3288,7 @@ describe("akb CLI", () => {
           "llm:",
           `  base_url: "http://127.0.0.1:${address.port}"`,
           '  model: "deepseek-v4-pro"',
+          '  api_key_env: "AKB_TEST_DEEPSEEK_KEY"',
           "",
         ].join("\n"),
       );
@@ -3351,10 +3352,8 @@ describe("akb CLI", () => {
     );
 
     expect(patch).toContain("modelId: deepseek-v4-pro");
-    expect(patch).not.toContain("apiKeyEnv:");
-    expect(patch).toContain(
-      "degradedReason: llm.api_key not configured for deepseek",
-    );
+    expect(patch).toContain("apiKeyEnv: DEEPSEEK_API_KEY");
+    expect(patch).toContain("degradedReason: DEEPSEEK_API_KEY not set");
     expect(output).toContain("Warning: compile degraded");
   });
 

@@ -494,7 +494,7 @@ describe("compile pipeline", () => {
     expect(patch.compileMeta.temperature).toBe(0);
     expect(patch.compileMeta.degraded).toBe(true);
     expect(patch.compileMeta.degradedReason).toContain(
-      "llm.api_key not configured for deepseek",
+      "llm.api_key_env not configured for deepseek",
     );
     expect(patch.compileMeta.stages.map((stage) => stage.name)).toEqual([
       "segment",

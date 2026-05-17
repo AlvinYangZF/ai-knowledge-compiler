@@ -815,9 +815,9 @@ async function generateAskAnswer(
   }
   const llm = config.llm;
   const provider = llm.provider;
-  const { apiKey } = configuredLlmApiKey(llm);
+  const { apiKey, apiKeyEnv } = configuredLlmApiKey(llm);
   if (!apiKey) {
-    throw new Error(missingLlmApiKeyMessage(provider));
+    throw new Error(missingLlmApiKeyMessage(provider, apiKeyEnv));
   }
   const model = llm.model;
   const llmProvider = createCompileJsonProvider({
@@ -970,9 +970,6 @@ function configuredLlmApiKey(llm: Config["llm"] | undefined): {
   if (!llm) {
     return {};
   }
-  if (llm.api_key) {
-    return { apiKey: llm.api_key };
-  }
   if (llm.api_key_env) {
     return {
       apiKey: process.env[llm.api_key_env],
@@ -982,8 +979,21 @@ function configuredLlmApiKey(llm: Config["llm"] | undefined): {
   return {};
 }
 
-function missingLlmApiKeyMessage(provider: LlmProviderName): string {
-  return `Missing llm.api_key for ${provider}`;
+function missingLlmApiKeyMessage(
+  provider: LlmProviderName,
+  apiKeyEnv?: string,
+): string {
+  return `Missing ${apiKeyEnv ?? defaultApiKeyEnvForProvider(provider)}`;
+}
+
+function defaultApiKeyEnvForProvider(provider: LlmProviderName): string {
+  if (provider === "openai") {
+    return "OPENAI_API_KEY";
+  }
+  if (provider === "anthropic") {
+    return "ANTHROPIC_API_KEY";
+  }
+  return "DEEPSEEK_API_KEY";
 }
 
 function providerDisplayName(provider: LlmProviderName): string {

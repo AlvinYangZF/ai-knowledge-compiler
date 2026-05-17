@@ -171,7 +171,7 @@ mcp:
 
 ### 配置大模型（可选）
 
-如果希望 `ask` 和 `compile` 使用大模型能力，先在 `.akb/config.yaml` 中配置 LLM provider 和 API key。新配置建议直接写 `api_key`；旧的 `api_key_env` 仍兼容，但不再作为推荐路径。
+如果希望 `ask` 和 `compile` 使用大模型能力，先在 `.akb/config.yaml` 中配置 LLM provider、model 和 API key 环境变量名。真实 API key 只放在本机环境变量中，不写入配置文件，避免误提交到远端。
 
 DeepSeek：
 
@@ -180,7 +180,7 @@ llm:
   provider: "deepseek"
   base_url: "https://api.deepseek.com"
   model: "deepseek-v4-flash"
-  api_key: "sk-..."
+  api_key_env: "DEEPSEEK_API_KEY"
 ```
 
 OpenAI：
@@ -190,7 +190,7 @@ llm:
   provider: "openai"
   base_url: "https://api.openai.com/v1"
   model: "gpt-4.1-mini"
-  api_key: "sk-..."
+  api_key_env: "OPENAI_API_KEY"
 ```
 
 Anthropic：
@@ -200,10 +200,18 @@ llm:
   provider: "anthropic"
   base_url: "https://api.anthropic.com/v1"
   model: "claude-sonnet-4-20250514"
-  api_key: "sk-ant-..."
+  api_key_env: "ANTHROPIC_API_KEY"
 ```
 
-不要把包含真实 API key 的 `.akb/config.yaml` 提交到公共仓库。未配置 API key 时，`ask` 会降级为 extractive answer，`compile` 会生成 degraded heuristic patch。
+设置本机环境变量：
+
+```bash
+export DEEPSEEK_API_KEY="sk-..."
+export OPENAI_API_KEY="sk-..."
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+只需要设置你实际使用的 provider 对应的 key。未设置环境变量时，`ask` 会降级为 extractive answer，`compile` 会生成 degraded heuristic patch。
 
 ### Ingest / Index / Search
 
@@ -279,7 +287,7 @@ node "$AKB" patch list
 node "$AKB" patch show patch_page_compile00002
 ```
 
-没有配置 `llm.api_key` 时，compile 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。配置 DeepSeek、OpenAI 或 Anthropic 后，compile 会跑 provider-backed pipeline，并记录 pinned `modelId`、`promptHashes` 和 `resolvedModelId`。
+没有设置对应 API key 环境变量时，compile 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。配置 DeepSeek、OpenAI 或 Anthropic 后，compile 会跑 provider-backed pipeline，并记录 pinned `modelId`、`promptHashes` 和 `resolvedModelId`。
 
 应用或拒绝 patch：
 
@@ -403,7 +411,7 @@ pnpm demo
 
 1. 默认路径必须能在没有 LLM API key 的情况下运行；LLM 增强路径必须显式降级并记录原因
 2. 任何让 LLM 写入 vault 的功能都走 patch + review gate，不直接写
-3. v0.1 起默认 LLM provider 是 DeepSeek；DeepSeek、OpenAI、Anthropic 的 provider、model、base URL 和 API key 可配置；公开仓库不要提交真实 secret
+3. v0.1 起默认 LLM provider 是 DeepSeek；DeepSeek、OpenAI、Anthropic 的 provider、model、base URL 和 API key 环境变量名可配置；真实 secret 只放在本机环境变量中
 4. 任何加新 MCP tool 的提议都要先证明现有的不够 —— 工具爆炸是 agent 系统的头号风险
 5. 任何投影层数据都不入 git —— git 只追事实源
 6. 任何"修改 vault"的代码路径都必须先写 markdown 再更新投影
