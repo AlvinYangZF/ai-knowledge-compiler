@@ -339,6 +339,15 @@ node "$AKB" context pack "garbage collection" --format json --output .akb/contex
 
 Context pack 会把检索命中的页面内容、行号 citation、confidence 状态、相关 proposed/applied/rejected patch 摘要和 chunk lineage 摘要放到一个可审计 JSON 包里。写入 `.akb/context/*.json` 的文件是生成物，不需要提交。
 
+导出或查看 relation graph projection：
+
+```bash
+node "$AKB" graph export --format json --output .akb/graph/relations.json
+node "$AKB" graph show page_gc0000000000
+```
+
+Graph projection 从 Markdown 派生，不入 git；当前包含 `wiki_link`、`references` 和 `supersedes` 三类边。
+
 ### Eval / Benchmark / Demo
 
 ```bash
@@ -408,6 +417,7 @@ pnpm demo
 - LLM Compile：DeepSeek / OpenAI / Anthropic-backed 5-stage pipeline、heuristic fallback、patch-as-proposal、apply/reject workflow、lineage、replay
 - `akb ask`：extractive fallback、provider-generated cited answer、bad citation guard、no-answer handling
 - Context pack：按查询生成带 citation、confidence、patch 和 lineage 摘要的 agent 上下文包
+- Relation graph projection：从 wikilink、frontmatter references 和 supersedes 派生 graph export/show
 - v0.1 migration and projection rebuild commands
 
 详见 [docs/v0.1-confidence-ledger.md](docs/v0.1-confidence-ledger.md) 和 [docs/v0.1-llm-compile.md](docs/v0.1-llm-compile.md)。
@@ -416,7 +426,7 @@ pnpm demo
 
 - Section-level confidence ledger events（当前 v0.1 已有按 header 的只读 report）
 - Code intelligence —— codebase 反向解析成设计文档 / ADR
-- GraphRAG、Web UI、团队协作
+- GraphRAG traversal、Web UI、团队协作
 
 ---
 

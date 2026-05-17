@@ -75,6 +75,25 @@ interface ContextPackOptions extends SearchOptions {
   now?: string;
 }
 
+interface GraphOptions {
+  format?: "text" | "json";
+  output?: string;
+}
+
+interface RelationGraphNode {
+  id: string;
+  kind: "page" | "file";
+  label: string;
+  path?: string;
+}
+
+interface RelationGraphEdge {
+  from: string;
+  to: string;
+  relation: "wiki_link" | "references" | "supersedes";
+  evidence: string;
+}
+
 interface AskCitation {
   ref: number;
   page_id: PageId;
@@ -409,6 +428,17 @@ export async function run(argv = process.argv): Promise<void> {
     .option("--output <path>", "write context pack JSON to a file")
     .option("--now <timestamp>", "clock timestamp for deterministic output")
     .action(contextPackCommand);
+  const graph = program.command("graph");
+  graph
+    .command("export")
+    .option("--format <format>", "text or json", parseFormat, "text")
+    .option("--output <path>", "write relation graph JSON to a file")
+    .action(graphExportCommand);
+  graph
+    .command("show")
+    .argument("<page-id-or-path-or-file>")
+    .option("--format <format>", "text or json", parseFormat, "text")
+    .action(graphShowCommand);
   const evalCmd = program
     .command("eval")
     .option("--set <path>", "golden set path")
@@ -1081,6 +1111,155 @@ function contextLineageForPage(vaultDir: string, pageId: PageId) {
   } finally {
     index.close();
   }
+}
+
+async function graphExportCommand(options: GraphOptions): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const graph = buildRelationGraph(vaultDir);
+  if (options.output) {
+    const outputPath = resolve(vaultDir, options.output);
+    mkdirSync(dirname(outputPath), { recursive: true });
+    writeFileSync(outputPath, `${JSON.stringify(graph, null, 2)}\n`);
+    const relativeOutput = toPosix(relative(vaultDir, outputPath));
+    console.log(
+      `Wrote relation graph ${relativeOutput} with ${graph.nodes.length} nodes and ${graph.edges.length} edges.`,
+    );
+    return;
+  }
+  if (options.format === "json") {
+    console.log(JSON.stringify(graph, null, 2));
+    return;
+  }
+  console.log(
+    `Relation graph: ${graph.nodes.length} nodes, ${graph.edges.length} edges.`,
+  );
+}
+
+async function graphShowCommand(
+  target: string,
+  options: GraphOptions,
+): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const graph = buildRelationGraph(vaultDir);
+  const nodeId = resolveGraphNodeId(vaultDir, target, graph);
+  if (!graph.nodes.some((node) => node.id === nodeId)) {
+    throw new Error(`Graph node not found: ${target}`);
+  }
+  const report = {
+    node: graph.nodes.find((node) => node.id === nodeId),
+    outgoing: graph.edges.filter((edge) => edge.from === nodeId),
+    incoming: graph.edges.filter((edge) => edge.to === nodeId),
+  };
+  if (options.format === "json") {
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+  console.log(`Relation graph for ${nodeId}`);
+  console.log("Outgoing:");
+  if (report.outgoing.length === 0) {
+    console.log("  none");
+  }
+  for (const edge of report.outgoing) {
+    console.log(`  out ${edge.relation} -> ${edge.to}`);
+  }
+  console.log("Incoming:");
+  if (report.incoming.length === 0) {
+    console.log("  none");
+  }
+  for (const edge of report.incoming) {
+    console.log(`  in ${edge.relation} <- ${edge.from}`);
+  }
+}
+
+function buildRelationGraph(vaultDir: string): {
+  schema_version: "relation-graph/0.1";
+  nodes: RelationGraphNode[];
+  edges: RelationGraphEdge[];
+} {
+  const pages = scanVaultPages(vaultDir);
+  const pageTargetIds = pageTargetLookup(pages.map((item) => item.page));
+  const nodes = new Map<string, RelationGraphNode>();
+  const edges = new Map<string, RelationGraphEdge>();
+  for (const item of pages) {
+    nodes.set(item.page.id, {
+      id: item.page.id,
+      kind: "page",
+      label: item.page.title,
+      path: item.page.path,
+    });
+  }
+  const addEdge = (edge: RelationGraphEdge) => {
+    edges.set(`${edge.from}\0${edge.relation}\0${edge.to}`, edge);
+  };
+  for (const item of pages) {
+    for (const link of extractWikiLinks(item.body)) {
+      const targetPageId = pageTargetIds.get(normalizeWikiTarget(link));
+      if (targetPageId) {
+        addEdge({
+          from: item.page.id,
+          to: targetPageId,
+          relation: "wiki_link",
+          evidence: link,
+        });
+      }
+    }
+    for (const reference of pageFileReferences(item.page)) {
+      const fileNodeId = `file:${reference}`;
+      nodes.set(fileNodeId, {
+        id: fileNodeId,
+        kind: "file",
+        label: reference,
+        path: reference,
+      });
+      addEdge({
+        from: item.page.id,
+        to: fileNodeId,
+        relation: "references",
+        evidence: reference,
+      });
+    }
+    const supersedes = item.page.frontmatter.supersedes;
+    if (typeof supersedes === "string" && nodes.has(supersedes)) {
+      addEdge({
+        from: item.page.id,
+        to: supersedes,
+        relation: "supersedes",
+        evidence: supersedes,
+      });
+    }
+  }
+  return {
+    schema_version: "relation-graph/0.1",
+    nodes: [...nodes.values()].sort((left, right) =>
+      left.id.localeCompare(right.id),
+    ),
+    edges: [...edges.values()].sort((left, right) =>
+      `${left.from}:${left.relation}:${left.to}`.localeCompare(
+        `${right.from}:${right.relation}:${right.to}`,
+      ),
+    ),
+  };
+}
+
+function resolveGraphNodeId(
+  vaultDir: string,
+  target: string,
+  graph: ReturnType<typeof buildRelationGraph>,
+): string {
+  if (target.startsWith("file:")) {
+    return target;
+  }
+  const pageFile = resolvePageFile(vaultDir, target);
+  if (pageFile) {
+    return pageFromFile(vaultDir, pageFile).page.id;
+  }
+  const fileNode = `file:${normalizeReferencePath(target)}`;
+  if (graph.nodes.some((node) => node.id === fileNode)) {
+    return fileNode;
+  }
+  return target;
 }
 
 function askRetrievalFallbackQueries(question: string): string[] {

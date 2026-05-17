@@ -608,6 +608,23 @@ node "$AKB" lineage --reverse <source-page-or-chunk-id>
 
 lineage 用来解释 compile 生成内容来自哪些 source chunk，也用于 replay 和审计。
 
+### 11.1 查看 relation graph projection
+
+`graph` 命令会从当前 Markdown 派生关系图，不维护独立事实源：
+
+```bash
+node "$AKB" graph export --format json --output .akb/graph/relations.json
+node "$AKB" graph show <page-id-or-path>
+```
+
+当前 graph projection 包含三类边：
+
+- `wiki_link`：页面正文中的 `[[wikilink]]`
+- `references`：frontmatter `references:` 指向的代码或文档路径
+- `supersedes`：frontmatter `supersedes:` 声明的页面替代关系
+
+`.akb/graph/relations.json` 是投影文件，可以随时从 Markdown 重建，不需要提交。
+
 ## 12. 生成 context pack 给 agent 使用
 
 当你要开启一个 coding agent session，或者想把某个问题相关的知识打包给外部工具时，可以生成 context pack：
@@ -733,6 +750,7 @@ must-hit pass rate:  5/5 (100%)
 - compile replay
 - chunk lineage / reverse lineage
 - context pack
+- relation graph projection
 - MCP stdio / HTTP server
 - eval harness 和 search benchmark
 
@@ -741,7 +759,7 @@ must-hit pass rate:  5/5 (100%)
 后续 demo 应该在对应能力实现后继续补充：
 
 - code intelligence：从 codebase 反向生成设计文档、ADR 和上下文包
-- GraphRAG / relation graph projection
+- GraphRAG traversal
 - Web UI：查看页面、confidence 事件、patch、lineage 和 eval 结果
 - 团队协作工作流：patch reviewer、PR check、知识库质量门禁
 

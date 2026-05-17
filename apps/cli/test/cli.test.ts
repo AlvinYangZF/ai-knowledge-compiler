@@ -859,6 +859,106 @@ describe("akb CLI", () => {
     expect(written.pages[0].page_id).toBe("page_ctxpack00001");
   });
 
+  it("exports and shows a relation graph projection", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const ftl = join(dir, "ftl-graph.md");
+    const gc = join(dir, "gc-graph.md");
+    const old = join(dir, "old-graph.md");
+    writeFileSync(
+      ftl,
+      [
+        "---",
+        "id: page_graphftl0001",
+        "title: FTL Graph",
+        "references:",
+        "  - src/ftl.ts",
+        "supersedes: page_graphold0001",
+        "---",
+        "# FTL Graph",
+        "",
+        "See [[GC Graph]] for reclamation.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      gc,
+      [
+        "---",
+        "id: page_graphgc00001",
+        "title: GC Graph",
+        "---",
+        "# GC Graph",
+        "",
+        "Garbage collection graph target.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      old,
+      [
+        "---",
+        "id: page_graphold0001",
+        "title: Old Graph",
+        "---",
+        "# Old Graph",
+        "",
+        "Superseded graph page.",
+      ].join("\n"),
+    );
+    runCli(["ingest", ftl, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", gc, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", old, "--no-commit", "--no-compile"], vault);
+
+    const output = runCli(
+      [
+        "graph",
+        "export",
+        "--format",
+        "json",
+        "--output",
+        ".akb/graph/relations.json",
+      ],
+      vault,
+    );
+    expect(output).toContain(
+      "Wrote relation graph .akb/graph/relations.json with 4 nodes and 3 edges.",
+    );
+    const graph = JSON.parse(
+      readFileSync(join(vault, ".akb", "graph", "relations.json"), "utf8"),
+    );
+    expect(graph.schema_version).toBe("relation-graph/0.1");
+    expect(graph.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "page_graphftl0001", kind: "page" }),
+        expect.objectContaining({ id: "file:src/ftl.ts", kind: "file" }),
+      ]),
+    );
+    expect(graph.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          from: "page_graphftl0001",
+          to: "page_graphgc00001",
+          relation: "wiki_link",
+        }),
+        expect.objectContaining({
+          from: "page_graphftl0001",
+          to: "file:src/ftl.ts",
+          relation: "references",
+        }),
+        expect.objectContaining({
+          from: "page_graphftl0001",
+          to: "page_graphold0001",
+          relation: "supersedes",
+        }),
+      ]),
+    );
+
+    const text = runCli(["graph", "show", "page_graphftl0001"], vault);
+    expect(text).toContain("Relation graph for page_graphftl0001");
+    expect(text).toContain("out wiki_link -> page_graphgc00001");
+    expect(text).toContain("out references -> file:src/ftl.ts");
+    expect(text).toContain("out supersedes -> page_graphold0001");
+  });
+
   it("skips empty and non-UTF-8 markdown files during ingest", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
