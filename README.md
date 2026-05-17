@@ -169,18 +169,54 @@ mcp:
   port: 8765
 ```
 
+### 配置大模型（可选）
+
+如果希望 `ask` 和 `compile` 使用大模型能力，先在 `.akb/config.yaml` 中配置 LLM provider 和 API key。新配置建议直接写 `api_key`；旧的 `api_key_env` 仍兼容，但不再作为推荐路径。
+
+DeepSeek：
+
+```yaml
+llm:
+  provider: "deepseek"
+  base_url: "https://api.deepseek.com"
+  model: "deepseek-v4-flash"
+  api_key: "sk-..."
+```
+
+OpenAI：
+
+```yaml
+llm:
+  provider: "openai"
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4.1-mini"
+  api_key: "sk-..."
+```
+
+Anthropic：
+
+```yaml
+llm:
+  provider: "anthropic"
+  base_url: "https://api.anthropic.com/v1"
+  model: "claude-sonnet-4-20250514"
+  api_key: "sk-ant-..."
+```
+
+不要把包含真实 API key 的 `.akb/config.yaml` 提交到公共仓库。未配置 API key 时，`ask` 会降级为 extractive answer，`compile` 会生成 degraded heuristic patch。
+
 ### Ingest / Index / Search
 
 ```bash
 AKB=/path/to/ai-knowledge-compiler/apps/cli/dist/main.js
 
-node "$AKB" ingest /path/to/markdown-or-directory --recursive --no-commit
+node "$AKB" ingest /path/to/markdown-or-directory --recursive --no-compile --no-commit
 node "$AKB" index --rebuild
 node "$AKB" search "garbage collection"
 node "$AKB" search "garbage collection" --hybrid --format json
 ```
 
-`ingest` 支持单个 Markdown 文件或目录。目录递归导入需要显式传 `--recursive`。默认会为写入操作创建 git commit；开发和测试时可用 `--no-commit` 跳过。
+`ingest` 支持单个 Markdown 文件或目录。目录递归导入需要显式传 `--recursive`。默认会在导入后触发 `compile` 并为写入操作创建 git commit；首次批量导入建议加 `--no-compile --no-commit`，确认 `pages/` 和索引正常后再分批运行 compile。
 
 `search` 默认使用 BM25，并返回带 `page_id + line_start + line_end` 的 citation。`--hybrid` 会叠加本地 sparse vector score，再交给 confidence-aware ranker 排序。默认会过滤 superseded 页面，历史页面可用 `--include-superseded` 查看。
 
@@ -193,23 +229,7 @@ node "$AKB" ask "wear leveling 和 garbage collection 的关系是什么？"
 node "$AKB" ask "wear leveling" --hybrid --format json
 ```
 
-未配置 LLM 时，`ask` 返回 extractive answer，并保留引用。配置 LLM 后会调用 DeepSeek 生成答案；模型输出必须只引用检索返回的 refs，否则自动降级为 extractive answer。
-
-LLM 配置示例：
-
-```yaml
-llm:
-  provider: "deepseek"
-  base_url: "https://api.deepseek.com"
-  model: "deepseek-v4-flash"
-  api_key_env: "DEEPSEEK_API_KEY"
-```
-
-secret 只从环境变量读取：
-
-```bash
-export DEEPSEEK_API_KEY=...
-```
+未配置 LLM 时，`ask` 返回 extractive answer，并保留引用。配置 LLM 后会调用 `.akb/config.yaml` 中指定的 DeepSeek、OpenAI 或 Anthropic 生成答案；模型输出必须只引用检索返回的 refs，否则自动降级为 extractive answer。
 
 ### Confidence Ledger
 
@@ -259,7 +279,7 @@ node "$AKB" patch list
 node "$AKB" patch show patch_page_compile00002
 ```
 
-没有 `DEEPSEEK_API_KEY` 时，compile 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。配置 DeepSeek 后，compile 会跑 provider-backed pipeline，并记录 pinned `modelId`、`promptHashes` 和 `resolvedModelId`。
+没有配置 `llm.api_key` 时，compile 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。配置 DeepSeek、OpenAI 或 Anthropic 后，compile 会跑 provider-backed pipeline，并记录 pinned `modelId`、`promptHashes` 和 `resolvedModelId`。
 
 应用或拒绝 patch：
 
@@ -274,7 +294,7 @@ node "$AKB" patch reject patch_page_compile00002 --reason "not relevant" --no-co
 node "$AKB" compile replay patch_page_compile00002
 ```
 
-DeepSeek-backed patch replay 会重新调用 provider，并拒绝降级为 heuristic replay；heuristic/legacy patch 仍按 heuristic 路径回放。
+Provider-backed patch replay 会重新调用对应 provider，并拒绝降级为 heuristic replay；heuristic/legacy patch 仍按 heuristic 路径回放。
 
 查看 lineage：
 
@@ -349,8 +369,8 @@ pnpm demo
 
 - Confidence Ledger：JSONL ledger、score materialization、SQLite confidence projection、source weights、decay、verification、supersession、runtime CI signals、stale decision lint
 - Confidence-aware retrieval：CLI/MCP search rerank、superseded filtering、hybrid retrieval
-- LLM Compile：DeepSeek-backed 5-stage pipeline、heuristic fallback、patch-as-proposal、apply/reject workflow、lineage、replay
-- `akb ask`：extractive fallback、DeepSeek-generated cited answer、bad citation guard、no-answer handling
+- LLM Compile：DeepSeek / OpenAI / Anthropic-backed 5-stage pipeline、heuristic fallback、patch-as-proposal、apply/reject workflow、lineage、replay
+- `akb ask`：extractive fallback、provider-generated cited answer、bad citation guard、no-answer handling
 - v0.1 migration and projection rebuild commands
 
 详见 [docs/v0.1-confidence-ledger.md](docs/v0.1-confidence-ledger.md) 和 [docs/v0.1-llm-compile.md](docs/v0.1-llm-compile.md)。
@@ -383,7 +403,7 @@ pnpm demo
 
 1. 默认路径必须能在没有 LLM API key 的情况下运行；LLM 增强路径必须显式降级并记录原因
 2. 任何让 LLM 写入 vault 的功能都走 patch + review gate，不直接写
-3. v0.1 起默认 LLM provider 是 DeepSeek；provider、model、base URL 可配置，但 secret 只能来自环境变量
+3. v0.1 起默认 LLM provider 是 DeepSeek；DeepSeek、OpenAI、Anthropic 的 provider、model、base URL 和 API key 可配置；公开仓库不要提交真实 secret
 4. 任何加新 MCP tool 的提议都要先证明现有的不够 —— 工具爆炸是 agent 系统的头号风险
 5. 任何投影层数据都不入 git —— git 只追事实源
 6. 任何"修改 vault"的代码路径都必须先写 markdown 再更新投影
