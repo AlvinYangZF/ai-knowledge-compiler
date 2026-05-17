@@ -325,6 +325,15 @@ node "$AKB" lineage page_compile00001
 node "$AKB" lineage --reverse page_compile00002
 ```
 
+生成 agent session 可用的 context pack：
+
+```bash
+node "$AKB" context pack "garbage collection" --top-k 5
+node "$AKB" context pack "garbage collection" --format json --output .akb/context/gc.json
+```
+
+Context pack 会把检索命中的页面内容、行号 citation、confidence 状态、相关 proposed/applied/rejected patch 摘要和 chunk lineage 摘要放到一个可审计 JSON 包里。写入 `.akb/context/*.json` 的文件是生成物，不需要提交。
+
 ### Eval / Benchmark / Demo
 
 ```bash
@@ -393,6 +402,7 @@ pnpm demo
 - Confidence-aware retrieval：CLI/MCP search rerank、superseded filtering、hybrid retrieval
 - LLM Compile：DeepSeek / OpenAI / Anthropic-backed 5-stage pipeline、heuristic fallback、patch-as-proposal、apply/reject workflow、lineage、replay
 - `akb ask`：extractive fallback、provider-generated cited answer、bad citation guard、no-answer handling
+- Context pack：按查询生成带 citation、confidence、patch 和 lineage 摘要的 agent 上下文包
 - v0.1 migration and projection rebuild commands
 
 详见 [docs/v0.1-confidence-ledger.md](docs/v0.1-confidence-ledger.md) 和 [docs/v0.1-llm-compile.md](docs/v0.1-llm-compile.md)。

@@ -70,6 +70,11 @@ interface SearchOptions {
 
 interface AskOptions extends SearchOptions {}
 
+interface ContextPackOptions extends SearchOptions {
+  output?: string;
+  now?: string;
+}
+
 interface AskCitation {
   ref: number;
   page_id: PageId;
@@ -367,6 +372,17 @@ export async function run(argv = process.argv): Promise<void> {
     .option("--format <format>", "text or json", parseFormat, "text")
     .option("--include-superseded", "include historical superseded pages")
     .action(askCommand);
+  const context = program.command("context");
+  context
+    .command("pack")
+    .argument("<query>")
+    .option("--top-k <n>", "number of pages to include", parsePositiveInt, 5)
+    .option("--hybrid", "combine BM25 with local sparse vector scores")
+    .option("--format <format>", "text or json", parseFormat, "text")
+    .option("--include-superseded", "include historical superseded pages")
+    .option("--output <path>", "write context pack JSON to a file")
+    .option("--now <timestamp>", "clock timestamp for deterministic output")
+    .action(contextPackCommand);
   const evalCmd = program
     .command("eval")
     .option("--set <path>", "golden set path")
@@ -826,6 +842,196 @@ function rankedAskResultsForQuery(
     }
   }
   return { results: [], query: question, fallback: false };
+}
+
+async function contextPackCommand(
+  query: string,
+  options: ContextPackOptions,
+): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const now = parseOptionalNow(options.now) ?? new Date();
+  const pack = buildContextPack(vaultDir, query, options, now);
+
+  if (options.output) {
+    const outputPath = resolve(vaultDir, options.output);
+    mkdirSync(dirname(outputPath), { recursive: true });
+    writeFileSync(outputPath, `${JSON.stringify(pack, null, 2)}\n`);
+    const relativeOutput = toPosix(relative(vaultDir, outputPath));
+    console.log(
+      `Wrote context pack ${relativeOutput} with ${pack.pages.length} page${pack.pages.length === 1 ? "" : "s"}.`,
+    );
+    return;
+  }
+
+  if (options.format === "json") {
+    console.log(JSON.stringify(pack, null, 2));
+    return;
+  }
+
+  printContextPack(pack);
+}
+
+function buildContextPack(
+  vaultDir: string,
+  query: string,
+  options: ContextPackOptions,
+  now: Date,
+) {
+  const results = rankedResultsForQuery(vaultDir, query, options);
+  const patches = loadAllPatches(vaultDir);
+  return {
+    schema_version: "context-pack/0.1",
+    query,
+    retrieval_mode: options.hybrid ? "hybrid" : "bm25",
+    generated_at: now.toISOString(),
+    pages: results.map((result, index) =>
+      contextPackPage(vaultDir, result, index + 1, now, patches),
+    ),
+  };
+}
+
+function contextPackPage(
+  vaultDir: string,
+  result: ReturnType<typeof rankSearchResults>[number],
+  ref: number,
+  now: Date,
+  patches: PatchDocument[],
+) {
+  const file = resolvePageFile(vaultDir, result.page_id);
+  if (!file) {
+    throw new Error(`Indexed page not found: ${result.page_id}`);
+  }
+  const { page, body, bodyStartLine } = pageFromFile(vaultDir, file);
+  return {
+    ref,
+    page_id: page.id,
+    path: page.path,
+    title: page.title,
+    citation: result.citation,
+    retrieval: {
+      score: result.score,
+      final_score: result.final_score,
+      component_scores: result.component_scores,
+      flags: result.flags,
+    },
+    confidence: confidenceSummaryForPage(vaultDir, page, now, false),
+    content: body.trimEnd(),
+    body_start_line: bodyStartLine,
+    references: pageFileReferences(page),
+    patches: contextPatchSummariesForPage(patches, page.id),
+    lineage: contextLineageForPage(vaultDir, page.id),
+  };
+}
+
+function printContextPack(pack: ReturnType<typeof buildContextPack>): void {
+  console.log(`Context pack: ${pack.query}`);
+  console.log(`  generated at: ${pack.generated_at}`);
+  console.log(`  retrieval: ${pack.retrieval_mode}`);
+  console.log(`  pages: ${pack.pages.length}`);
+  for (const page of pack.pages) {
+    console.log(
+      `[${page.ref}] ${page.page_id} ${page.path} L${page.citation.line_start}-L${page.citation.line_end}`,
+    );
+    console.log(
+      `    confidence: ${page.confidence.score === null ? "missing" : page.confidence.score.toFixed(4)} ${page.confidence.status.flags.join(", ") || "OK"}`,
+    );
+    console.log(`    patches: ${page.patches.length}`);
+    console.log(`    lineage: ${page.lineage.length}`);
+  }
+}
+
+function contextPatchSummariesForPage(
+  patches: PatchDocument[],
+  pageId: PageId,
+) {
+  return patches
+    .filter((patch) => patchTouchesPage(patch, pageId))
+    .map((patch) => ({
+      id: patch.id,
+      status: patch.status,
+      source_page_id: patch.source?.pageId,
+      provider:
+        typeof patch.compileMeta?.provider === "string"
+          ? patch.compileMeta.provider
+          : undefined,
+      model_id:
+        typeof patch.compileMeta?.modelId === "string"
+          ? patch.compileMeta.modelId
+          : undefined,
+      degraded: patch.compileMeta?.degraded === true,
+      degraded_reason:
+        typeof patch.compileMeta?.degradedReason === "string"
+          ? patch.compileMeta.degradedReason
+          : undefined,
+      changes: (patch.changes ?? []).map(contextPatchChangeSummary),
+    }));
+}
+
+function patchTouchesPage(patch: PatchDocument, pageId: PageId): boolean {
+  if (patch.source?.pageId === pageId) {
+    return true;
+  }
+  if (
+    (patch.lineage?.units ?? []).some((unit) => unit.sourcePageId === pageId)
+  ) {
+    return true;
+  }
+  return (patch.changes ?? []).some((change) => {
+    if (change.type === "modify" || change.type === "confidence_only") {
+      return change.pageId === pageId;
+    }
+    return change.newPageId === pageId || change.supersedes === pageId;
+  });
+}
+
+function contextPatchChangeSummary(change: PatchChange) {
+  if (change.type === "create") {
+    return {
+      type: change.type,
+      relation: change.relation,
+      new_page_id: change.newPageId,
+      path: change.path,
+      classify_confidence: change.classifyConfidence,
+      needs_close_review: change.needsCloseReview === true,
+      supersedes: change.supersedes,
+    };
+  }
+  if (change.type === "confidence_only") {
+    return {
+      type: change.type,
+      relation: change.relation,
+      page_id: change.pageId,
+    };
+  }
+  return {
+    type: change.type,
+    relation: change.relation,
+    page_id: change.pageId,
+    operation: change.operation,
+    target_section: change.targetSection,
+    classify_confidence: change.classifyConfidence,
+    needs_close_review: change.needsCloseReview === true,
+  };
+}
+
+function contextLineageForPage(vaultDir: string, pageId: PageId) {
+  const index = new SearchIndex({ dbPath: join(vaultDir, ".akb", "index.db") });
+  try {
+    return index.getChunksForPage(pageId).flatMap((chunk) =>
+      index.getChunkLineage(chunk.id).map((row) => ({
+        chunk_id: row.chunkId,
+        method: row.method,
+        source_chunk_id: row.sourceChunkId,
+        source_unit_id: row.sourceUnitId,
+        patch_id: row.patchId,
+        model_id: row.modelId,
+        compiled_at: row.compiledAt,
+      })),
+    );
+  } finally {
+    index.close();
+  }
 }
 
 function askRetrievalFallbackQueries(question: string): string[] {

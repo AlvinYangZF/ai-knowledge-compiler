@@ -567,7 +567,34 @@ node "$AKB" lineage --reverse <source-page-or-chunk-id>
 
 lineage 用来解释 compile 生成内容来自哪些 source chunk，也用于 replay 和审计。
 
-## 12. 配置 MCP 给 coding agent 使用
+## 12. 生成 context pack 给 agent 使用
+
+当你要开启一个 coding agent session，或者想把某个问题相关的知识打包给外部工具时，可以生成 context pack：
+
+```bash
+node "$AKB" context pack "garbage collection" --top-k 5
+```
+
+默认输出是人工可读摘要。需要给脚本或 agent 读取时使用 JSON：
+
+```bash
+node "$AKB" context pack "garbage collection" \
+  --top-k 5 \
+  --format json \
+  --output .akb/context/gc.json
+```
+
+Context pack 会包含：
+
+- 检索命中的页面内容和行号 citation
+- confidence score、状态标记和最近 ledger 时间
+- 页面 frontmatter 中的 `references:`
+- 相关 patch 摘要，包括 proposed / applied / rejected patch
+- 已应用 compile 内容的 chunk lineage 摘要
+
+`.akb/context/*.json` 是生成物，用来传给 agent 或审计一次 session，不需要提交到 git。
+
+## 13. 配置 MCP 给 coding agent 使用
 
 stdio transport：
 
@@ -602,7 +629,7 @@ Claude Code MCP 配置示例：
 
 检索结果包含行号级 citation，并使用 confidence-aware rerank。
 
-## 13. 为自己的知识库添加 eval
+## 14. 为自己的知识库添加 eval
 
 编辑 `.akb/eval/golden.yaml`，加入与你知识库相关的问题：
 
@@ -623,7 +650,7 @@ node "$AKB" eval --set .akb/eval/golden.yaml
 
 建议把 golden set 当作知识库质量门禁：每次大规模 ingest、compile 或修改 ranker 后都跑一次。
 
-## 14. 运行内置 sample demo
+## 15. 运行内置 sample demo
 
 如果你想先看完整样例：
 
@@ -644,7 +671,7 @@ recall@10:    1.00
 must-hit pass rate:  5/5 (100%)
 ```
 
-## 15. 已实现功能总览
+## 16. 已实现功能总览
 
 当前已经实现并可用于本地知识库的能力：
 
@@ -664,22 +691,22 @@ must-hit pass rate:  5/5 (100%)
 - patch proposal / apply / reject
 - compile replay
 - chunk lineage / reverse lineage
+- context pack
 - MCP stdio / HTTP server
 - eval harness 和 search benchmark
 
-## 16. 即将补充的功能
+## 17. 即将补充的功能
 
 后续 demo 应该在对应能力实现后继续补充：
 
 - 强 runtime verification：`akb runbook exec` 和 `akb test --link-pages`
 - section-level confidence：按 Markdown header 维护更细粒度 confidence
 - code intelligence：从 codebase 反向生成设计文档、ADR 和上下文包
-- context pack：为 agent session 生成可审计上下文包
 - GraphRAG / relation graph projection
 - Web UI：查看页面、confidence 事件、patch、lineage 和 eval 结果
 - 团队协作工作流：patch reviewer、PR check、知识库质量门禁
 
-## 17. 常用验证命令
+## 18. 常用验证命令
 
 在项目根目录运行：
 

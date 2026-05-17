@@ -724,6 +724,141 @@ describe("akb CLI", () => {
     expect(text).toContain("LLM not called: no indexed evidence matched.");
   });
 
+  it("builds a context pack with citations, confidence, content, and patches", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const target = join(dir, "gc-context.md");
+    const source = join(dir, "gc-source.md");
+    writeFileSync(
+      target,
+      [
+        "---",
+        "id: page_ctxpack00001",
+        "title: Garbage Collection Context",
+        "references:",
+        "  - src/gc.ts",
+        "---",
+        "# Garbage Collection Context",
+        "",
+        "Garbage collection reclaims blocks using valid page counts.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_ctxsource001",
+        "title: Patch Source",
+        "---",
+        "# Patch Source",
+        "",
+        "New source material extends the garbage collection context.",
+      ].join("\n"),
+    );
+    runCli(["ingest", target, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+    writeFileSync(
+      join(vault, "pages", ".page_ctxpack00001.ledger.jsonl"),
+      `${JSON.stringify({
+        id: "evt_ctxpack00001",
+        kind: "source_added",
+        pageId: "page_ctxpack00001",
+        timestamp: "2026-05-01T00:00:00.000Z",
+        actor: "system",
+        actorId: "akb-test",
+        sourceId: "src_ctxpack00001",
+        sourceWeight: 1,
+      })}\n`,
+    );
+    mkdirSync(join(vault, ".akb", "patches"), { recursive: true });
+    writeFileSync(
+      join(vault, ".akb", "patches", "patch_context_pack.yaml"),
+      [
+        "id: patch_context_pack",
+        "status: proposed",
+        "source:",
+        "  pageId: page_ctxsource001",
+        "compileMeta:",
+        "  degraded: true",
+        "changes:",
+        "  - type: modify",
+        "    pageId: page_ctxpack00001",
+        "    operation: append_section",
+        "    relation: extend",
+        "    classifyConfidence: 0.8",
+        "    reasoning: adds fresh GC context",
+        "    content: |",
+        "      ## Updated GC Context",
+        "      New source material.",
+      ].join("\n"),
+    );
+    runCli(["index", "--rebuild"], vault);
+
+    const pack = JSON.parse(
+      runCli(
+        [
+          "context",
+          "pack",
+          "garbage collection",
+          "--top-k",
+          "1",
+          "--format",
+          "json",
+          "--now",
+          "2026-05-17T00:00:00.000Z",
+        ],
+        vault,
+      ),
+    );
+
+    expect(pack.schema_version).toBe("context-pack/0.1");
+    expect(pack.query).toBe("garbage collection");
+    expect(pack.generated_at).toBe("2026-05-17T00:00:00.000Z");
+    expect(pack.pages).toHaveLength(1);
+    expect(pack.pages[0]).toMatchObject({
+      ref: 1,
+      page_id: "page_ctxpack00001",
+      path: "pages/gc-context.md",
+      title: "Garbage Collection Context",
+    });
+    expect(pack.pages[0].citation.line_start).toBeGreaterThan(0);
+    expect(pack.pages[0].citation.line_end).toBeGreaterThanOrEqual(
+      pack.pages[0].citation.line_start,
+    );
+    expect(pack.pages[0].confidence.score).toBeGreaterThan(0.7);
+    expect(pack.pages[0].confidence.status.flags).toEqual([]);
+    expect(pack.pages[0].content).toContain("# Garbage Collection Context");
+    expect(pack.pages[0].patches).toEqual([
+      expect.objectContaining({
+        id: "patch_context_pack",
+        status: "proposed",
+        degraded: true,
+      }),
+    ]);
+
+    const output = runCli(
+      [
+        "context",
+        "pack",
+        "garbage collection",
+        "--top-k",
+        "1",
+        "--output",
+        ".akb/context/gc.json",
+        "--now",
+        "2026-05-17T00:00:00.000Z",
+      ],
+      vault,
+    );
+    expect(output).toContain(
+      "Wrote context pack .akb/context/gc.json with 1 page.",
+    );
+    const written = JSON.parse(
+      readFileSync(join(vault, ".akb", "context", "gc.json"), "utf8"),
+    );
+    expect(written.pages[0].page_id).toBe("page_ctxpack00001");
+  });
+
   it("skips empty and non-UTF-8 markdown files during ingest", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
