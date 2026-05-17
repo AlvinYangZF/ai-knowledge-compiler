@@ -718,7 +718,34 @@ node "$AKB" eval --set .akb/eval/golden.yaml
 
 建议把 golden set 当作知识库质量门禁：每次大规模 ingest、compile 或修改 ranker 后都跑一次。
 
-## 15. 运行内置 sample demo
+## 15. 运行团队质量门禁
+
+`gate run` 用于 CI/PR 场景，把几个质量信号串成一个明确的通过/失败出口：
+
+```bash
+node "$AKB" gate run \
+  --changed-file src/deploy.ts \
+  --max-degraded-ratio 0.25
+```
+
+如果 CI 已经有 changed files 列表，可以传文件：
+
+```bash
+node "$AKB" gate run \
+  --changed-files-list .changed-files \
+  --eval-set .akb/eval/golden.yaml
+```
+
+当前 gate 会检查：
+
+- `akb lint` 的 hard errors，例如 broken wikilink、supersession cycle、unresolved contradiction、CI-gated stale ADR
+- changed file 关联页面的 confidence，任何 `NEEDS_REVIEW` / `STALE` / `SUPERSEDED` 或缺 ledger 的页面都会让 gate 失败
+- proposed/applied/rejected patch 中 degraded compile 的比例
+- 可选 eval golden set 是否有 failure
+
+失败时命令返回非 0，并打印具体失败项，适合直接接到 PR check。
+
+## 16. 运行内置 sample demo
 
 如果你想先看完整样例：
 
@@ -739,7 +766,7 @@ recall@10:    1.00
 must-hit pass rate:  5/5 (100%)
 ```
 
-## 16. 已实现功能总览
+## 17. 已实现功能总览
 
 当前已经实现并可用于本地知识库的能力：
 
@@ -762,18 +789,19 @@ must-hit pass rate:  5/5 (100%)
 - context pack
 - relation graph projection
 - static Web UI snapshot
+- team quality gate
 - MCP stdio / HTTP server
 - eval harness 和 search benchmark
 
-## 17. 即将补充的功能
+## 18. 即将补充的功能
 
 后续 demo 应该在对应能力实现后继续补充：
 
 - code intelligence：从 codebase 反向生成设计文档、ADR 和上下文包
 - GraphRAG traversal
-- 团队协作工作流：patch reviewer、PR check、知识库质量门禁
+- 团队协作工作流：patch reviewer 和多人 review 分派
 
-## 18. 常用验证命令
+## 19. 常用验证命令
 
 在项目根目录运行：
 

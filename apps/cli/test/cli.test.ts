@@ -1024,6 +1024,89 @@ describe("akb CLI", () => {
     expect(html).toContain("window.__AKB_DATA__");
   });
 
+  it("fails the quality gate for low-confidence changed-file pages", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "gate-fail.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_gatefail0001",
+        "title: Gate Fail",
+        "references:",
+        "  - src/deploy.ts",
+        "---",
+        "# Gate Fail",
+        "",
+        "Low confidence page linked to deploy code.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+    writeFileSync(
+      join(vault, "pages", ".page_gatefail0001.ledger.jsonl"),
+      `${JSON.stringify({
+        id: "evt_gatefail0001",
+        kind: "source_added",
+        pageId: "page_gatefail0001",
+        timestamp: "2026-05-01T00:00:00.000Z",
+        actor: "system",
+        actorId: "akb-test",
+        sourceId: "src_gatefail0001",
+        sourceWeight: 0.1,
+      })}\n`,
+    );
+
+    const output = runCliFailure(
+      [
+        "gate",
+        "run",
+        "--changed-file",
+        "src/deploy.ts",
+        "--now",
+        "2026-05-17T00:00:00.000Z",
+      ],
+      vault,
+    );
+
+    expect(output).toContain("Gate FAILED");
+    expect(output).toContain("changed-file confidence");
+    expect(output).toContain("page_gatefail0001");
+  });
+
+  it("fails the quality gate when compile degraded ratio exceeds the threshold", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    mkdirSync(join(vault, ".akb", "patches"), { recursive: true });
+    writeFileSync(
+      join(vault, ".akb", "patches", "patch_gate_degraded.yaml"),
+      [
+        "id: patch_gate_degraded",
+        "status: proposed",
+        "compileMeta:",
+        "  degraded: true",
+        "changes:",
+        "  - type: create",
+        "    newPageId: page_gatepatch001",
+        "    relation: new",
+        "    classifyConfidence: 0.8",
+        "    reasoning: gate degraded patch",
+        "    content: |",
+        "      # Gate Patch",
+      ].join("\n"),
+    );
+
+    const failure = runCliFailure(
+      ["gate", "run", "--max-degraded-ratio", "0"],
+      vault,
+    );
+    expect(failure).toContain("Gate FAILED");
+    expect(failure).toContain("compile degraded ratio 1/1");
+
+    const pass = runCli(["gate", "run", "--max-degraded-ratio", "1"], vault);
+    expect(pass).toContain("Gate PASSED");
+  });
+
   it("skips empty and non-UTF-8 markdown files during ingest", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);

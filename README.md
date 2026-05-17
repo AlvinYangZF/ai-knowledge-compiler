@@ -356,6 +356,15 @@ node "$AKB" web build --output .akb/web
 
 `web build` 会生成 `.akb/web/index.html`，内嵌当前 vault 的页面、confidence、section report、patch、lineage、eval 和 relation graph snapshot。这个文件是本地 review 产物，不需要提交。
 
+运行团队质量门禁：
+
+```bash
+node "$AKB" gate run --changed-file src/deploy.ts --max-degraded-ratio 0.25
+node "$AKB" gate run --changed-files-list .changed-files --eval-set .akb/eval/golden.yaml
+```
+
+`gate run` 会检查 lint hard errors、changed-file 关联页面的 confidence、compile degraded patch 比例，以及可选 eval golden set。失败时返回非 0，适合接入 PR/CI。
+
 ### Eval / Benchmark / Demo
 
 ```bash
@@ -426,6 +435,7 @@ pnpm demo
 - `akb ask`：extractive fallback、provider-generated cited answer、bad citation guard、no-answer handling
 - Context pack：按查询生成带 citation、confidence、patch 和 lineage 摘要的 agent 上下文包
 - Relation graph projection：从 wikilink、frontmatter references 和 supersedes 派生 graph export/show
+- Team quality gate：`gate run` 串联 lint、changed-file confidence、compile degraded ratio 和可选 eval
 - v0.1 migration and projection rebuild commands
 
 详见 [docs/v0.1-confidence-ledger.md](docs/v0.1-confidence-ledger.md) 和 [docs/v0.1-llm-compile.md](docs/v0.1-llm-compile.md)。

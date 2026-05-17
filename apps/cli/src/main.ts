@@ -84,6 +84,14 @@ interface WebBuildOptions {
   output?: string;
 }
 
+interface GateRunOptions {
+  changedFile?: string[];
+  changedFilesList?: string;
+  maxDegradedRatio?: number;
+  evalSet?: string;
+  now?: string;
+}
+
 interface RelationGraphNode {
   id: string;
   kind: "page" | "file";
@@ -448,6 +456,20 @@ export async function run(argv = process.argv): Promise<void> {
     .command("build")
     .option("--output <dir>", "write static web UI to a directory", ".akb/web")
     .action(webBuildCommand);
+  const gate = program.command("gate");
+  gate
+    .command("run")
+    .option("--changed-file <path>", "changed file path", collect, [])
+    .option("--changed-files-list <path>", "file containing changed paths")
+    .option(
+      "--max-degraded-ratio <ratio>",
+      "maximum allowed degraded compile patch ratio",
+      parseRatio,
+      1,
+    )
+    .option("--eval-set <path>", "optional eval golden set to run")
+    .option("--now <timestamp>", "clock timestamp for deterministic output")
+    .action(gateRunCommand);
   const evalCmd = program
     .command("eval")
     .option("--set <path>", "golden set path")
@@ -1553,6 +1575,135 @@ renderShell();
 </body>
 </html>
 `;
+}
+
+async function gateRunCommand(options: GateRunOptions): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const now = parseOptionalNow(options.now);
+  const failures: string[] = [];
+
+  console.log("Knowledge gate:");
+
+  const lintReport = buildLintReport(vaultDir, now);
+  if (lintReportHasGateFailures(lintReport)) {
+    failures.push("lint hard errors");
+    console.log("  lint: fail");
+  } else {
+    console.log("  lint: pass");
+  }
+
+  const changedFiles = gateChangedFiles(vaultDir, options);
+  if (changedFiles.length === 0) {
+    console.log("  changed-file confidence: skipped");
+  } else {
+    const issues = changedFileConfidenceIssues(vaultDir, changedFiles, now);
+    if (issues.length > 0) {
+      failures.push("changed-file confidence");
+      console.log(`  changed-file confidence: fail ${issues.length} page`);
+      for (const issue of issues) {
+        console.log(
+          `    ${issue.page.page_id} ${issue.page.path} file=${issue.file} flags=${issue.page.status.flags.join(", ") || "OK"}`,
+        );
+      }
+    } else {
+      console.log("  changed-file confidence: pass");
+    }
+  }
+
+  const patches = loadAllPatches(vaultDir);
+  const degraded = patches.filter(
+    (patch) => patch.compileMeta?.degraded === true,
+  ).length;
+  const degradedRatio = patches.length === 0 ? 0 : degraded / patches.length;
+  const maxDegradedRatio = options.maxDegradedRatio ?? 1;
+  if (degradedRatio > maxDegradedRatio) {
+    failures.push("compile degraded ratio");
+    console.log(
+      `  compile degraded ratio ${degraded}/${patches.length}: fail ratio=${degradedRatio.toFixed(2)} limit=${maxDegradedRatio}`,
+    );
+  } else {
+    console.log(
+      `  compile degraded ratio ${degraded}/${patches.length}: pass ratio=${degradedRatio.toFixed(2)} limit=${maxDegradedRatio}`,
+    );
+  }
+
+  if (options.evalSet) {
+    const evalReport = runGateEval(vaultDir, options.evalSet);
+    if (evalReport.failures.length > 0) {
+      failures.push("eval failures");
+      console.log(
+        `  eval: fail ${evalReport.failures.length}/${evalReport.total} failure`,
+      );
+    } else {
+      console.log(`  eval: pass ${evalReport.total} item`);
+    }
+  } else {
+    console.log("  eval: skipped");
+  }
+
+  if (failures.length > 0) {
+    console.log("Gate FAILED");
+    throw new Error("Gate FAILED");
+  }
+  console.log("Gate PASSED");
+}
+
+function lintReportHasGateFailures(report: LintReport): boolean {
+  return (
+    report.unresolvedContradictions.length > 0 ||
+    report.stale.some((issue) => issue.ciGate) ||
+    report.brokenWikiLinks.length > 0 ||
+    report.supersessionCycles.length > 0
+  );
+}
+
+function gateChangedFiles(vaultDir: string, options: GateRunOptions): string[] {
+  const changed = new Set(options.changedFile ?? []);
+  if (options.changedFilesList) {
+    for (const line of readFileSync(
+      resolve(vaultDir, options.changedFilesList),
+      "utf8",
+    ).split(/\r?\n/)) {
+      if (line.trim()) {
+        changed.add(line.trim());
+      }
+    }
+  }
+  return [...changed].sort();
+}
+
+function changedFileConfidenceIssues(
+  vaultDir: string,
+  changedFiles: string[],
+  now: Date | undefined,
+): Array<{ file: string; page: ConfidenceFilePageSummary }> {
+  const issues = new Map<
+    string,
+    { file: string; page: ConfidenceFilePageSummary }
+  >();
+  for (const file of changedFiles) {
+    const normalized = normalizeFileReference(vaultDir, file);
+    for (const page of confidencePagesForFile(vaultDir, normalized, now)) {
+      if (page.score === null || page.status.flags.length > 0) {
+        issues.set(`${normalized}:${page.page_id}`, { file: normalized, page });
+      }
+    }
+  }
+  return [...issues.values()].sort((left, right) =>
+    `${left.file}:${left.page.page_id}`.localeCompare(
+      `${right.file}:${right.page.page_id}`,
+    ),
+  );
+}
+
+function runGateEval(vaultDir: string, setPath: string) {
+  const index = new SearchIndex({ dbPath: join(vaultDir, ".akb", "index.db") });
+  try {
+    return runEval(index, loadGoldenSet(resolve(vaultDir, setPath)));
+  } finally {
+    index.close();
+  }
 }
 
 function askRetrievalFallbackQueries(question: string): string[] {
