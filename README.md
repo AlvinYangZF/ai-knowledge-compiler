@@ -252,6 +252,7 @@ Confidence Ledger 是每个页面旁边的 append-only JSONL 事件流，例如 
 node "$AKB" migrate to-v0.1 --no-commit
 node "$AKB" confidence show page_gc0000000000
 node "$AKB" confidence recompute page_gc0000000000 --format json
+node "$AKB" confidence sections page_gc0000000000
 node "$AKB" confidence file src/deploy.ts
 node "$AKB" confidence file src/deploy.ts --format json --events
 node "$AKB" confidence report --by-file
@@ -261,7 +262,7 @@ node "$AKB" verify page_gc0000000000 --by-agent codex --reason "reviewed current
 node "$AKB" decay --run --no-commit
 ```
 
-`confidence file <path>` 会从页面 frontmatter 的 `references:` 反查哪些知识页引用了某个代码或文档路径，并显示这些页面的 score 和 `NEEDS_REVIEW` / `STALE` 等状态。`confidence report --by-file` 会生成 `.akb/lint/confidence-by-file.md`，适合在检查某个代码文件变更影响哪些知识页时使用。
+`confidence sections <page>` 会按 Markdown header 切分页面，报告每个 section 的稳定 id、行号范围、继承自 page ledger 的 score/status，以及 derived marker 数量。`confidence file <path>` 会从页面 frontmatter 的 `references:` 反查哪些知识页引用了某个代码或文档路径，并显示这些页面的 score 和 `NEEDS_REVIEW` / `STALE` 等状态。`confidence report --by-file` 会生成 `.akb/lint/confidence-by-file.md`，适合在检查某个代码文件变更影响哪些知识页时使用。
 
 运行时信号可以通过 webhook/watch 写入 ledger：
 
@@ -402,7 +403,7 @@ pnpm demo
 
 已实现：
 
-- Confidence Ledger：JSONL ledger、score materialization、SQLite confidence projection、source weights、decay、verification、supersession、runtime CI signals、runbook/test 强验证、stale decision lint、按 `references` 反查文件 confidence
+- Confidence Ledger：JSONL ledger、score materialization、SQLite confidence projection、source weights、decay、verification、supersession、runtime CI signals、runbook/test 强验证、stale decision lint、section-level confidence report、按 `references` 反查文件 confidence
 - Confidence-aware retrieval：CLI/MCP search rerank、superseded filtering、hybrid retrieval
 - LLM Compile：DeepSeek / OpenAI / Anthropic-backed 5-stage pipeline、heuristic fallback、patch-as-proposal、apply/reject workflow、lineage、replay
 - `akb ask`：extractive fallback、provider-generated cited answer、bad citation guard、no-answer handling
@@ -413,7 +414,7 @@ pnpm demo
 
 ### v0.2 及以后
 
-- Section-level confidence（按 markdown header 切分的中间粒度）
+- Section-level confidence ledger events（当前 v0.1 已有按 header 的只读 report）
 - Code intelligence —— codebase 反向解析成设计文档 / ADR
 - GraphRAG、Web UI、团队协作
 

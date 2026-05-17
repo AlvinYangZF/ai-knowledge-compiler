@@ -2254,6 +2254,96 @@ describe("akb CLI", () => {
     expect(report).toContain("pages/file-report.md");
   });
 
+  it("reports section-level confidence for a page", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "section-confidence.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_section00001",
+        "title: Section Confidence",
+        "---",
+        "# Section Confidence",
+        "",
+        "## Alpha",
+        "",
+        "Alpha content.",
+        "",
+        "## Beta",
+        "",
+        '<!-- akb:derived source=page_source00001:c0 method=extend patch=patch_section promptHash="sha256:test" modelId="deepseek-v4-flash" compiledAt="2026-05-01T00:00:00.000Z" -->',
+        "Beta content.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+    writeFileSync(
+      join(vault, "pages", ".page_section00001.ledger.jsonl"),
+      `${JSON.stringify({
+        id: "evt_section00001",
+        kind: "source_added",
+        pageId: "page_section00001",
+        timestamp: "2026-05-01T00:00:00.000Z",
+        actor: "system",
+        actorId: "akb-test",
+        sourceId: "src_section00001",
+        sourceWeight: 1,
+      })}\n`,
+    );
+
+    const report = JSON.parse(
+      runCli(
+        [
+          "confidence",
+          "sections",
+          "page_section00001",
+          "--format",
+          "json",
+          "--now",
+          "2026-05-17T00:00:00.000Z",
+        ],
+        vault,
+      ),
+    );
+
+    expect(report.schema_version).toBe("section-confidence/0.1");
+    expect(report.page_id).toBe("page_section00001");
+    expect(report.sections).toHaveLength(3);
+    expect(report.sections[1]).toMatchObject({
+      section_id: "sec_alpha",
+      heading: "Alpha",
+      level: 2,
+      status: { flags: [] },
+      derived_marker_count: 0,
+    });
+    expect(report.sections[1].score).toBeGreaterThan(0.7);
+    expect(report.sections[1].line_start).toBeGreaterThan(0);
+    expect(report.sections[1].line_end).toBeGreaterThanOrEqual(
+      report.sections[1].line_start,
+    );
+    expect(report.sections[2]).toMatchObject({
+      section_id: "sec_beta",
+      heading: "Beta",
+      derived_marker_count: 1,
+      confidence_source: "page_ledger_inherited",
+    });
+
+    const text = runCli(
+      [
+        "confidence",
+        "sections",
+        "page_section00001",
+        "--now",
+        "2026-05-17T00:00:00.000Z",
+      ],
+      vault,
+    );
+    expect(text).toContain("Section confidence for page_section00001");
+    expect(text).toContain("sec_alpha");
+    expect(text).toContain("sec_beta");
+  });
+
   it("verifies a page by appending a confidence ledger event", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);

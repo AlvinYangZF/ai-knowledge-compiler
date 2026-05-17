@@ -343,6 +343,15 @@ node "$AKB" confidence recompute <page-id-or-path> --format json
 
 `confidence show` 更适合人工查看；`confidence recompute` 更适合审计和测试，因为它会明确返回 replay 了多少个事件。两者都不会写入文件。
 
+查看按 Markdown header 切分的 section-level confidence：
+
+```bash
+node "$AKB" confidence sections <page-id-or-path>
+node "$AKB" confidence sections <page-id-or-path> --format json
+```
+
+当前 section-level report 不新增独立 ledger 事件，而是继承页面 ledger 的 score/status，并为每个 header section 输出稳定 `section_id`、行号范围和 derived marker 数量。它适合定位“哪个 section 是 LLM compile 派生内容”“哪个 section 需要 review”，同时保持 canonical source 仍然是 Markdown 页面和页面级 ledger。
+
 如果页面 frontmatter 里维护了 `references:`，可以从代码或文档路径反查相关知识页：
 
 ```bash
@@ -714,7 +723,7 @@ must-hit pass rate:  5/5 (100%)
 - Markdown vault + git-backed workflow
 - Obsidian 兼容的 Markdown / `[[wikilinks]]`
 - Confidence Ledger JSONL 事件流
-- confidence projection rebuild / recompute / show / file report
+- confidence projection rebuild / recompute / show / section report / file report
 - decay、verify、runbook/test 强 runtime verification、runtime webhook/watch 信号
 - supersede 链和 `--unlink`
 - DeepSeek / OpenAI / Anthropic-backed `ask`
@@ -731,7 +740,6 @@ must-hit pass rate:  5/5 (100%)
 
 后续 demo 应该在对应能力实现后继续补充：
 
-- section-level confidence：按 Markdown header 维护更细粒度 confidence
 - code intelligence：从 codebase 反向生成设计文档、ADR 和上下文包
 - GraphRAG / relation graph projection
 - Web UI：查看页面、confidence 事件、patch、lineage 和 eval 结果

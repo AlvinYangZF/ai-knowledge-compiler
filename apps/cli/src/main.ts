@@ -168,6 +168,8 @@ interface ConfidenceFileOptions extends ConfidenceShowOptions {
   events?: boolean;
 }
 
+interface ConfidenceSectionsOptions extends ConfidenceShowOptions {}
+
 interface ConfidenceReportOptions {
   byFile?: boolean;
   now?: string;
@@ -191,6 +193,15 @@ interface ConfidenceFilePageSummary {
 interface ConfidenceByFileEntry {
   file: string;
   pages: ConfidenceFilePageSummary[];
+}
+
+interface MarkdownSection {
+  section_id: string;
+  heading: string;
+  level: number;
+  line_start: number;
+  line_end: number;
+  content: string;
 }
 
 interface ProjectionRebuildOptions {
@@ -510,6 +521,12 @@ export async function run(argv = process.argv): Promise<void> {
     .option("--events", "include confidence ledger events in JSON output")
     .option("--now <timestamp>", "clock timestamp for deterministic output")
     .action(confidenceFileCommand);
+  confidence
+    .command("sections")
+    .argument("<page-id-or-path>")
+    .option("--format <format>", "text or json", parseFormat, "text")
+    .option("--now <timestamp>", "clock timestamp for deterministic output")
+    .action(confidenceSectionsCommand);
   confidence
     .command("report")
     .option("--by-file", "write confidence report grouped by referenced file")
@@ -3492,6 +3509,49 @@ async function confidenceFileCommand(
   printConfidenceFileReport(report);
 }
 
+async function confidenceSectionsCommand(
+  pageIdOrPath: string,
+  options: ConfidenceSectionsOptions,
+): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const file = resolvePageFile(vaultDir, pageIdOrPath);
+  if (!file) {
+    throw new Error(`Page not found: ${pageIdOrPath}`);
+  }
+  const now = parseOptionalNow(options.now);
+  const { page, body, bodyStartLine } = pageFromFile(vaultDir, file);
+  const pageConfidence = confidenceSummaryForPage(vaultDir, page, now, false);
+  const sections = markdownSections(body, bodyStartLine).map((section) => ({
+    section_id: section.section_id,
+    heading: section.heading,
+    level: section.level,
+    line_start: section.line_start,
+    line_end: section.line_end,
+    score: pageConfidence.score,
+    status: pageConfidence.status,
+    confidence_source: "page_ledger_inherited",
+    derived_marker_count: derivedMarkerCount(section.content),
+  }));
+  const report = {
+    schema_version: "section-confidence/0.1",
+    page_id: page.id,
+    path: page.path,
+    title: page.title,
+    computed_at: pageConfidence.computed_at,
+    page_score: pageConfidence.score,
+    page_status: pageConfidence.status,
+    sections,
+  };
+
+  if (options.format === "json") {
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+
+  printSectionConfidenceReport(report);
+}
+
 async function confidenceReportCommand(
   options: ConfidenceReportOptions,
 ): Promise<void> {
@@ -3514,6 +3574,102 @@ async function confidenceReportCommand(
   console.log(
     `Wrote .akb/lint/confidence-by-file.md for ${entries.length} file reference${entries.length === 1 ? "" : "s"}.`,
   );
+}
+
+function printSectionConfidenceReport(report: {
+  page_id: PageId;
+  title: string;
+  sections: Array<{
+    section_id: string;
+    heading: string;
+    level: number;
+    line_start: number;
+    line_end: number;
+    score: number | null;
+    status: { flags: string[]; reasons: string[] };
+    derived_marker_count: number;
+  }>;
+}): void {
+  console.log(`Section confidence for ${report.page_id} "${report.title}"`);
+  for (const section of report.sections) {
+    console.log(
+      `${section.section_id} L${section.line_start}-L${section.line_end} h${section.level} score=${section.score === null ? "missing" : section.score.toFixed(4)} status=${section.status.flags.join(", ") || "OK"} derived=${section.derived_marker_count}`,
+    );
+    console.log(`  ${section.heading}`);
+  }
+}
+
+function markdownSections(
+  body: string,
+  bodyStartLine: number,
+): MarkdownSection[] {
+  const lines = body.split(/\r?\n/);
+  const headings: Array<{
+    index: number;
+    level: number;
+    heading: string;
+    line: number;
+  }> = [];
+  let inFence = false;
+  for (const [index, line] of lines.entries()) {
+    if (line.startsWith("```")) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) {
+      continue;
+    }
+    const match = line.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (!match) {
+      continue;
+    }
+    headings.push({
+      index,
+      level: match[1].length,
+      heading: match[2].trim(),
+      line: bodyStartLine + index,
+    });
+  }
+  if (headings.length === 0) {
+    return [
+      {
+        section_id: "sec_body",
+        heading: "Body",
+        level: 0,
+        line_start: bodyStartLine,
+        line_end: bodyStartLine + Math.max(lines.length - 1, 0),
+        content: body,
+      },
+    ];
+  }
+  const seen = new Map<string, number>();
+  return headings.map((heading, index) => {
+    const next = headings[index + 1];
+    const baseId = `sec_${sectionSlug(heading.heading)}`;
+    const count = (seen.get(baseId) ?? 0) + 1;
+    seen.set(baseId, count);
+    return {
+      section_id: count === 1 ? baseId : `${baseId}_${count}`,
+      heading: heading.heading,
+      level: heading.level,
+      line_start: heading.line,
+      line_end: next ? next.line - 1 : bodyStartLine + lines.length - 1,
+      content: lines.slice(heading.index, next?.index).join("\n"),
+    };
+  });
+}
+
+function sectionSlug(value: string): string {
+  return (
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "") || "section"
+  );
+}
+
+function derivedMarkerCount(value: string): number {
+  return value.match(/<!--\s*akb:derived\b/g)?.length ?? 0;
 }
 
 function confidenceByFileEntries(
