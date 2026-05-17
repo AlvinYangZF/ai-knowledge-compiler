@@ -3,7 +3,7 @@
 > **The persistent, auditable memory layer for coding agents.**
 > coding agent 的可审计持久记忆层。
 
-> ⚠️ **状态：v0.0 本地闭环可运行，v0.1 confidence 起步中**。当前已有 TypeScript monorepo、核心类型、Markdown ingest、SQLite FTS5 搜索、confidence-aware ranker、CLI、eval harness、MCP server、sample vault 和端到端 demo。v0.0 还不是 npm 发布版本，接口仍可能调整。
+> ⚠️ **状态：v0.1 本地闭环可运行**。当前已有 TypeScript monorepo、Markdown ingest、SQLite FTS5 + hybrid search、confidence-aware ranker、Confidence Ledger、LLM compile patch workflow、citation-first `ask`、eval harness、MCP server、sample vault 和端到端 demo。还不是 npm 发布版本，CLI 与 schema 仍可能调整。
 
 ---
 
@@ -118,45 +118,193 @@ Karpathy 在 2026 年 4 月提出的 [LLM Wiki 模式](https://gist.github.com/k
 
 ---
 
-## 路线图
+## 使用手册
 
-> 工期估算基于单人专注。"业余"按 ×2 估。每个版本都要求**端到端可用**，不接受半成品瀑布。
-
-### v0.0 — 跑通最小闭环（~4 周）
-
-证明 **ingest → index → MCP → coding agent retrieval → citation** 这条管道可靠。
-
-- `akb init / ingest / index / search / mcp serve / eval`
-- git-backed markdown vault，Obsidian 兼容
-- SQLite FTS5 + BM25，行号级 citation
-- 2 个 MCP tool：`search_knowledge`、`get_page`
-- 内建 eval 框架，每个 PR 跑 golden set 回归
-
-详见 [docs/v0.0-spec.md](docs/v0.0-spec.md) 和 [docs/search-engine-skeleton.md](docs/search-engine-skeleton.md)。
-
-当前已实现的本地开发命令：
+### 安装与构建
 
 ```bash
 pnpm install
-pnpm test
+pnpm build
+```
+
+开发期可以直接用源码入口：
+
+```bash
+pnpm exec tsx apps/cli/src/main.ts --help
+```
+
+构建后用 dist 入口：
+
+```bash
+node apps/cli/dist/main.js --help
+```
+
+### 创建 vault
+
+```bash
 node apps/cli/dist/main.js init /tmp/akb-demo
 cd /tmp/akb-demo
-node /path/to/ai-knowledge-compiler/apps/cli/dist/main.js ingest /path/to/ai-knowledge-compiler/examples/sample-vault
-node /path/to/ai-knowledge-compiler/apps/cli/dist/main.js index --rebuild
-node /path/to/ai-knowledge-compiler/apps/cli/dist/main.js search "garbage collection"
-node /path/to/ai-knowledge-compiler/apps/cli/dist/main.js eval --set /path/to/ai-knowledge-compiler/examples/sample-vault/golden.yaml
 ```
 
-也可以直接运行端到端 demo：
+`akb init` 会创建：
 
-```bash
-scripts/demo.sh
+- `pages/`：canonical Markdown 页面
+- `.akb/config.yaml`：vault 配置
+- `.akb/eval/golden.yaml`：eval golden set
+- `.gitignore`：忽略 `.akb/index.db`、`.akb/lint/` 等投影/诊断输出
+- git 仓库
+
+最小配置如下：
+
+```yaml
+version: "0.0"
+workspace:
+  name: "akb-demo"
+  vault_dir: "."
+index:
+  engine: "sqlite-fts5"
+  path: ".akb/index.db"
+mcp:
+  host: "127.0.0.1"
+  port: 8765
 ```
 
-性能基准：
+### Ingest / Index / Search
 
 ```bash
+AKB=/path/to/ai-knowledge-compiler/apps/cli/dist/main.js
+
+node "$AKB" ingest /path/to/markdown-or-directory --recursive --no-commit
+node "$AKB" index --rebuild
+node "$AKB" search "garbage collection"
+node "$AKB" search "garbage collection" --hybrid --format json
+```
+
+`ingest` 支持单个 Markdown 文件或目录。目录递归导入需要显式传 `--recursive`。默认会为写入操作创建 git commit；开发和测试时可用 `--no-commit` 跳过。
+
+`search` 默认使用 BM25，并返回带 `page_id + line_start + line_end` 的 citation。`--hybrid` 会叠加本地 sparse vector score，再交给 confidence-aware ranker 排序。默认会过滤 superseded 页面，历史页面可用 `--include-superseded` 查看。
+
+### Ask
+
+`ask` 在检索结果上生成 citation-first 回答：
+
+```bash
+node "$AKB" ask "wear leveling 和 garbage collection 的关系是什么？"
+node "$AKB" ask "wear leveling" --hybrid --format json
+```
+
+未配置 LLM 时，`ask` 返回 extractive answer，并保留引用。配置 LLM 后会调用 DeepSeek 生成答案；模型输出必须只引用检索返回的 refs，否则自动降级为 extractive answer。
+
+LLM 配置示例：
+
+```yaml
+llm:
+  provider: "deepseek"
+  base_url: "https://api.deepseek.com"
+  model: "deepseek-v4-flash"
+  api_key_env: "DEEPSEEK_API_KEY"
+```
+
+secret 只从环境变量读取：
+
+```bash
+export DEEPSEEK_API_KEY=...
+```
+
+### Confidence Ledger
+
+Confidence Ledger 是每个页面旁边的 append-only JSONL 事件流，例如 `pages/.page_xxx.ledger.jsonl`。常用命令：
+
+```bash
+node "$AKB" migrate to-v0.1 --no-commit
+node "$AKB" confidence show page_gc0000000000
+node "$AKB" confidence recompute page_gc0000000000 --format json
+node "$AKB" projection rebuild --confidence
+node "$AKB" verify "pages/*.md" --dry-run
+node "$AKB" verify page_gc0000000000 --by-agent codex --reason "reviewed current behavior" --no-commit
+node "$AKB" decay --run --no-commit
+```
+
+运行时信号可以通过 webhook/watch 写入 ledger：
+
+```bash
+node "$AKB" webhook ci-success --changed-file pages/gc.md --evidence https://ci.example/run/123 --no-commit
+node "$AKB" webhook ci-failure --changed-file pages/gc.md --evidence https://ci.example/run/124 --no-commit
+node "$AKB" watch --once --no-commit
+```
+
+### Supersede
+
+页面替代关系会写入 ledger，并更新 Markdown frontmatter：
+
+```bash
+node "$AKB" supersede page_old000000000 --by page_new000000000 --reason "new source supersedes old design" --no-commit
+```
+
+如果旧页面已经被另一个页面 supersede，默认会拒绝覆盖链路。确认要替换链路时使用：
+
+```bash
+node "$AKB" supersede page_old000000000 --by page_newer0000000 --unlink --reason "replace superseder" --no-commit
+```
+
+### Compile / Patch / Lineage
+
+`compile` 把 source 页面编译成 reviewable patch，默认不直接改 Markdown：
+
+```bash
+node "$AKB" compile --source page_compile00002
+node "$AKB" compile --all-pending
+node "$AKB" compile status
+node "$AKB" patch list
+node "$AKB" patch show patch_page_compile00002
+```
+
+没有 `DEEPSEEK_API_KEY` 时，compile 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。配置 DeepSeek 后，compile 会跑 provider-backed pipeline，并记录 pinned `modelId`、`promptHashes` 和 `resolvedModelId`。
+
+应用或拒绝 patch：
+
+```bash
+node "$AKB" patch apply patch_page_compile00002 --reviewed --no-commit
+node "$AKB" patch reject patch_page_compile00002 --reason "not relevant" --no-commit
+```
+
+回放 patch：
+
+```bash
+node "$AKB" compile replay patch_page_compile00002
+```
+
+DeepSeek-backed patch replay 会重新调用 provider，并拒绝降级为 heuristic replay；heuristic/legacy patch 仍按 heuristic 路径回放。
+
+查看 lineage：
+
+```bash
+node "$AKB" lineage page_compile00001
+node "$AKB" lineage --reverse page_compile00002
+```
+
+### Eval / Benchmark / Demo
+
+```bash
+node "$AKB" eval --set .akb/eval/golden.yaml
 pnpm bench
+pnpm demo
+```
+
+`pnpm demo` 会构建工作区、创建临时 vault、导入 `examples/sample-vault/`、编译 pending sources、重建 index、运行 search 和 eval。
+
+### MCP Server
+
+stdio transport：
+
+```bash
+node "$AKB" mcp serve
+```
+
+HTTP transport：
+
+```bash
+node "$AKB" mcp serve --transport http --port 8765
 ```
 
 Claude Code MCP 配置示例：
@@ -173,13 +321,39 @@ Claude Code MCP 配置示例：
 }
 ```
 
-### v0.1 — 知识不腐烂 + 知识自己长在一起（~3-4 个月）
+当前 MCP server 暴露 `search_knowledge` 和 `get_page`，检索结果同样包含行号级 citation，并使用 confidence-aware rerank。
 
-- **Confidence Ledger**（~21 天）—— append-only 事件流、时间衰减、来源权重、supersession 链、confidence-aware retrieval、runtime verification。当前已实现 JSONL ledger、基础 score materialization、SQLite confidence projection、`akb projection rebuild --confidence`、verify/supersede/lint CLI，以及 `packages/ranker` 对 CLI/MCP 搜索结果做 confidence-aware rerank。详见 [docs/v0.1-confidence-ledger.md](docs/v0.1-confidence-ledger.md)
-- **LLM Compile**（~27 天）—— 5 阶段 pipeline、关系判定、patch-as-proposal、chunk lineage、replay。详见 [docs/v0.1-llm-compile.md](docs/v0.1-llm-compile.md)
-- Patch workflow、vector search、hybrid retrieval、`akb ask`
+### 常用验证命令
 
-**实施顺序**：confidence ledger 先（compile 的 patch 要写 ledger 事件）→ compile → vector + ask。v0.1 起涉及 LLM API 的默认 provider 使用 DeepSeek；API key 只从环境变量读取，不写入 vault 或 git。
+```bash
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm coverage
+pnpm demo
+```
+
+改检索、ranker、confidence、compile 或 MCP 行为时，至少运行相关 focused tests，并在合并前跑完整验证。
+
+## 路线图状态
+
+### v0.0 — 最小闭环
+
+已实现：`init / ingest / index / search / mcp serve / eval`、git-backed markdown vault、Obsidian 兼容、SQLite FTS5 + BM25、行号级 citation、MCP `search_knowledge` / `get_page`、eval harness、sample vault 和 demo。
+
+详见 [docs/v0.0-spec.md](docs/v0.0-spec.md) 和 [docs/search-engine-skeleton.md](docs/search-engine-skeleton.md)。
+
+### v0.1 — Confidence + Compile + Hybrid Ask
+
+已实现：
+
+- Confidence Ledger：JSONL ledger、score materialization、SQLite confidence projection、source weights、decay、verification、supersession、runtime CI signals、stale decision lint
+- Confidence-aware retrieval：CLI/MCP search rerank、superseded filtering、hybrid retrieval
+- LLM Compile：DeepSeek-backed 5-stage pipeline、heuristic fallback、patch-as-proposal、apply/reject workflow、lineage、replay
+- `akb ask`：extractive fallback、DeepSeek-generated cited answer、bad citation guard、no-answer handling
+- v0.1 migration and projection rebuild commands
+
+详见 [docs/v0.1-confidence-ledger.md](docs/v0.1-confidence-ledger.md) 和 [docs/v0.1-llm-compile.md](docs/v0.1-llm-compile.md)。
 
 ### v0.2 及以后
 
@@ -197,7 +371,7 @@ Claude Code MCP 配置示例：
 | [docs/search-engine-skeleton.md](docs/search-engine-skeleton.md) | `search-engine` 包的代码骨架 —— API / SQL schema / 测试用例 frozen，可直接交给 agent 实现 |
 | [docs/v0.1-confidence-ledger.md](docs/v0.1-confidence-ledger.md) | Confidence Ledger 设计 —— 事件流、衰减公式、来源权重、supersession、runtime verification |
 | [docs/v0.1-llm-compile.md](docs/v0.1-llm-compile.md) | LLM Compile 设计 —— 5 阶段 pipeline、chunk lineage schema、与 confidence ledger 的集成 |
-| [docs/demo.md](docs/demo.md) | v0.0 demo 脚本说明 |
+| [docs/demo.md](docs/demo.md) | demo 脚本说明 |
 
 建议阅读顺序：`v0.0-spec` → `confidence-ledger` → `llm-compile` → `search-engine-skeleton`。
 
@@ -207,7 +381,7 @@ Claude Code MCP 配置示例：
 
 写在最前面，避免 scope creep：
 
-1. 任何要 LLM API key 的功能都不在 v0.0 —— 保证 v0.0 跑通不需要任何外部账号
+1. 默认路径必须能在没有 LLM API key 的情况下运行；LLM 增强路径必须显式降级并记录原因
 2. 任何让 LLM 写入 vault 的功能都走 patch + review gate，不直接写
 3. v0.1 起默认 LLM provider 是 DeepSeek；provider、model、base URL 可配置，但 secret 只能来自环境变量
 4. 任何加新 MCP tool 的提议都要先证明现有的不够 —— 工具爆炸是 agent 系统的头号风险
@@ -238,6 +412,6 @@ MIT —— 见 [LICENSE](LICENSE)。
 
 ## 贡献
 
-当前处于 v0.0 本地闭环阶段。如果你对设计文档有意见、发现 prior art 里我们漏掉的实现、或想认领 v0.1 设计中的下一步，欢迎开 issue 讨论。
+当前处于 v0.1 本地闭环阶段。如果你对使用手册、设计文档、prior art 对照或 v0.2 方向有意见，欢迎开 issue 讨论。
 
 代码开始前，所有架构变更先走 issue + 设计文档 PR，不直接写代码——这个项目本身就是在实践"知识先于代码"。
