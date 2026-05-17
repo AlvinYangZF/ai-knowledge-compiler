@@ -258,6 +258,162 @@ describe("compile pipeline", () => {
     });
   });
 
+  it("repairs invalid DeepSeek classify relations before falling back", async () => {
+    const calls: Array<{ responseSchemaName: string; messages: unknown[] }> =
+      [];
+    const provider = {
+      model: "deepseek-v4-pro",
+      completeJson: async (call: {
+        responseSchemaName: string;
+        messages: unknown[];
+      }) => {
+        calls.push(call);
+        if (call.responseSchemaName === "segment") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              units: [
+                {
+                  id: "su_classify_repair",
+                  sourceChunkIds: ["page_compilepkg39:c0"],
+                  text: "GC classify repair update.",
+                  kind: "claim_cluster",
+                },
+              ],
+            }),
+          };
+        }
+        const classifyCalls = calls.filter(
+          (item) => item.responseSchemaName === "classify",
+        ).length;
+        if (call.responseSchemaName === "classify" && classifyCalls === 1) {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              relation: "related",
+              confidence: 0.7,
+              reasoning: "Invalid relation label.",
+            }),
+          };
+        }
+        if (call.responseSchemaName === "classify") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              relation: "extend",
+              confidence: 0.72,
+              reasoning: "Repaired to an allowed relation.",
+            }),
+          };
+        }
+        return {
+          model: "deepseek-v4-pro",
+          content: JSON.stringify({
+            changes: [
+              {
+                type: "modify",
+                pageId: "page_compilepkg40",
+                operation: "append_section",
+                relation: "extend",
+                classifyConfidence: 0.72,
+                reasoning: "Repaired classification.",
+                content:
+                  '## Classify Repair\n\n<!-- akb:derived source=su_classify_repair method=extend patch=patch_page_compilepkg39 promptHash="sha256:llm" modelId="deepseek-v4-pro" compiledAt="2026-05-16T00:00:00.000Z" -->\nGC classify repair update.',
+              },
+            ],
+          }),
+        };
+      },
+    };
+
+    const patch = await buildCompilePatch({
+      source: page(
+        "page_compilepkg39",
+        "GC Classify Repair",
+        "GC classify repair update.",
+      ),
+      candidates: [
+        page("page_compilepkg40", "Garbage Collection", "GC target."),
+      ],
+      provider,
+      now: new Date("2026-05-16T00:00:00.000Z"),
+    });
+
+    expect(patch.compileMeta.provider).toBe("deepseek");
+    expect(patch.compileMeta.degraded).toBe(false);
+    expect(patch.compileMeta.llmCallCount).toBe(4);
+    expect(calls.map((call) => call.responseSchemaName)).toEqual([
+      "segment",
+      "classify",
+      "classify",
+      "synthesize",
+    ]);
+    expect(JSON.stringify(calls[1])).toContain("validRelations");
+    expect(JSON.stringify(calls[2])).toContain("unsupported relation");
+    expect(JSON.stringify(calls[2])).toContain("Return corrected JSON only");
+    expect(patch.changes[0]).toMatchObject({
+      type: "modify",
+      pageId: "page_compilepkg40",
+      relation: "extend",
+    });
+  });
+
+  it("reports invalid DeepSeek classify responses after repair fails", async () => {
+    const provider = {
+      model: "deepseek-v4-pro",
+      completeJson: async (call: { responseSchemaName: string }) => {
+        if (call.responseSchemaName === "segment") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              units: [
+                {
+                  id: "su_bad_classify_repair",
+                  sourceChunkIds: ["page_compilepkg41:c0"],
+                  text: "GC bad classify repair update.",
+                  kind: "claim_cluster",
+                },
+              ],
+            }),
+          };
+        }
+        if (call.responseSchemaName === "classify") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              relation: "related",
+              confidence: 0.7,
+              reasoning: "Still invalid.",
+            }),
+          };
+        }
+        return {
+          model: "deepseek-v4-pro",
+          content: JSON.stringify({ changes: [] }),
+        };
+      },
+    };
+
+    const patch = await buildCompilePatch({
+      source: page(
+        "page_compilepkg41",
+        "GC Bad Classify Repair",
+        "GC bad classify repair update.",
+      ),
+      candidates: [
+        page("page_compilepkg42", "Garbage Collection", "GC target."),
+      ],
+      provider,
+      now: new Date("2026-05-16T00:00:00.000Z"),
+    });
+
+    expect(patch.compileMeta.provider).toBe("heuristic");
+    expect(patch.compileMeta.degradedReason).toContain(
+      "DeepSeek classify returned invalid relation after repair",
+    );
+    expect(patch.compileMeta.degradedReason).toContain("unsupported relation");
+  });
+
   it("marks low-confidence DeepSeek classifications for close review", async () => {
     const provider = {
       model: "deepseek-v4-pro",

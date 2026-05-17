@@ -480,7 +480,7 @@ async function buildProviderCompilePatch(
         bodyStartLine: target.bodyStartLine,
       })
     : [];
-  const classifyPrompt = JSON.stringify({
+  const classifyPayload = {
     task: "classify",
     units,
     candidatePage: target
@@ -489,23 +489,60 @@ async function buildProviderCompilePatch(
           body: target.body,
         }
       : undefined,
-  });
+    requiredOutput: classifyOutputContract(),
+  };
   const classifyResult = await provider.completeJson({
     responseSchemaName: "classify",
     messages: compileMessages(
-      "Classify the relation as new, extend, merge, contradict, supersede, or duplicate. Return JSON only.",
-      classifyPrompt,
+      [
+        "Classify the relation between the source units and candidate page.",
+        "Return JSON only with relation, confidence, and reasoning.",
+        "The relation field must be exactly one of the allowed values in requiredOutput.validRelations.",
+        "Do not invent labels such as related, update, similar, or overlap.",
+      ].join(" "),
+      JSON.stringify(classifyPayload),
     ),
   });
   resolvedModel = classifyResult.model || resolvedModel;
-  const classify = parseJsonObject(classifyResult.content, "classify");
   llmCallCount += 1;
-  const relation = parseCompileRelation(classify.relation);
-  const classifyConfidence = parseConfidence(classify.confidence);
+  let classify: ParsedClassifyResult;
+  try {
+    classify = parseClassifyResult(classifyResult.content);
+  } catch (error) {
+    const validationError = errorMessage(error);
+    const repairResult = await provider.completeJson({
+      responseSchemaName: "classify",
+      messages: compileMessages(
+        [
+          "Repair invalid akb classify JSON.",
+          "Return corrected JSON only with relation, confidence, and reasoning.",
+          "The relation field must be exactly one allowed value from requiredOutput.validRelations.",
+          "Do not include prose, markdown fences, or explanations.",
+        ].join(" "),
+        JSON.stringify({
+          ...classifyPayload,
+          previousInvalidResponse: classifyResult.content,
+          validationError,
+          repairInstruction:
+            "Return corrected JSON only. Preserve the source units and candidate page.",
+        }),
+      ),
+    });
+    resolvedModel = repairResult.model || resolvedModel;
+    llmCallCount += 1;
+    try {
+      classify = parseClassifyResult(repairResult.content);
+    } catch (repairError) {
+      throw new Error(
+        `${providerLabel(providerName)} classify returned invalid relation after repair: ${errorMessage(repairError)}`,
+      );
+    }
+  }
+  const relation = classify.relation;
+  const classifyConfidence = classify.confidence;
   const reasoning =
-    typeof classify.reasoning === "string"
-      ? classify.reasoning
-      : `${providerLabel(providerName)} relation classification`;
+    classify.reasoning ??
+    `${providerLabel(providerName)} relation classification`;
 
   let changes: CompilePatchChange[];
   if (relation === "duplicate" && target) {
@@ -976,6 +1013,73 @@ type CompileRelation =
   | "contradict"
   | "supersede"
   | "duplicate";
+
+interface ParsedClassifyResult {
+  relation: CompileRelation;
+  confidence: number;
+  reasoning?: string;
+}
+
+function parseClassifyResult(content: string): ParsedClassifyResult {
+  const classify = parseJsonObject(content, "classify");
+  return {
+    relation: parseCompileRelation(classify.relation),
+    confidence: parseConfidence(classify.confidence),
+    reasoning:
+      typeof classify.reasoning === "string" ? classify.reasoning : undefined,
+  };
+}
+
+function classifyOutputContract(): Record<string, unknown> {
+  return {
+    requiredTopLevelShape: {
+      relation: "one valid relation string",
+      confidence: "0..1",
+      reasoning: "short reason grounded in the source units and candidate page",
+    },
+    validRelations: [
+      "new",
+      "extend",
+      "merge",
+      "contradict",
+      "supersede",
+      "duplicate",
+    ],
+    relationGuide: {
+      new: "Use when there is no relevant candidate page or the source starts a separate topic.",
+      extend:
+        "Use when the source adds details to the candidate without replacing existing content.",
+      merge:
+        "Use when source and candidate cover the same topic and should be consolidated.",
+      contradict:
+        "Use when the source conflicts with the candidate and both should remain reviewable.",
+      supersede:
+        "Use when the source is a newer or stronger replacement for the candidate.",
+      duplicate:
+        "Use only when the source repeats substantially the same knowledge as the candidate.",
+    },
+    examples: [
+      {
+        relation: "extend",
+        confidence: 0.82,
+        reasoning:
+          "The source adds operational details to the existing candidate page.",
+      },
+      {
+        relation: "merge",
+        confidence: 0.76,
+        reasoning:
+          "The source and candidate describe the same subsystem from complementary angles.",
+      },
+      {
+        relation: "duplicate",
+        confidence: 0.9,
+        reasoning:
+          "The source restates the same claim already present in the candidate page.",
+      },
+    ],
+  };
+}
 
 function parseConfidence(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value)
