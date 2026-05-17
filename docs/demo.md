@@ -97,11 +97,49 @@ Rollback uses the previous stable image tag.
 
 如果你已经有 Obsidian vault，也可以直接导入其中的 Markdown。`akb` 会保留 `[[wikilinks]]`。
 
-## 3. 导入 Markdown
+## 3. 配置大模型 API Key
+
+如果希望 `ingest` 后的 `compile` 阶段直接使用大模型能力，需要先在 `.akb/config.yaml` 中配置 LLM provider 和 API key。`akb` 支持 DeepSeek、OpenAI 和 Anthropic；新配置建议直接写 `api_key`，不要再使用 `api_key_env`。
+
+DeepSeek 示例：
+
+```yaml
+llm:
+  provider: "deepseek"
+  base_url: "https://api.deepseek.com"
+  model: "deepseek-v4-flash"
+  api_key: "sk-..."
+```
+
+OpenAI 示例：
+
+```yaml
+llm:
+  provider: "openai"
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4.1-mini"
+  api_key: "sk-..."
+```
+
+Anthropic 示例：
+
+```yaml
+llm:
+  provider: "anthropic"
+  base_url: "https://api.anthropic.com/v1"
+  model: "claude-sonnet-4-20250514"
+  api_key: "sk-ant-..."
+```
+
+`api_key` 是 secret，不要把包含真实 key 的 `.akb/config.yaml` 提交到公共仓库。如果你只是第一次批量导入 Markdown，建议仍然先用 `--no-compile`，确认页面结构和索引正常后，再对少量关键页面运行 `compile`。
+
+如果暂时不配置 API key，`ask` 会降级为 extractive answer；`compile` 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。
+
+## 4. 导入 Markdown
 
 重要：`ingest` 默认会在导入后继续执行 `compile`，为每个新页面生成 reviewable patch。首次批量导入自己的目录时，建议先加 `--no-compile`，只完成导入和索引，确认页面结构正常后再按需运行 compile。
 
-如果没有配置 `DEEPSEEK_API_KEY`，`compile` 不会调用大模型，而是走 degraded heuristic fallback；这不依赖 DeepSeek API key。但对大量 Markdown 文件来说，导入后逐页 compile 仍然可能很慢，因为每个 source 都要扫描 vault 里的候选页面。若已经配置了 DeepSeek key，则默认 compile 会对每个 source 调用 LLM，更应该避免在首次大目录导入时自动触发。
+如果没有配置 `llm.api_key`，`compile` 不会调用大模型，而是走 degraded heuristic fallback。但对大量 Markdown 文件来说，导入后逐页 compile 仍然可能很慢，因为每个 source 都要扫描 vault 里的候选页面。若已经配置了 API key，则默认 compile 会对每个 source 调用 LLM，更应该避免在首次大目录导入时自动触发。
 
 导入单个文件：
 
@@ -165,7 +203,7 @@ node "$AKB" compile status
 
 确认页面导入正常后，再用 `compile --source <page-id-or-path>` 或 `compile --all-pending` 分批生成 patch。
 
-## 4. 建立索引并搜索
+## 5. 建立索引并搜索
 
 重建 SQLite FTS5 索引：
 
@@ -200,7 +238,7 @@ node "$AKB" search "deploy rollback" --hybrid --format json
 node "$AKB" search "deploy rollback" --include-superseded
 ```
 
-## 5. 用 `ask` 进行带引用问答
+## 6. 用 `ask` 进行带引用问答
 
 没有配置 LLM 时，`ask` 会使用 extractive answer，也就是从检索结果中抽取可引用片段：
 
@@ -209,28 +247,15 @@ node "$AKB" ask "如何回滚生产部署？"
 node "$AKB" ask "deploy rollback" --hybrid --format json
 ```
 
-配置 LLM 后，`ask` 会调用 DeepSeek 生成答案，并要求答案只能引用检索到的 refs。模型如果引用了不存在的 refs，会自动降级为 extractive answer。
-
-在 `.akb/config.yaml` 中加入：
-
-```yaml
-llm:
-  provider: "deepseek"
-  base_url: "https://api.deepseek.com"
-  model: "deepseek-v4-flash"
-  api_key_env: "DEEPSEEK_API_KEY"
-```
-
-设置环境变量：
+配置 LLM 后，`ask` 会调用 `.akb/config.yaml` 中指定的 DeepSeek、OpenAI 或 Anthropic 模型生成答案，并要求答案只能引用检索到的 refs。模型如果引用了不存在的 refs，会自动降级为 extractive answer。
 
 ```bash
-export DEEPSEEK_API_KEY=...
 node "$AKB" ask "如何回滚生产部署？" --hybrid
 ```
 
-secret 只放在环境变量中，不写入 `.akb/config.yaml`，也不要提交到 git。
+API key 配置方式见第 3 节。不要把包含真实 key 的配置文件提交到公共仓库。
 
-## 6. 启用 Confidence Ledger
+## 7. 启用 Confidence Ledger
 
 Confidence Ledger 是每个页面旁边的 append-only JSONL 事件流，用来记录来源、验证、衰减、矛盾、supersede 等事件。
 
@@ -288,7 +313,7 @@ node "$AKB" webhook ci-failure \
 node "$AKB" watch --once --no-commit
 ```
 
-## 7. 使用 compile 生成可 review 的 patch
+## 8. 使用 compile 生成可 review 的 patch
 
 `compile` 用来把新 source 对现有 vault 的影响编译成 patch。它不会直接修改 Markdown，而是生成 `.akb/patches/*.yaml`，等待 review。
 
@@ -312,7 +337,7 @@ node "$AKB" compile --source <page-id-or-path>
 node "$AKB" compile --all-pending
 ```
 
-如果没有配置 `DEEPSEEK_API_KEY`，compile 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。配置 DeepSeek 后，compile 会跑 provider-backed pipeline，并记录 pinned `modelId`、`promptHashes` 和 `resolvedModelId`。
+如果没有配置 `llm.api_key`，compile 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。配置 DeepSeek、OpenAI 或 Anthropic 后，compile 会跑 provider-backed pipeline，并记录 pinned `modelId`、`promptHashes` 和 `resolvedModelId`。
 
 查看 patch：
 
@@ -327,9 +352,9 @@ node "$AKB" patch show <patch-id>
 node "$AKB" compile replay <patch-id>
 ```
 
-DeepSeek-backed patch replay 会重新调用 provider。如果 replay 降级为 heuristic，命令会失败，而不是静默通过。
+Provider-backed patch replay 会重新调用对应 provider。如果 replay 降级为 heuristic，命令会失败，而不是静默通过。
 
-## 8. Review 并应用或拒绝 patch
+## 9. Review 并应用或拒绝 patch
 
 应用 patch：
 
@@ -351,7 +376,7 @@ node "$AKB" patch reject <patch-id> --reason "not relevant" --no-commit
 
 应用 patch 后，`akb` 会更新 Markdown，并写入相关 confidence/lineage 信息。
 
-## 9. 管理 supersede 关系
+## 10. 管理 supersede 关系
 
 当一个页面被新页面取代时，使用 `supersede`：
 
@@ -374,7 +399,7 @@ node "$AKB" supersede <old-page-id-or-path> \
 
 搜索默认过滤 superseded 页面；需要查看历史页面时加 `--include-superseded`。
 
-## 10. 查看 lineage
+## 11. 查看 lineage
 
 查看某个页面或 chunk 的 lineage：
 
@@ -390,7 +415,7 @@ node "$AKB" lineage --reverse <source-page-or-chunk-id>
 
 lineage 用来解释 compile 生成内容来自哪些 source chunk，也用于 replay 和审计。
 
-## 11. 配置 MCP 给 coding agent 使用
+## 12. 配置 MCP 给 coding agent 使用
 
 stdio transport：
 
@@ -425,7 +450,7 @@ Claude Code MCP 配置示例：
 
 检索结果包含行号级 citation，并使用 confidence-aware rerank。
 
-## 12. 为自己的知识库添加 eval
+## 13. 为自己的知识库添加 eval
 
 编辑 `.akb/eval/golden.yaml`，加入与你知识库相关的问题：
 
@@ -446,7 +471,7 @@ node "$AKB" eval --set .akb/eval/golden.yaml
 
 建议把 golden set 当作知识库质量门禁：每次大规模 ingest、compile 或修改 ranker 后都跑一次。
 
-## 13. 运行内置 sample demo
+## 14. 运行内置 sample demo
 
 如果你想先看完整样例：
 
@@ -467,7 +492,7 @@ recall@10:    1.00
 must-hit pass rate:  5/5 (100%)
 ```
 
-## 14. 已实现功能总览
+## 15. 已实现功能总览
 
 当前已经实现并可用于本地知识库的能力：
 
@@ -481,8 +506,8 @@ must-hit pass rate:  5/5 (100%)
 - confidence projection rebuild / recompute / show
 - decay、verify、runtime webhook/watch 信号
 - supersede 链和 `--unlink`
-- DeepSeek-backed `ask`
-- DeepSeek-backed compile pipeline
+- DeepSeek / OpenAI / Anthropic-backed `ask`
+- DeepSeek / OpenAI / Anthropic-backed compile pipeline
 - heuristic fallback
 - patch proposal / apply / reject
 - compile replay
@@ -490,7 +515,7 @@ must-hit pass rate:  5/5 (100%)
 - MCP stdio / HTTP server
 - eval harness 和 search benchmark
 
-## 15. 即将补充的功能
+## 16. 即将补充的功能
 
 后续 demo 应该在对应能力实现后继续补充：
 
@@ -502,7 +527,7 @@ must-hit pass rate:  5/5 (100%)
 - Web UI：查看页面、confidence 事件、patch、lineage 和 eval 结果
 - 团队协作工作流：patch reviewer、PR check、知识库质量门禁
 
-## 16. 常用验证命令
+## 17. 常用验证命令
 
 在项目根目录运行：
 

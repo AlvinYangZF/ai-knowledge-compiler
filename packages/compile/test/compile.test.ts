@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  AnthropicCompileProvider,
   buildCompilePatch,
   buildHeuristicCompilePatch,
   type CompilePageInput,
   DeepSeekCompileProvider,
+  OpenAICompileProvider,
 } from "../src/index.js";
 
 function page(id: string, title: string, body: string): CompilePageInput {
@@ -488,10 +490,12 @@ describe("compile pipeline", () => {
     expect(patch.id).toBe("patch_page_compilepkg01");
     expect(patch.compileMeta.provider).toBe("heuristic");
     expect(patch.compileMeta.modelId).toBe("deepseek-v4-flash");
-    expect(patch.compileMeta.apiKeyEnv).toBe("DEEPSEEK_API_KEY");
+    expect(patch.compileMeta.apiKeyEnv).toBeUndefined();
     expect(patch.compileMeta.temperature).toBe(0);
     expect(patch.compileMeta.degraded).toBe(true);
-    expect(patch.compileMeta.degradedReason).toContain("DEEPSEEK_API_KEY");
+    expect(patch.compileMeta.degradedReason).toContain(
+      "llm.api_key not configured for deepseek",
+    );
     expect(patch.compileMeta.stages.map((stage) => stage.name)).toEqual([
       "segment",
       "locate",
@@ -509,7 +513,7 @@ describe("compile pipeline", () => {
     ]);
   });
 
-  it("does not claim DeepSeek execution until the provider is implemented", () => {
+  it("does not claim provider execution when building a heuristic patch directly", () => {
     const source = page("page_compilepkg03", "New Source", "Standalone note.");
 
     const patch = buildHeuristicCompilePatch({
@@ -523,7 +527,9 @@ describe("compile pipeline", () => {
     expect(patch.compileMeta.provider).toBe("heuristic");
     expect(patch.compileMeta.modelId).toBe("deepseek-v4-pro");
     expect(patch.compileMeta.degraded).toBe(true);
-    expect(patch.compileMeta.degradedReason).toContain("not implemented");
+    expect(patch.compileMeta.degradedReason).toContain(
+      "Provider-backed compile was not run",
+    );
     expect(patch.compileMeta.llmCallCount).toBe(0);
     expect(patch.changes[0]).toMatchObject({
       type: "confidence_only",
@@ -784,6 +790,100 @@ describe("compile pipeline", () => {
     });
     expect(JSON.stringify(provider)).not.toContain("test-key");
     expect(Object.keys(provider)).not.toContain("apiKey");
+  });
+
+  it("calls OpenAI chat completions with direct API key credentials", async () => {
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    const provider = new OpenAICompileProvider({
+      apiKey: "openai-test-key",
+      model: "gpt-4.1-mini",
+      timeoutMs: 1000,
+      retries: 0,
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        requests.push({ url: String(url), init: init ?? {} });
+        return new Response(
+          JSON.stringify({
+            model: "gpt-4.1-mini",
+            choices: [{ message: { content: '{"ok":true}' } }],
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }) as typeof fetch,
+    });
+
+    const result = await provider.completeJson({
+      responseSchemaName: "openai",
+      messages: [{ role: "user", content: "Return JSON." }],
+    });
+
+    expect(result).toEqual({
+      content: '{"ok":true}',
+      model: "gpt-4.1-mini",
+    });
+    expect(requests[0].url).toBe("https://api.openai.com/v1/chat/completions");
+    expect(requests[0].init.headers).toMatchObject({
+      Authorization: "Bearer openai-test-key",
+      "Content-Type": "application/json",
+    });
+    expect(JSON.parse(String(requests[0].init.body))).toMatchObject({
+      model: "gpt-4.1-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+    });
+    expect(JSON.stringify(provider)).not.toContain("openai-test-key");
+  });
+
+  it("calls Anthropic messages with direct API key credentials", async () => {
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    const provider = new AnthropicCompileProvider({
+      apiKey: "anthropic-test-key",
+      model: "claude-sonnet-4-20250514",
+      timeoutMs: 1000,
+      retries: 0,
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        requests.push({ url: String(url), init: init ?? {} });
+        return new Response(
+          JSON.stringify({
+            model: "claude-sonnet-4-20250514",
+            content: [{ type: "text", text: '{"ok":true}' }],
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }) as typeof fetch,
+    });
+
+    const result = await provider.completeJson({
+      responseSchemaName: "anthropic",
+      messages: [
+        { role: "system", content: "Return JSON only." },
+        { role: "user", content: "Classify this source." },
+      ],
+    });
+
+    expect(result).toEqual({
+      content: '{"ok":true}',
+      model: "claude-sonnet-4-20250514",
+    });
+    expect(requests[0].url).toBe("https://api.anthropic.com/v1/messages");
+    expect(requests[0].init.headers).toMatchObject({
+      "x-api-key": "anthropic-test-key",
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+    });
+    expect(JSON.parse(String(requests[0].init.body))).toMatchObject({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 4096,
+      temperature: 0,
+      system: "Return JSON only.",
+      messages: [{ role: "user", content: "Classify this source." }],
+    });
+    expect(JSON.stringify(provider)).not.toContain("anthropic-test-key");
   });
 
   it("retries transient DeepSeek failures but not auth failures", async () => {

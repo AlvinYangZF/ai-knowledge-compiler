@@ -62,6 +62,47 @@ export interface SearchResult {
   citation: Citation;
 }
 
+const LlmProviderSchema = z.enum(["deepseek", "openai", "anthropic"]);
+
+function llmDefaults(provider: z.infer<typeof LlmProviderSchema>): {
+  base_url: string;
+  model: string;
+} {
+  if (provider === "openai") {
+    return {
+      base_url: "https://api.openai.com/v1",
+      model: "gpt-4.1-mini",
+    };
+  }
+  if (provider === "anthropic") {
+    return {
+      base_url: "https://api.anthropic.com/v1",
+      model: "claude-sonnet-4-20250514",
+    };
+  }
+  return {
+    base_url: "https://api.deepseek.com",
+    model: "deepseek-v4-flash",
+  };
+}
+
+const LlmConfigSchema = z
+  .object({
+    provider: LlmProviderSchema.default("deepseek"),
+    base_url: z.string().min(1).optional(),
+    model: z.string().min(1).optional(),
+    api_key: z.string().min(1).optional(),
+    api_key_env: z.string().min(1).optional(),
+  })
+  .transform((value) => {
+    const defaults = llmDefaults(value.provider);
+    return {
+      ...value,
+      base_url: value.base_url ?? defaults.base_url,
+      model: value.model ?? defaults.model,
+    };
+  });
+
 export const ConfigSchema = z.object({
   version: z.literal("0.0"),
   workspace: z.object({
@@ -81,14 +122,7 @@ export const ConfigSchema = z.object({
       authority_domains: z.array(z.string().min(1)).default([]),
     })
     .optional(),
-  llm: z
-    .object({
-      provider: z.string().min(1).default("deepseek"),
-      base_url: z.string().min(1).default("https://api.deepseek.com"),
-      model: z.string().min(1).default("deepseek-v4-flash"),
-      api_key_env: z.string().min(1).default("DEEPSEEK_API_KEY"),
-    })
-    .optional(),
+  llm: LlmConfigSchema.optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

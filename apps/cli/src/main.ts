@@ -18,7 +18,8 @@ import {
   buildHeuristicCompilePatch,
   buildCompilePatch as buildProviderCompilePatch,
   type CompilePageInput,
-  DeepSeekCompileProvider,
+  createCompileJsonProvider,
+  type LlmProviderName,
 } from "@akb/compile";
 import {
   appendConfidenceEvent,
@@ -743,7 +744,7 @@ async function askCommand(
     try {
       generated = await generateAskAnswer(question, results, citations, config);
     } catch (error) {
-      degradedReason = askDegradedReason(error, config.llm?.api_key_env);
+      degradedReason = askDegradedReason(error, config.llm);
     }
   }
   const answer = noEvidence
@@ -814,23 +815,20 @@ async function generateAskAnswer(
   }
   const llm = config.llm;
   const provider = llm.provider;
-  if (provider !== "deepseek") {
-    throw new Error(`Unsupported ask LLM provider: ${provider}`);
-  }
-  const apiKeyEnv = llm.api_key_env;
-  const apiKey = process.env[apiKeyEnv];
+  const { apiKey } = configuredLlmApiKey(llm);
   if (!apiKey) {
-    throw new Error(`Missing ${apiKeyEnv}`);
+    throw new Error(missingLlmApiKeyMessage(provider));
   }
   const model = llm.model;
-  const deepseek = new DeepSeekCompileProvider({
+  const llmProvider = createCompileJsonProvider({
+    providerName: provider,
     apiKey,
     baseUrl: llm.base_url,
     model,
     retries: 0,
     timeoutMs: 8_000,
   });
-  const response = await deepseek.completeJson({
+  const response = await llmProvider.completeJson({
     responseSchemaName: "akb_ask_answer",
     messages: [
       {
@@ -864,15 +862,21 @@ async function generateAskAnswer(
     !isRecord(parsed) ||
     (parsed.answer !== null && typeof parsed.answer !== "string")
   ) {
-    throw new Error("DeepSeek ask response missing answer");
+    throw new Error(
+      `${providerDisplayName(provider)} ask response missing answer`,
+    );
   }
   if (parsed.no_answer === true) {
     if (parsed.answer !== null) {
-      throw new Error("DeepSeek ask no_answer response must use null answer");
+      throw new Error(
+        `${providerDisplayName(provider)} ask no_answer response must use null answer`,
+      );
     }
     const refs = Array.isArray(parsed.used_refs) ? parsed.used_refs : [];
     if (refs.length > 0) {
-      throw new Error("DeepSeek ask no_answer response cannot cite refs");
+      throw new Error(
+        `${providerDisplayName(provider)} ask no_answer response cannot cite refs`,
+      );
     }
     return {
       answer: null,
@@ -882,12 +886,16 @@ async function generateAskAnswer(
     };
   }
   if (parsed.answer === null || parsed.answer.trim().length === 0) {
-    throw new Error("DeepSeek ask response omitted answer");
+    throw new Error(
+      `${providerDisplayName(provider)} ask response omitted answer`,
+    );
   }
   const usedRefs = Array.isArray(parsed.used_refs) ? parsed.used_refs : [];
   const allowedRefs = new Set(citations.map((citation) => citation.ref));
   if (usedRefs.length === 0 && parsed.answer.trim().length > 0) {
-    throw new Error("DeepSeek ask response omitted citations");
+    throw new Error(
+      `${providerDisplayName(provider)} ask response omitted citations`,
+    );
   }
   for (const ref of usedRefs) {
     if (
@@ -895,28 +903,38 @@ async function generateAskAnswer(
       !Number.isInteger(ref) ||
       !allowedRefs.has(ref)
     ) {
-      throw new Error(`DeepSeek ask response cited unavailable ref: ${ref}`);
+      throw new Error(
+        `${providerDisplayName(provider)} ask response cited unavailable ref: ${ref}`,
+      );
     }
   }
   const answerRefs = new Set(
     [...parsed.answer.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1])),
   );
   if (answerRefs.size === 0 && parsed.answer.trim().length > 0) {
-    throw new Error("DeepSeek ask response omitted visible citations");
+    throw new Error(
+      `${providerDisplayName(provider)} ask response omitted visible citations`,
+    );
   }
   for (const ref of answerRefs) {
     if (!allowedRefs.has(ref)) {
-      throw new Error(`DeepSeek ask response cited unavailable ref: ${ref}`);
+      throw new Error(
+        `${providerDisplayName(provider)} ask response cited unavailable ref: ${ref}`,
+      );
     }
   }
   for (const ref of usedRefs) {
     if (!answerRefs.has(ref)) {
-      throw new Error(`DeepSeek ask response omitted visible citation: ${ref}`);
+      throw new Error(
+        `${providerDisplayName(provider)} ask response omitted visible citation: ${ref}`,
+      );
     }
   }
   for (const ref of answerRefs) {
     if (!usedRefs.includes(ref)) {
-      throw new Error(`DeepSeek ask response omitted used ref: ${ref}`);
+      throw new Error(
+        `${providerDisplayName(provider)} ask response omitted used ref: ${ref}`,
+      );
     }
   }
   return {
@@ -926,23 +944,56 @@ async function generateAskAnswer(
   };
 }
 
-function askDegradedReason(error: unknown, apiKeyEnv = "DEEPSEEK_API_KEY") {
+function askDegradedReason(error: unknown, llm?: Config["llm"]) {
   const message =
     error instanceof Error
       ? error.message
       : typeof error === "string"
         ? error
         : String(error);
-  return `LLM answer generation failed (${sanitizeAskError(message, apiKeyEnv)}); used extractive retrieval answer`;
+  return `LLM answer generation failed (${sanitizeAskError(message, llm)}); used extractive retrieval answer`;
 }
 
-function sanitizeAskError(message: string, apiKeyEnv: string): string {
-  const secret = process.env[apiKeyEnv];
-  let sanitized = secret ? message.split(secret).join("[redacted]") : message;
+function sanitizeAskError(message: string, llm?: Config["llm"]): string {
+  const { apiKey } = configuredLlmApiKey(llm);
+  let sanitized = apiKey ? message.split(apiKey).join("[redacted]") : message;
   sanitized = sanitized.replace(/Authorization\s+Bearer\s+\S+/gi, "[redacted]");
   sanitized = sanitized.replace(/Bearer\s+\S+/gi, "[redacted]");
   sanitized = sanitized.replace(/https?:\/\/\S+/gi, "[redacted-url]");
   return sanitized;
+}
+
+function configuredLlmApiKey(llm: Config["llm"] | undefined): {
+  apiKey?: string;
+  apiKeyEnv?: string;
+} {
+  if (!llm) {
+    return {};
+  }
+  if (llm.api_key) {
+    return { apiKey: llm.api_key };
+  }
+  if (llm.api_key_env) {
+    return {
+      apiKey: process.env[llm.api_key_env],
+      apiKeyEnv: llm.api_key_env,
+    };
+  }
+  return {};
+}
+
+function missingLlmApiKeyMessage(provider: LlmProviderName): string {
+  return `Missing llm.api_key for ${provider}`;
+}
+
+function providerDisplayName(provider: LlmProviderName): string {
+  if (provider === "openai") {
+    return "OpenAI";
+  }
+  if (provider === "anthropic") {
+    return "Anthropic";
+  }
+  return "DeepSeek";
 }
 
 function rankConfidenceStateForResults(
@@ -1390,7 +1441,6 @@ function buildCompileEvalPatch(
   return buildHeuristicCompilePatch({
     source,
     candidates,
-    deepseekApiKey: process.env.DEEPSEEK_API_KEY,
   }) as PatchDocument;
 }
 
@@ -3168,9 +3218,12 @@ async function compileCommand(options: CompileOptions): Promise<void> {
   }
 
   for (const sourceRef of sourceRefs) {
+    const { apiKey, apiKeyEnv } = configuredLlmApiKey(config.llm);
     const patch = await buildCompilePatch(vaultDir, sourceRef, {
+      providerName: config.llm?.provider,
       model: options.model ?? config.llm?.model,
-      apiKeyEnv: config.llm?.api_key_env,
+      apiKey,
+      apiKeyEnv,
       baseUrl: config.llm?.base_url,
     });
     if (options.dryRun) {
@@ -3226,21 +3279,26 @@ async function compileReplayCommand(patchId: string): Promise<void> {
   if (!patch.source?.pageId) {
     throw new Error(`Patch has no source page id: ${patchId}`);
   }
-  const apiKeyEnv =
-    typeof patch.compileMeta?.apiKeyEnv === "string"
-      ? patch.compileMeta.apiKeyEnv
-      : (config.llm?.api_key_env ?? "DEEPSEEK_API_KEY");
-  const isDeepSeekPatch =
-    patch.compileMeta?.provider === "deepseek" &&
-    patch.compileMeta?.degraded !== true;
-  const model = isDeepSeekPatch
+  const patchProvider = patch.compileMeta?.provider;
+  const providerName =
+    patchProvider === "deepseek" ||
+    patchProvider === "openai" ||
+    patchProvider === "anthropic"
+      ? patchProvider
+      : undefined;
+  const isProviderPatch =
+    providerName !== undefined && patch.compileMeta?.degraded !== true;
+  const { apiKey, apiKeyEnv } = configuredLlmApiKey(config.llm);
+  const model = isProviderPatch
     ? String(
         patch.compileMeta?.modelId ?? config.llm?.model ?? "deepseek-v4-flash",
       )
     : String(patch.compileMeta?.modelId ?? "heuristic-v0.1");
-  const replayed = isDeepSeekPatch
+  const replayed = isProviderPatch
     ? await buildCompilePatch(vaultDir, patch.source.pageId, {
+        providerName,
         model,
+        apiKey,
         apiKeyEnv,
         baseUrl: config.llm?.base_url,
       })
@@ -3249,13 +3307,11 @@ async function compileReplayCommand(patchId: string): Promise<void> {
         apiKeyEnv,
       });
   if (
-    isDeepSeekPatch &&
-    (replayed.compileMeta?.provider !== "deepseek" ||
+    isProviderPatch &&
+    (replayed.compileMeta?.provider !== providerName ||
       replayed.compileMeta?.degraded === true)
   ) {
-    throw new Error(
-      `Replay requires successful DeepSeek replay for ${patch.id}`,
-    );
+    throw new Error(`Replay requires successful LLM replay for ${patch.id}`);
   }
   if (normalizedCompilePatch(patch) !== normalizedCompilePatch(replayed)) {
     throw new Error(`Replay differed for ${patch.id}`);
@@ -4339,22 +4395,28 @@ function compileDisabledPath(vaultDir: string): string {
 function buildCompilePatch(
   vaultDir: string,
   sourceRef: string,
-  options: { model?: string; apiKeyEnv?: string; baseUrl?: string } = {},
+  options: {
+    providerName?: LlmProviderName;
+    model?: string;
+    baseUrl?: string;
+    apiKey?: string;
+    apiKeyEnv?: string;
+  } = {},
 ): Promise<PatchDocument> {
   const sourceFile = resolvePageFile(vaultDir, sourceRef);
   if (!sourceFile) {
     throw new Error(`Compile source not found: ${sourceRef}`);
   }
   const model = options.model ?? "heuristic-v0.1";
-  const apiKeyEnv = options.apiKeyEnv ?? "DEEPSEEK_API_KEY";
   const source = pageFromFile(vaultDir, sourceFile);
   return buildProviderCompilePatch({
     source,
     candidates: scanVaultPages(vaultDir),
+    providerName: options.providerName,
     model,
     baseUrl: options.baseUrl,
-    apiKeyEnv,
-    deepseekApiKey: process.env[apiKeyEnv],
+    apiKey: options.apiKey,
+    apiKeyEnv: options.apiKeyEnv,
   }) as Promise<PatchDocument>;
 }
 
@@ -4368,13 +4430,11 @@ function buildHeuristicPatchFromVault(
     throw new Error(`Compile source not found: ${sourceRef}`);
   }
   const model = options.model ?? "heuristic-v0.1";
-  const apiKeyEnv = options.apiKeyEnv ?? "DEEPSEEK_API_KEY";
   return buildHeuristicCompilePatch({
     source: pageFromFile(vaultDir, sourceFile),
     candidates: scanVaultPages(vaultDir),
     model,
-    apiKeyEnv,
-    deepseekApiKey: process.env[apiKeyEnv],
+    apiKeyEnv: options.apiKeyEnv,
   }) as PatchDocument;
 }
 

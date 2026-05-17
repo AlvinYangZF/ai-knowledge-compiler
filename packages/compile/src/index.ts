@@ -10,13 +10,17 @@ export interface CompilePageInput {
 export interface BuildCompilePatchOptions {
   source: CompilePageInput;
   candidates: CompilePageInput[];
+  providerName?: LlmProviderName;
   model?: string;
   baseUrl?: string;
   apiKeyEnv?: string;
+  apiKey?: string;
   deepseekApiKey?: string;
   provider?: CompileJsonProvider;
   now?: Date;
 }
+
+export type LlmProviderName = "deepseek" | "openai" | "anthropic";
 
 export interface DeepSeekProviderOptions {
   apiKey: string;
@@ -43,6 +47,7 @@ export interface DeepSeekJsonResult {
 }
 
 export interface CompileJsonProvider {
+  readonly providerName?: LlmProviderName;
   readonly model?: string;
   completeJson(call: DeepSeekJsonCall): Promise<DeepSeekJsonResult>;
 }
@@ -52,10 +57,10 @@ export interface CompilePatchDocument {
   status: "proposed" | "applied" | "rejected";
   source: { sourceId: string; pageId: string; ingestPath: string };
   compileMeta: {
-    provider: "deepseek" | "heuristic";
+    provider: LlmProviderName | "heuristic";
     modelId: string;
     resolvedModelId?: string;
-    apiKeyEnv: string;
+    apiKeyEnv?: string;
     promptHashes: {
       segment: string;
       locate: string;
@@ -66,7 +71,7 @@ export interface CompilePatchDocument {
     pipelineVersion: "compile/0.1";
     stages: Array<{
       name: "segment" | "locate" | "classify" | "synthesize" | "emit";
-      provider: "deterministic" | "deepseek" | "heuristic";
+      provider: "deterministic" | LlmProviderName | "heuristic";
       degraded: boolean;
     }>;
     segmentCount: number;
@@ -129,22 +134,61 @@ const PIPELINE_STAGES = [
   "emit",
 ] as const;
 
-const providerSecrets = new WeakMap<DeepSeekCompileProvider, string>();
+const providerSecrets = new WeakMap<object, string>();
 
-export class DeepSeekCompileProvider {
+function defaultBaseUrlForProvider(providerName: LlmProviderName): string {
+  if (providerName === "openai") {
+    return "https://api.openai.com/v1";
+  }
+  if (providerName === "anthropic") {
+    return "https://api.anthropic.com/v1";
+  }
+  return "https://api.deepseek.com";
+}
+
+function defaultModelForProvider(providerName: LlmProviderName): string {
+  if (providerName === "openai") {
+    return "gpt-4.1-mini";
+  }
+  if (providerName === "anthropic") {
+    return "claude-sonnet-4-20250514";
+  }
+  return "deepseek-v4-flash";
+}
+
+function providerLabel(providerName: LlmProviderName): string {
+  if (providerName === "openai") {
+    return "OpenAI";
+  }
+  if (providerName === "anthropic") {
+    return "Anthropic";
+  }
+  return "DeepSeek";
+}
+
+export interface OpenAICompatibleProviderOptions
+  extends DeepSeekProviderOptions {
+  providerName: "deepseek" | "openai";
+}
+
+export class OpenAICompatibleCompileProvider {
+  readonly providerName: "deepseek" | "openai";
   readonly baseUrl: string;
   readonly model: string;
   readonly timeoutMs: number;
   readonly retries: number;
   private readonly fetchImpl: typeof fetch;
 
-  constructor(opts: DeepSeekProviderOptions) {
+  constructor(opts: OpenAICompatibleProviderOptions) {
     if (opts.apiKey.length === 0) {
-      throw new Error("DeepSeek API key is required");
+      throw new Error(
+        `${providerLabel(opts.providerName)} API key is required`,
+      );
     }
     providerSecrets.set(this, opts.apiKey);
-    this.baseUrl = opts.baseUrl ?? "https://api.deepseek.com";
-    this.model = opts.model ?? "deepseek-v4-flash";
+    this.providerName = opts.providerName;
+    this.baseUrl = opts.baseUrl ?? defaultBaseUrlForProvider(opts.providerName);
+    this.model = opts.model ?? defaultModelForProvider(opts.providerName);
     this.timeoutMs = opts.timeoutMs ?? 30_000;
     this.retries = opts.retries ?? 2;
     this.fetchImpl = opts.fetch ?? fetch;
@@ -176,7 +220,7 @@ export class DeepSeekCompileProvider {
           },
         );
         if (!response.ok) {
-          throw new DeepSeekHttpError(response.status);
+          throw new ProviderHttpError(this.providerName, response.status);
         }
         const payload = (await response.json()) as {
           model?: string;
@@ -185,7 +229,7 @@ export class DeepSeekCompileProvider {
         const content = payload.choices?.[0]?.message?.content;
         if (typeof content !== "string" || content.length === 0) {
           throw new Error(
-            `DeepSeek response missing ${call.responseSchemaName} JSON content`,
+            `${providerLabel(this.providerName)} response missing ${call.responseSchemaName} JSON content`,
           );
         }
         return {
@@ -194,7 +238,7 @@ export class DeepSeekCompileProvider {
         };
       } catch (error) {
         lastError = error;
-        if (attempt === this.retries || !shouldRetryDeepSeekError(error)) {
+        if (attempt === this.retries || !shouldRetryProviderError(error)) {
           break;
         }
       } finally {
@@ -205,28 +249,175 @@ export class DeepSeekCompileProvider {
   }
 }
 
-class DeepSeekHttpError extends Error {
-  constructor(readonly status: number) {
-    super(`DeepSeek request failed: HTTP ${status}`);
+export class DeepSeekCompileProvider extends OpenAICompatibleCompileProvider {
+  constructor(opts: DeepSeekProviderOptions) {
+    super({ ...opts, providerName: "deepseek" });
   }
 }
 
-function shouldRetryDeepSeekError(error: unknown): boolean {
-  if (error instanceof DeepSeekHttpError) {
+export class OpenAICompileProvider extends OpenAICompatibleCompileProvider {
+  constructor(opts: DeepSeekProviderOptions) {
+    super({ ...opts, providerName: "openai" });
+  }
+}
+
+export class AnthropicCompileProvider {
+  readonly providerName = "anthropic" as const;
+  readonly baseUrl: string;
+  readonly model: string;
+  readonly timeoutMs: number;
+  readonly retries: number;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(opts: DeepSeekProviderOptions) {
+    if (opts.apiKey.length === 0) {
+      throw new Error("Anthropic API key is required");
+    }
+    providerSecrets.set(this, opts.apiKey);
+    this.baseUrl = opts.baseUrl ?? defaultBaseUrlForProvider("anthropic");
+    this.model = opts.model ?? defaultModelForProvider("anthropic");
+    this.timeoutMs = opts.timeoutMs ?? 30_000;
+    this.retries = opts.retries ?? 2;
+    this.fetchImpl = opts.fetch ?? fetch;
+  }
+
+  async completeJson(call: DeepSeekJsonCall): Promise<DeepSeekJsonResult> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= this.retries; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+      try {
+        const system = call.messages
+          .filter((message) => message.role === "system")
+          .map((message) => message.content)
+          .join("\n\n");
+        const messages = call.messages
+          .filter((message) => message.role !== "system")
+          .map((message) => ({
+            role: message.role as "user" | "assistant",
+            content: message.content,
+          }));
+        const response = await this.fetchImpl(
+          `${this.baseUrl.replace(/\/$/, "")}/messages`,
+          {
+            method: "POST",
+            headers: {
+              "x-api-key": providerSecrets.get(this) ?? "",
+              "anthropic-version": "2023-06-01",
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              model: this.model,
+              max_tokens: 4096,
+              temperature: 0,
+              ...(system.length > 0 ? { system } : {}),
+              messages,
+            }),
+            signal: controller.signal,
+          },
+        );
+        if (!response.ok) {
+          throw new ProviderHttpError("anthropic", response.status);
+        }
+        const payload = (await response.json()) as {
+          model?: string;
+          content?: Array<{ type?: string; text?: string }>;
+        };
+        const content = payload.content
+          ?.filter((item) => item.type === "text")
+          .map((item) => item.text ?? "")
+          .join("")
+          .trim();
+        if (typeof content !== "string" || content.length === 0) {
+          throw new Error(
+            `Anthropic response missing ${call.responseSchemaName} JSON content`,
+          );
+        }
+        return {
+          content,
+          model: payload.model ?? this.model,
+        };
+      } catch (error) {
+        lastError = error;
+        if (attempt === this.retries || !shouldRetryProviderError(error)) {
+          break;
+        }
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+}
+
+class ProviderHttpError extends Error {
+  constructor(
+    readonly providerName: LlmProviderName,
+    readonly status: number,
+  ) {
+    super(`${providerLabel(providerName)} request failed: HTTP ${status}`);
+  }
+}
+
+function shouldRetryProviderError(error: unknown): boolean {
+  if (error instanceof ProviderHttpError) {
     return error.status === 429 || error.status >= 500;
   }
   return true;
 }
 
+export function createCompileJsonProvider(opts: {
+  providerName: LlmProviderName;
+  apiKey: string;
+  baseUrl?: string;
+  model?: string;
+  timeoutMs?: number;
+  retries?: number;
+  fetch?: typeof fetch;
+}): CompileJsonProvider {
+  if (opts.providerName === "openai") {
+    return new OpenAICompileProvider({
+      apiKey: opts.apiKey,
+      baseUrl: opts.baseUrl,
+      model: opts.model,
+      timeoutMs: opts.timeoutMs,
+      retries: opts.retries,
+      fetch: opts.fetch,
+    });
+  }
+  if (opts.providerName === "anthropic") {
+    return new AnthropicCompileProvider({
+      apiKey: opts.apiKey,
+      baseUrl: opts.baseUrl,
+      model: opts.model,
+      timeoutMs: opts.timeoutMs,
+      retries: opts.retries,
+      fetch: opts.fetch,
+    });
+  }
+  return new DeepSeekCompileProvider({
+    apiKey: opts.apiKey,
+    baseUrl: opts.baseUrl,
+    model: opts.model,
+    timeoutMs: opts.timeoutMs,
+    retries: opts.retries,
+    fetch: opts.fetch,
+  });
+}
+
 export async function buildCompilePatch(
   opts: BuildCompilePatchOptions,
 ): Promise<CompilePatchDocument> {
-  const model = opts.model ?? "deepseek-v4-flash";
+  const providerName =
+    opts.providerName ?? opts.provider?.providerName ?? "deepseek";
+  const model = opts.model ?? defaultModelForProvider(providerName);
+  const apiKey = opts.apiKey ?? opts.deepseekApiKey;
   const provider =
     opts.provider ??
-    (opts.deepseekApiKey
-      ? new DeepSeekCompileProvider({
-          apiKey: opts.deepseekApiKey,
+    (apiKey
+      ? createCompileJsonProvider({
+          providerName,
+          apiKey,
           baseUrl: opts.baseUrl,
           model,
         })
@@ -236,20 +427,22 @@ export async function buildCompilePatch(
   }
 
   try {
-    return await buildDeepSeekCompilePatch(opts, provider);
+    return await buildProviderCompilePatch(opts, provider, providerName);
   } catch (error) {
     const patch = buildHeuristicCompilePatch(opts);
-    patch.compileMeta.degradedReason = `DeepSeek compile failed: ${sanitizedErrorMessage(error, opts.deepseekApiKey)}`;
+    patch.compileMeta.degradedReason = `${providerLabel(providerName)} compile failed: ${sanitizedErrorMessage(error, apiKey)}`;
     return patch;
   }
 }
 
-async function buildDeepSeekCompilePatch(
+async function buildProviderCompilePatch(
   opts: BuildCompilePatchOptions,
   provider: CompileJsonProvider,
+  providerName: LlmProviderName,
 ): Promise<CompilePatchDocument> {
   const started = Date.now();
-  const model = provider.model ?? opts.model ?? "deepseek-v4-flash";
+  const model =
+    provider.model ?? opts.model ?? defaultModelForProvider(providerName);
   const timestamp = (opts.now ?? new Date()).toISOString();
   const patchId = `patch_${opts.source.page.id}`;
   let resolvedModel = model;
@@ -311,7 +504,7 @@ async function buildDeepSeekCompilePatch(
   const reasoning =
     typeof classify.reasoning === "string"
       ? classify.reasoning
-      : "DeepSeek relation classification";
+      : `${providerLabel(providerName)} relation classification`;
 
   let changes: CompilePatchChange[];
   if (relation === "duplicate" && target) {
@@ -362,10 +555,10 @@ async function buildDeepSeekCompilePatch(
   }
 
   const promptHashes = {
-    segment: stablePromptHash("segment/deepseek-v0.1"),
+    segment: stablePromptHash(`segment/${providerName}-v0.1`),
     locate: stablePromptHash("locate/deterministic-v0.1"),
-    classify: stablePromptHash("classify/deepseek-v0.1"),
-    synthesize: stablePromptHash("synthesize/deepseek-v0.1"),
+    classify: stablePromptHash(`classify/${providerName}-v0.1`),
+    synthesize: stablePromptHash(`synthesize/${providerName}-v0.1`),
     emit: stablePromptHash("emit/deterministic-v0.1"),
   };
 
@@ -378,17 +571,17 @@ async function buildDeepSeekCompilePatch(
       ingestPath: opts.source.page.path,
     },
     compileMeta: {
-      provider: "deepseek",
+      provider: providerName,
       modelId: model,
       ...(resolvedModel !== model ? { resolvedModelId: resolvedModel } : {}),
-      apiKeyEnv: opts.apiKeyEnv ?? "DEEPSEEK_API_KEY",
+      ...(opts.apiKeyEnv ? { apiKeyEnv: opts.apiKeyEnv } : {}),
       promptHashes,
       pipelineVersion: "compile/0.1",
       stages: [
-        { name: "segment", provider: "deepseek", degraded: false },
+        { name: "segment", provider: providerName, degraded: false },
         { name: "locate", provider: "deterministic", degraded: false },
-        { name: "classify", provider: "deepseek", degraded: false },
-        { name: "synthesize", provider: "deepseek", degraded: false },
+        { name: "classify", provider: providerName, degraded: false },
+        { name: "synthesize", provider: providerName, degraded: false },
         { name: "emit", provider: "deterministic", degraded: false },
       ],
       segmentCount: units.length,
@@ -421,7 +614,8 @@ async function buildDeepSeekCompilePatch(
 export function buildHeuristicCompilePatch(
   opts: BuildCompilePatchOptions,
 ): CompilePatchDocument {
-  const model = opts.model ?? "deepseek-v4-flash";
+  const providerName = opts.providerName ?? "deepseek";
+  const model = opts.model ?? defaultModelForProvider(providerName);
   const timestamp = (opts.now ?? new Date()).toISOString();
   const source = opts.source;
   const candidates = opts.candidates
@@ -561,7 +755,7 @@ export function buildHeuristicCompilePatch(
     compileMeta: {
       provider: "heuristic",
       modelId: model,
-      apiKeyEnv: opts.apiKeyEnv ?? "DEEPSEEK_API_KEY",
+      ...(opts.apiKeyEnv ? { apiKeyEnv: opts.apiKeyEnv } : {}),
       promptHashes: Object.fromEntries(
         PIPELINE_STAGES.map((stage) => [
           stage,
@@ -579,9 +773,7 @@ export function buildHeuristicCompilePatch(
       llmCallCount: 0,
       elapsedMs: 0,
       degraded,
-      degradedReason: opts.deepseekApiKey
-        ? "DeepSeek provider not implemented; used heuristic fallback"
-        : `${opts.apiKeyEnv ?? "DEEPSEEK_API_KEY"} not set`,
+      degradedReason: heuristicDegradedReason(opts, providerName),
       temperature: 0,
       createdAt: timestamp,
     },
@@ -999,6 +1191,19 @@ function sanitizedErrorMessage(error: unknown, secret?: string): string {
   message = message.replace(/Bearer\s+\S+/gi, "[redacted]");
   message = message.replace(/https?:\/\/\S+/gi, "[redacted-url]");
   return message;
+}
+
+function heuristicDegradedReason(
+  opts: BuildCompilePatchOptions,
+  providerName: LlmProviderName,
+): string {
+  if (opts.apiKey || opts.deepseekApiKey || opts.provider) {
+    return "Provider-backed compile was not run; used heuristic fallback";
+  }
+  if (opts.apiKeyEnv) {
+    return `${opts.apiKeyEnv} not set`;
+  }
+  return `llm.api_key not configured for ${providerName}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
