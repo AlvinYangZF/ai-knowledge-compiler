@@ -133,6 +133,7 @@ const PIPELINE_STAGES = [
   "synthesize",
   "emit",
 ] as const;
+const DEFAULT_COMPILE_PROVIDER_TIMEOUT_MS = 120_000;
 
 const providerSecrets = new WeakMap<object, string>();
 
@@ -189,7 +190,7 @@ export class OpenAICompatibleCompileProvider {
     this.providerName = opts.providerName;
     this.baseUrl = opts.baseUrl ?? defaultBaseUrlForProvider(opts.providerName);
     this.model = opts.model ?? defaultModelForProvider(opts.providerName);
-    this.timeoutMs = opts.timeoutMs ?? 30_000;
+    this.timeoutMs = opts.timeoutMs ?? DEFAULT_COMPILE_PROVIDER_TIMEOUT_MS;
     this.retries = opts.retries ?? 2;
     this.fetchImpl = opts.fetch ?? fetch;
   }
@@ -276,7 +277,7 @@ export class AnthropicCompileProvider {
     providerSecrets.set(this, opts.apiKey);
     this.baseUrl = opts.baseUrl ?? defaultBaseUrlForProvider("anthropic");
     this.model = opts.model ?? defaultModelForProvider("anthropic");
-    this.timeoutMs = opts.timeoutMs ?? 30_000;
+    this.timeoutMs = opts.timeoutMs ?? DEFAULT_COMPILE_PROVIDER_TIMEOUT_MS;
     this.retries = opts.retries ?? 2;
     this.fetchImpl = opts.fetch ?? fetch;
   }

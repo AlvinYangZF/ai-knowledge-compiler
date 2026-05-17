@@ -227,7 +227,7 @@ node "$AKB" search "garbage collection" --hybrid --format json
 
 `ingest` 支持单个 Markdown 文件或目录。目录递归导入需要显式传 `--recursive`。默认会在导入后触发 `compile` 并为写入操作创建 git commit；首次批量导入建议加 `--no-compile --no-commit`，确认 `pages/` 和索引正常后再分批运行 compile。
 
-导入阶段会串行写入 Markdown 和更新 SQLite index，避免多个写入者同时改 vault。导入完成后的 compile 阶段可以用 `--compile-concurrency <n>` 做有限并发；每个 source 仍只生成 proposed patch，不会直接应用到页面。建议从 `2` 开始，避免过多并发触发 provider 限流或超时。
+导入阶段会串行写入 Markdown 和更新 SQLite index，避免多个写入者同时改 vault。导入完成后的 compile 阶段可以用 `--compile-concurrency <n>` 做有限并发；每个 source 仍只生成 proposed patch，不会直接应用到页面。LLM compile provider 请求默认 120 秒超时，建议并发从 `2` 开始，避免过多并发触发 provider 限流或超时。
 
 `search` 默认使用 BM25，并返回带 `page_id + line_start + line_end` 的 citation。`--hybrid` 会叠加本地 sparse vector score，再交给 confidence-aware ranker 排序。默认会过滤 superseded 页面，历史页面可用 `--include-superseded` 查看。
 
@@ -293,6 +293,8 @@ node "$AKB" patch show patch_page_compile00002
 ```
 
 没有设置对应 API key 环境变量时，compile 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。配置 DeepSeek、OpenAI 或 Anthropic 后，compile 会跑 provider-backed pipeline，并记录 pinned `modelId`、`promptHashes` 和 `resolvedModelId`。
+
+Provider-backed compile 的单次 LLM 请求默认 120 秒超时；超时、provider 不可用或模型输出不合法时，会降级生成 heuristic patch，不阻塞 ingest。
 
 应用或拒绝 patch：
 

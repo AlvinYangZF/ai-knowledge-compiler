@@ -792,6 +792,16 @@ describe("compile pipeline", () => {
     expect(Object.keys(provider)).not.toContain("apiKey");
   });
 
+  it("defaults compile provider requests to a two minute timeout", () => {
+    const deepseek = new DeepSeekCompileProvider({ apiKey: "deepseek-key" });
+    const openai = new OpenAICompileProvider({ apiKey: "openai-key" });
+    const anthropic = new AnthropicCompileProvider({ apiKey: "anthropic-key" });
+
+    expect(deepseek.timeoutMs).toBe(120_000);
+    expect(openai.timeoutMs).toBe(120_000);
+    expect(anthropic.timeoutMs).toBe(120_000);
+  });
+
   it("calls OpenAI chat completions with direct API key credentials", async () => {
     const requests: Array<{ url: string; init: RequestInit }> = [];
     const provider = new OpenAICompileProvider({

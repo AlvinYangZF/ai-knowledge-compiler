@@ -167,7 +167,7 @@ node "$AKB" ingest /path/to/my-docs --recursive --no-compile --no-commit
 node "$AKB" ingest /path/to/my-docs --recursive --compile-concurrency 2 --no-commit
 ```
 
-`ingest` 写入 Markdown 和更新索引的阶段仍然是串行的，避免多个写入者同时改 `pages/` 和 `.akb/index.db`。`--compile-concurrency` 只影响导入完成后的 compile 阶段，每个 source 生成独立的 proposed patch，不会自动应用 patch。建议从 `2` 开始，避免过多 LLM 并发触发限流或超时。
+`ingest` 写入 Markdown 和更新索引的阶段仍然是串行的，避免多个写入者同时改 `pages/` 和 `.akb/index.db`。`--compile-concurrency` 只影响导入完成后的 compile 阶段，每个 source 生成独立的 proposed patch，不会自动应用 patch。LLM compile provider 请求默认 120 秒超时，建议并发从 `2` 开始，避免过多 LLM 并发触发限流或超时。
 
 如果目录里包含隐藏文件或隐藏文件夹，`ingest` 会在开始时先列出这些路径并询问是否导入；默认不导入。非交互环境中不会等待输入，也会按默认值跳过隐藏项。确认导入隐藏项后，目标路径会自动转成非隐藏路径，例如 `.hidden.md` 会写入为 `pages/hidden.md`，`.secret/child.md` 会写入为 `pages/secret/child.md`。
 
@@ -363,6 +363,8 @@ node "$AKB" compile --all-pending
 ```
 
 如果没有设置对应 API key 环境变量，compile 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。配置 DeepSeek、OpenAI 或 Anthropic 后，compile 会跑 provider-backed pipeline，并记录 pinned `modelId`、`promptHashes` 和 `resolvedModelId`。
+
+Provider-backed compile 的单次 LLM 请求默认 120 秒超时。超时、provider 不可用或模型输出不合法时，`akb` 会降级生成 heuristic patch，因此导入成功不依赖每一次 LLM compile 都成功。
 
 查看 patch：
 
