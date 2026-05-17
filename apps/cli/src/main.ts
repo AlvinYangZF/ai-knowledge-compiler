@@ -214,6 +214,15 @@ interface CompileOptions {
   model?: string;
 }
 
+interface CompileRunSummary {
+  total: number;
+  providerSuccess: number;
+  degraded: number;
+  dryRuns: number;
+  byProvider: Map<string, number>;
+  degradedReasons: Map<string, number>;
+}
+
 interface PatchApplyOptions {
   commit?: boolean;
   reviewed?: boolean;
@@ -625,16 +634,21 @@ async function compileImportedPages(
       `Compiling ${sources.length} imported page${sources.length === 1 ? "" : "s"} with concurrency ${workerCount}.`,
     );
   }
+  const vaultDir = process.cwd();
+  const config = readVaultConfig(vaultDir);
+  const summary = emptyCompileRunSummary();
   let nextIndex = 0;
   await Promise.all(
     Array.from({ length: workerCount }, async () => {
       while (nextIndex < sources.length) {
         const source = sources[nextIndex];
         nextIndex += 1;
-        await compileCommand({ source });
+        const patch = await compileOneSource(vaultDir, config, source, {});
+        recordCompileSummary(summary, patch, false);
       }
     }),
   );
+  printCompileSummary(summary);
 }
 
 async function indexCommand(options: IndexOptions): Promise<void> {
@@ -3325,40 +3339,123 @@ async function compileCommand(options: CompileOptions): Promise<void> {
     throw new Error("Choose --source <page> or --all-pending");
   }
 
+  const summary = emptyCompileRunSummary();
   for (const sourceRef of sourceRefs) {
-    const { apiKey, apiKeyEnv } = configuredLlmApiKey(config.llm);
-    const patch = await buildCompilePatch(vaultDir, sourceRef, {
-      providerName: config.llm?.provider,
-      model: options.model ?? config.llm?.model,
-      apiKey,
-      apiKeyEnv,
-      baseUrl: config.llm?.base_url,
-    });
-    if (options.dryRun) {
-      console.log(
-        `Dry run ${patch.source?.pageId ?? sourceRef}: ${patch.changes?.length ?? 0} change${patch.changes?.length === 1 ? "" : "s"}.`,
-      );
-      continue;
-    }
-    if (patchExists(vaultDir, patch.id)) {
-      throw new Error(`Patch already exists: ${patch.id}`);
-    }
-    const patchPath = patchPathFor(vaultDir, patch.id, "proposed");
-    mkdirSync(dirname(patchPath), { recursive: true });
-    writeFileSync(patchPath, stringifyYaml(patch));
-    clearCompileDisabled(vaultDir, patch.source?.pageId ?? sourceRef);
-    console.log(`Compiled ${patch.source?.pageId ?? sourceRef} -> ${patch.id}`);
-    if (patch.compileMeta?.degraded === true) {
-      console.log(
-        `Warning: compile degraded (${String(patch.compileMeta.degradedReason ?? "unknown reason")}).`,
-      );
-    }
-    for (const change of patch.changes ?? []) {
-      const targetPage =
-        change.type === "create" ? change.newPageId : change.pageId;
-      console.log(`  - ${change.type} ${targetPage} (${change.relation})`);
+    const patch = await compileOneSource(vaultDir, config, sourceRef, options);
+    recordCompileSummary(summary, patch, options.dryRun === true);
+  }
+  if (options.allPending === true) {
+    printCompileSummary(summary);
+  }
+}
+
+async function compileOneSource(
+  vaultDir: string,
+  config: Config,
+  sourceRef: string,
+  options: CompileOptions,
+): Promise<PatchDocument> {
+  const { apiKey, apiKeyEnv } = configuredLlmApiKey(config.llm);
+  const patch = await buildCompilePatch(vaultDir, sourceRef, {
+    providerName: config.llm?.provider,
+    model: options.model ?? config.llm?.model,
+    apiKey,
+    apiKeyEnv,
+    baseUrl: config.llm?.base_url,
+  });
+  if (options.dryRun) {
+    console.log(
+      `Dry run ${patch.source?.pageId ?? sourceRef}: ${patch.changes?.length ?? 0} change${patch.changes?.length === 1 ? "" : "s"}.`,
+    );
+    return patch;
+  }
+  if (patchExists(vaultDir, patch.id)) {
+    throw new Error(`Patch already exists: ${patch.id}`);
+  }
+  const patchPath = patchPathFor(vaultDir, patch.id, "proposed");
+  mkdirSync(dirname(patchPath), { recursive: true });
+  writeFileSync(patchPath, stringifyYaml(patch));
+  clearCompileDisabled(vaultDir, patch.source?.pageId ?? sourceRef);
+  console.log(`Compiled ${patch.source?.pageId ?? sourceRef} -> ${patch.id}`);
+  if (patch.compileMeta?.degraded === true) {
+    console.log(
+      `Warning: compile degraded (${String(patch.compileMeta.degradedReason ?? "unknown reason")}).`,
+    );
+  }
+  for (const change of patch.changes ?? []) {
+    const targetPage =
+      change.type === "create" ? change.newPageId : change.pageId;
+    console.log(`  - ${change.type} ${targetPage} (${change.relation})`);
+  }
+  return patch;
+}
+
+function emptyCompileRunSummary(): CompileRunSummary {
+  return {
+    total: 0,
+    providerSuccess: 0,
+    degraded: 0,
+    dryRuns: 0,
+    byProvider: new Map(),
+    degradedReasons: new Map(),
+  };
+}
+
+function recordCompileSummary(
+  summary: CompileRunSummary,
+  patch: PatchDocument,
+  dryRun: boolean,
+): void {
+  summary.total += 1;
+  if (dryRun) {
+    summary.dryRuns += 1;
+  }
+  const provider = String(patch.compileMeta?.provider ?? "unknown");
+  incrementCount(summary.byProvider, provider);
+  if (patch.compileMeta?.degraded === true) {
+    summary.degraded += 1;
+    incrementCount(
+      summary.degradedReasons,
+      String(patch.compileMeta.degradedReason ?? "unknown reason"),
+    );
+    return;
+  }
+  if (provider !== "heuristic") {
+    summary.providerSuccess += 1;
+  }
+}
+
+function incrementCount(counts: Map<string, number>, key: string): void {
+  counts.set(key, (counts.get(key) ?? 0) + 1);
+}
+
+function printCompileSummary(summary: CompileRunSummary): void {
+  console.log("Compile summary:");
+  console.log(`  total:            ${summary.total}`);
+  console.log(`  provider success: ${summary.providerSuccess}`);
+  console.log(`  degraded:         ${summary.degraded}`);
+  if (summary.dryRuns > 0) {
+    console.log(`  dry runs:         ${summary.dryRuns}`);
+  }
+  console.log("By provider:");
+  for (const [provider, count] of sortedCountEntries(summary.byProvider)) {
+    console.log(`  ${provider}: ${count}`);
+  }
+  if (summary.degradedReasons.size > 0) {
+    console.log("Degraded reasons:");
+    for (const [reason, count] of sortedCountEntries(summary.degradedReasons)) {
+      console.log(`  ${reason}: ${count}`);
     }
   }
+}
+
+function sortedCountEntries(
+  counts: Map<string, number>,
+): Array<[string, number]> {
+  return [...counts.entries()].sort(
+    ([leftKey, leftCount], [rightKey, rightCount]) =>
+      rightCount - leftCount || leftKey.localeCompare(rightKey),
+  );
 }
 
 function compileStatusCommand(): void {

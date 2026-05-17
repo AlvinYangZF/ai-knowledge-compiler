@@ -961,6 +961,232 @@ describe("akb CLI", () => {
     }
   });
 
+  it("prints a compile summary with degraded reason counts after batch ingest", async () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "summary-source");
+    mkdirSync(source, { recursive: true });
+    writeFileSync(
+      join(source, "target.md"),
+      [
+        "---",
+        "id: page_sumtarget001",
+        "title: Summary GC Target",
+        "---",
+        "# Summary GC Target",
+        "",
+        "Garbage collection target page.",
+      ].join("\n"),
+    );
+    runCli(
+      ["ingest", join(source, "target.md"), "--no-commit", "--no-compile"],
+      vault,
+    );
+    writeFileSync(
+      join(source, "good.md"),
+      [
+        "---",
+        "id: page_sumsource001",
+        "title: Good GC Summary Source",
+        "---",
+        "# Good GC Summary Source",
+        "",
+        "Garbage collection provider success update.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(source, "bad.md"),
+      [
+        "---",
+        "id: page_sumsource002",
+        "title: Bad GC Summary Source",
+        "---",
+        "# Bad GC Summary Source",
+        "",
+        "Garbage collection degraded update.",
+      ].join("\n"),
+    );
+
+    const server = createServer((request, response) => {
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => {
+        body += chunk;
+      });
+      request.on("end", () => {
+        const payload = JSON.parse(body) as {
+          messages?: Array<{ content?: string }>;
+        };
+        const system = payload.messages?.[0]?.content ?? "";
+        const user = JSON.parse(payload.messages?.[1]?.content ?? "{}") as {
+          patchId?: string;
+          sourcePage?: { id?: string; title?: string };
+          units?: Array<{ id?: string }>;
+        };
+        const sourcePageId =
+          user.sourcePage?.id ??
+          user.units?.[0]?.id?.replace(/:su\d+$/, "") ??
+          "page_sumsource001";
+        let content: unknown;
+        if (system.includes("Segment the source")) {
+          content = {
+            units: [
+              {
+                id: `${sourcePageId}:su0`,
+                sourceChunkIds: [`${sourcePageId}:c0`],
+                text: "Garbage collection summary update.",
+                kind: "claim_cluster",
+              },
+            ],
+          };
+        } else if (system.includes("Classify the relation")) {
+          content =
+            sourcePageId === "page_sumsource002"
+              ? {
+                  relation: "related",
+                  confidence: 0.7,
+                  reasoning: "Intentionally invalid relation.",
+                }
+              : {
+                  relation: "extend",
+                  confidence: 0.82,
+                  reasoning: "Related garbage collection update.",
+                };
+        } else {
+          content = {
+            changes: [
+              {
+                type: "modify",
+                pageId: "page_sumtarget001",
+                operation: "append_section",
+                relation: "extend",
+                classifyConfidence: 0.82,
+                reasoning: "Merged summary source.",
+                content: [
+                  `## ${user.sourcePage?.title ?? "GC Update"} (compiled)`,
+                  "",
+                  `<!-- akb:derived source=${sourcePageId}:su0 method=extend patch=${user.patchId ?? `patch_${sourcePageId}`} promptHash="sha256:test" modelId="deepseek-v4-pro" compiledAt="2026-05-16T00:00:00.000Z" -->`,
+                  "Garbage collection summary update.",
+                ].join("\n"),
+                confidenceImpact: {
+                  kind: "source_added",
+                  sourceWeight: 0.8,
+                },
+              },
+            ],
+          };
+        }
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(
+          JSON.stringify({
+            model: "deepseek-v4-pro-routed",
+            choices: [{ message: { content: JSON.stringify(content) } }],
+          }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    const address = server.address() as AddressInfo;
+    try {
+      writeFileSync(
+        join(vault, ".akb", "config.yaml"),
+        [
+          'version: "0.0"',
+          "workspace:",
+          '  name: "vault"',
+          '  vault_dir: "."',
+          "index:",
+          '  engine: "sqlite-fts5"',
+          '  path: ".akb/index.db"',
+          "mcp:",
+          '  host: "127.0.0.1"',
+          "  port: 8765",
+          "llm:",
+          `  base_url: "http://127.0.0.1:${address.port}"`,
+          '  model: "deepseek-v4-pro"',
+          '  api_key_env: "AKB_TEST_DEEPSEEK_KEY"',
+          "",
+        ].join("\n"),
+      );
+
+      const output = await runCliWithEnvAsync(
+        [
+          "ingest",
+          source,
+          "--recursive",
+          "--force",
+          "--no-commit",
+          "--compile-concurrency",
+          "1",
+        ],
+        vault,
+        { AKB_TEST_DEEPSEEK_KEY: "test-key" },
+      );
+
+      expect(output).toContain("Compile summary:");
+      expect(output).toContain("  total:            3");
+      expect(output).toContain("  provider success: 2");
+      expect(output).toContain("  degraded:         1");
+      expect(output).toContain("By provider:");
+      expect(output).toContain("  deepseek: 2");
+      expect(output).toContain("  heuristic: 1");
+      expect(output).toContain("Degraded reasons:");
+      expect(output).toContain(
+        "DeepSeek classify returned invalid relation after repair",
+      );
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("prints a compile summary for all pending sources", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const first = join(dir, "pending-one.md");
+    const second = join(dir, "pending-two.md");
+    writeFileSync(
+      first,
+      [
+        "---",
+        "id: page_sumallpend01",
+        "title: Pending One",
+        "---",
+        "# Pending One",
+        "",
+        "Garbage collection pending source one.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      second,
+      [
+        "---",
+        "id: page_sumallpend02",
+        "title: Pending Two",
+        "---",
+        "# Pending Two",
+        "",
+        "Garbage collection pending source two.",
+      ].join("\n"),
+    );
+    runCli(["ingest", first, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", second, "--no-commit", "--no-compile"], vault);
+    rmSync(join(vault, ".akb", "compile-disabled.json"), { force: true });
+
+    const output = runCli(["compile", "--all-pending"], vault);
+
+    expect(output).toContain("Compile summary:");
+    expect(output).toContain("  total:            2");
+    expect(output).toContain("  provider success: 0");
+    expect(output).toContain("  degraded:         2");
+    expect(output).toContain("By provider:");
+    expect(output).toContain("  heuristic: 2");
+    expect(output).toContain("Degraded reasons:");
+    expect(output).toContain("llm.api_key_env not configured for deepseek: 2");
+  });
+
   it("skips hidden ingest entries by default and reports them", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);

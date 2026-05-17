@@ -227,7 +227,7 @@ node "$AKB" search "garbage collection" --hybrid --format json
 
 `ingest` 支持单个 Markdown 文件或目录。目录递归导入需要显式传 `--recursive`。默认会在导入后触发 `compile` 并为写入操作创建 git commit；首次批量导入建议加 `--no-compile --no-commit`，确认 `pages/` 和索引正常后再分批运行 compile。
 
-导入阶段会串行写入 Markdown 和更新 SQLite index，避免多个写入者同时改 vault。导入完成后的 compile 阶段可以用 `--compile-concurrency <n>` 做有限并发；每个 source 仍只生成 proposed patch，不会直接应用到页面。LLM compile provider 请求默认 120 秒超时，建议并发从 `2` 开始，避免过多并发触发 provider 限流或超时。
+导入阶段会串行写入 Markdown 和更新 SQLite index，避免多个写入者同时改 vault。导入完成后的 compile 阶段可以用 `--compile-concurrency <n>` 做有限并发；每个 source 仍只生成 proposed patch，不会直接应用到页面。批量 compile 结束后会打印 `Compile summary`，汇总 total、provider success、degraded、provider 分布和 degraded reason 计数。LLM compile provider 请求默认 120 秒超时，建议并发从 `2` 开始，避免过多并发触发 provider 限流或超时。
 
 `search` 默认使用 BM25，并返回带 `page_id + line_start + line_end` 的 citation。`--hybrid` 会叠加本地 sparse vector score，再交给 confidence-aware ranker 排序。默认会过滤 superseded 页面，历史页面可用 `--include-superseded` 查看。
 
@@ -295,6 +295,8 @@ node "$AKB" patch show patch_page_compile00002
 没有设置对应 API key 环境变量时，compile 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。配置 DeepSeek、OpenAI 或 Anthropic 后，compile 会跑 provider-backed pipeline，并记录 pinned `modelId`、`promptHashes` 和 `resolvedModelId`。
 
 Provider-backed compile 的单次 LLM 请求默认 120 秒超时。`classify` 的 relation 和 `synthesize` 的 patch changes 如果不符合本地 schema，`akb` 会把校验错误反馈给模型并自动重试一次；重试后仍无效、请求超时或 provider 不可用时，才会降级生成 heuristic patch，不阻塞 ingest。
+
+`compile --all-pending` 也会在末尾打印 `Compile summary`。这对排查大批量 LLM compile 很有用：如果 degraded 数量偏高，先看 `Degraded reasons` 里是 API key、timeout、classify relation 还是 synthesize patch schema 问题。
 
 应用或拒绝 patch：
 
