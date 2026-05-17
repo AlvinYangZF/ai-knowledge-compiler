@@ -54,6 +54,7 @@ interface IngestOptions {
   commit?: boolean;
   recursive?: boolean;
   compile?: boolean;
+  compileConcurrency?: number;
 }
 
 interface IndexOptions {
@@ -295,6 +296,12 @@ export async function run(argv = process.argv): Promise<void> {
     )
     .option("--compile", "compile imported pages into reviewable patches")
     .option("--no-compile", "skip compile after ingest")
+    .option(
+      "--compile-concurrency <n>",
+      "number of imported pages to compile in parallel",
+      parsePositiveInt,
+      1,
+    )
     .option("--no-commit", "skip git commit")
     .option("--recursive", "recursively ingest markdown files from directories")
     .option(
@@ -601,10 +608,33 @@ async function ingestCommand(
     `Ingested ${written.length} page${written.length === 1 ? "" : "s"}.`,
   );
   if (options.compile !== false) {
-    for (const path of written) {
-      await compileCommand({ source: path });
-    }
+    await compileImportedPages(written, options.compileConcurrency ?? 1);
   }
+}
+
+async function compileImportedPages(
+  sources: string[],
+  concurrency: number,
+): Promise<void> {
+  if (sources.length === 0) {
+    return;
+  }
+  const workerCount = Math.max(1, Math.min(concurrency, sources.length));
+  if (workerCount > 1) {
+    console.log(
+      `Compiling ${sources.length} imported page${sources.length === 1 ? "" : "s"} with concurrency ${workerCount}.`,
+    );
+  }
+  let nextIndex = 0;
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < sources.length) {
+        const source = sources[nextIndex];
+        nextIndex += 1;
+        await compileCommand({ source });
+      }
+    }),
+  );
 }
 
 async function indexCommand(options: IndexOptions): Promise<void> {
@@ -717,6 +747,51 @@ function rankedResultsForQuery(
   }
 }
 
+function rankedAskResultsForQuery(
+  vaultDir: string,
+  question: string,
+  options: AskOptions,
+): {
+  results: ReturnType<typeof rankSearchResults>;
+  query: string;
+  fallback: boolean;
+} {
+  const results = rankedResultsForQuery(vaultDir, question, options);
+  if (results.length > 0) {
+    return { results, query: question, fallback: false };
+  }
+  for (const fallbackQuery of askRetrievalFallbackQueries(question)) {
+    const fallbackResults = rankedResultsForQuery(
+      vaultDir,
+      fallbackQuery,
+      options,
+    );
+    if (fallbackResults.length > 0) {
+      return { results: fallbackResults, query: fallbackQuery, fallback: true };
+    }
+  }
+  return { results: [], query: question, fallback: false };
+}
+
+function askRetrievalFallbackQueries(question: string): string[] {
+  const seen = new Set<string>();
+  const tokens = [...question.matchAll(/[A-Za-z][A-Za-z0-9_+#-]*/g)]
+    .map((match) => match[0])
+    .filter((token) => token.length >= 2);
+  const acronymTokens = tokens.filter((token) => /[A-Z]/.test(token));
+  const otherTokens = tokens.filter((token) => !/[A-Z]/.test(token));
+  return [...acronymTokens, ...otherTokens]
+    .map((token) => token.trim())
+    .filter((token) => {
+      const key = token.toLowerCase();
+      if (seen.has(key) || token === question) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+}
+
 async function askCommand(
   question: string,
   options: AskOptions,
@@ -725,7 +800,8 @@ async function askCommand(
   assertVault(vaultDir);
   const start = performance.now();
   const config = readVaultConfig(vaultDir);
-  const results = rankedResultsForQuery(vaultDir, question, options);
+  const retrieval = rankedAskResultsForQuery(vaultDir, question, options);
+  const results = retrieval.results;
   const noEvidence = results.length === 0;
   const citations = results.map((result, index) => ({
     ref: index + 1,
@@ -758,6 +834,8 @@ async function askCommand(
     citations,
     no_evidence: noEvidence,
     answer_no_evidence: generated?.noAnswer === true,
+    retrieval_query: retrieval.query,
+    retrieval_fallback: retrieval.fallback,
     retrieval_mode: options.hybrid ? "hybrid" : "bm25",
     degraded: generated === undefined,
     degraded_reason: generated === undefined ? degradedReason : undefined,
@@ -769,15 +847,19 @@ async function askCommand(
     console.log(JSON.stringify(payload, null, 2));
     return;
   }
-  console.log(
-    noEvidence
-      ? "No evidence found."
-      : generated
-        ? "Generated answer:"
-        : "Extractive answer (degraded):",
-  );
+  if (retrieval.fallback) {
+    console.log(
+      `Retrieval fallback: used "${retrieval.query}" after no results for the original question.`,
+    );
+  }
+  console.log(askOutputHeading(noEvidence, generated));
+  if (noEvidence) {
+    console.log("LLM not called: no indexed evidence matched.");
+  }
   if (answer) {
     console.log(answer);
+  } else if (generated?.noAnswer === true) {
+    console.log("No answer from retrieved evidence.");
   }
   console.log("");
   for (const citation of citations) {
@@ -789,6 +871,22 @@ async function askCommand(
   if (payload.degraded_reason) {
     console.log(`Warning: ${payload.degraded_reason}.`);
   }
+}
+
+function askOutputHeading(
+  noEvidence: boolean,
+  generated: GeneratedAskAnswer | undefined,
+): string {
+  if (noEvidence) {
+    return "No evidence found.";
+  }
+  if (!generated) {
+    return "Extractive answer (degraded):";
+  }
+  const provider = `${generated.provider}, ${generated.model}`;
+  return generated.noAnswer === true
+    ? `Generated no-answer (${provider}):`
+    : `Generated answer (${provider}):`;
 }
 
 function extractiveAnswer(

@@ -309,6 +309,120 @@ describe("akb CLI", () => {
     }
   });
 
+  it("retries ask retrieval with acronym keywords before calling the LLM", async () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "architecture.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_askfallback1",
+        "title: Architecture",
+        "---",
+        "# Architecture",
+        "",
+        "The FTL coordinates logical to physical address mapping in the system architecture.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+
+    const requests: unknown[] = [];
+    const server = createServer((request, response) => {
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => {
+        body += chunk;
+      });
+      request.on("end", () => {
+        requests.push(JSON.parse(body));
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(
+          JSON.stringify({
+            model: "deepseek-v4-pro-routed",
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    answer:
+                      "FTL coordinates logical to physical address mapping in the system architecture. [1]",
+                    used_refs: [1],
+                  }),
+                },
+              },
+            ],
+          }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    const address = server.address() as AddressInfo;
+    try {
+      writeFileSync(
+        join(vault, ".akb", "config.yaml"),
+        [
+          'version: "0.0"',
+          "workspace:",
+          '  name: "vault"',
+          '  vault_dir: "."',
+          "index:",
+          '  engine: "sqlite-fts5"',
+          '  path: ".akb/index.db"',
+          "mcp:",
+          '  host: "127.0.0.1"',
+          "  port: 8765",
+          "llm:",
+          `  base_url: "http://127.0.0.1:${address.port}"`,
+          '  model: "deepseek-v4-pro"',
+          '  api_key_env: "AKB_TEST_DEEPSEEK_KEY"',
+          "",
+        ].join("\n"),
+      );
+
+      const payload = JSON.parse(
+        await runCliWithEnvAsync(
+          [
+            "ask",
+            "FTL 是什么？请根据知识库总结它在系统架构中的作用",
+            "--format",
+            "json",
+          ],
+          vault,
+          { AKB_TEST_DEEPSEEK_KEY: "test-key" },
+        ),
+      );
+
+      expect(payload.degraded).toBe(false);
+      expect(payload.no_evidence).toBe(false);
+      expect(payload.retrieval_query).toBe("FTL");
+      expect(payload.retrieval_fallback).toBe(true);
+      expect(payload.answer_provider).toBe("deepseek");
+      expect(payload.answer_model).toBe("deepseek-v4-pro-routed");
+      expect(payload.answer).toContain("FTL coordinates");
+      expect(payload.citations[0]).toMatchObject({
+        page_id: "page_askfallback1",
+      });
+      expect(requests).toHaveLength(1);
+
+      const text = await runCliWithEnvAsync(
+        ["ask", "FTL 是什么？请根据知识库总结它在系统架构中的作用"],
+        vault,
+        { AKB_TEST_DEEPSEEK_KEY: "test-key" },
+      );
+      expect(text).toContain(
+        'Retrieval fallback: used "FTL" after no results for the original question.',
+      );
+      expect(text).toContain(
+        "Generated answer (deepseek, deepseek-v4-pro-routed):",
+      );
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it("generates ask answers with configured Anthropic citations", async () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
@@ -604,6 +718,10 @@ describe("akb CLI", () => {
     expect(payload.no_evidence).toBe(true);
     expect(payload.citations).toEqual([]);
     expect(payload.degraded_reason).toContain("No indexed knowledge matched");
+
+    const text = runCli(["ask", "missing topic"], vault);
+    expect(text).toContain("No evidence found.");
+    expect(text).toContain("LLM not called: no indexed evidence matched.");
   });
 
   it("skips empty and non-UTF-8 markdown files during ingest", () => {
@@ -661,6 +779,186 @@ describe("akb CLI", () => {
     expect(output).toContain("Ingest [##########----------] 1/2 first.md");
     expect(output).toContain("Ingest [####################] 2/2 second.md");
     expect(output).toContain("Ingested 2 pages");
+  });
+
+  it("can compile ingested directory pages with bounded concurrency", async () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const target = join(dir, "target.md");
+    writeFileSync(
+      target,
+      [
+        "---",
+        "id: page_conctarget01",
+        "title: Garbage Collection",
+        "---",
+        "# Garbage Collection",
+        "",
+        "Garbage collection target page.",
+      ].join("\n"),
+    );
+    runCli(["ingest", target, "--no-commit", "--no-compile"], vault);
+
+    const source = join(dir, "source");
+    mkdirSync(source, { recursive: true });
+    writeFileSync(
+      join(source, "first.md"),
+      [
+        "---",
+        "id: page_concsource01",
+        "title: First GC Update",
+        "---",
+        "# First GC Update",
+        "",
+        "Garbage collection source one.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(source, "second.md"),
+      [
+        "---",
+        "id: page_concsource02",
+        "title: Second GC Update",
+        "---",
+        "# Second GC Update",
+        "",
+        "Garbage collection source two.",
+      ].join("\n"),
+    );
+
+    let activeRequests = 0;
+    let maxActiveRequests = 0;
+    const server = createServer((request, response) => {
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => {
+        body += chunk;
+      });
+      request.on("end", () => {
+        activeRequests += 1;
+        maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+        const payload = JSON.parse(body) as {
+          messages?: Array<{ content?: string }>;
+        };
+        const system = payload.messages?.[0]?.content ?? "";
+        const user = JSON.parse(payload.messages?.[1]?.content ?? "{}") as {
+          patchId?: string;
+          sourcePage?: { id?: string; title?: string };
+        };
+        const sourcePageId = user.sourcePage?.id ?? "page_concsource01";
+        let content: unknown;
+        if (system.includes("Segment the source")) {
+          content = {
+            units: [
+              {
+                id: `${sourcePageId}:su0`,
+                sourceChunkIds: [`${sourcePageId}:c0`],
+                text: "Garbage collection update.",
+                kind: "claim_cluster",
+              },
+            ],
+          };
+        } else if (system.includes("Classify the relation")) {
+          content = {
+            relation: "extend",
+            confidence: 0.82,
+            reasoning: "Related garbage collection update.",
+          };
+        } else {
+          content = {
+            changes: [
+              {
+                type: "modify",
+                pageId: "page_conctarget01",
+                operation: "append_section",
+                relation: "extend",
+                classifyConfidence: 0.82,
+                reasoning: "Merged concurrent source.",
+                content: [
+                  `## ${user.sourcePage?.title ?? "GC Update"} (compiled)`,
+                  "",
+                  `<!-- akb:derived source=${sourcePageId}:su0 method=extend patch=${user.patchId ?? `patch_${sourcePageId}`} promptHash="sha256:test" modelId="deepseek-v4-pro" compiledAt="2026-05-16T00:00:00.000Z" -->`,
+                  "Garbage collection update.",
+                ].join("\n"),
+                confidenceImpact: {
+                  kind: "source_added",
+                  sourceWeight: 0.8,
+                },
+              },
+            ],
+          };
+        }
+        setTimeout(() => {
+          response.writeHead(200, { "Content-Type": "application/json" });
+          response.end(
+            JSON.stringify({
+              model: "deepseek-v4-pro-routed",
+              choices: [{ message: { content: JSON.stringify(content) } }],
+            }),
+            () => {
+              activeRequests -= 1;
+            },
+          );
+        }, 40);
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    const address = server.address() as AddressInfo;
+    try {
+      writeFileSync(
+        join(vault, ".akb", "config.yaml"),
+        [
+          'version: "0.0"',
+          "workspace:",
+          '  name: "vault"',
+          '  vault_dir: "."',
+          "index:",
+          '  engine: "sqlite-fts5"',
+          '  path: ".akb/index.db"',
+          "mcp:",
+          '  host: "127.0.0.1"',
+          "  port: 8765",
+          "llm:",
+          `  base_url: "http://127.0.0.1:${address.port}"`,
+          '  model: "deepseek-v4-pro"',
+          '  api_key_env: "AKB_TEST_DEEPSEEK_KEY"',
+          "",
+        ].join("\n"),
+      );
+
+      const output = await runCliWithEnvAsync(
+        [
+          "ingest",
+          source,
+          "--recursive",
+          "--no-commit",
+          "--compile-concurrency",
+          "2",
+        ],
+        vault,
+        { AKB_TEST_DEEPSEEK_KEY: "test-key" },
+      );
+
+      expect(output).toContain(
+        "Compiling 2 imported pages with concurrency 2.",
+      );
+      expect(maxActiveRequests).toBeGreaterThan(1);
+      expect(
+        existsSync(
+          join(vault, ".akb", "patches", "patch_page_concsource01.yaml"),
+        ),
+      ).toBe(true);
+      expect(
+        existsSync(
+          join(vault, ".akb", "patches", "patch_page_concsource02.yaml"),
+        ),
+      ).toBe(true);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("skips hidden ingest entries by default and reports them", () => {

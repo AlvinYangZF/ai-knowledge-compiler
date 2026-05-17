@@ -219,12 +219,15 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 AKB=/path/to/ai-knowledge-compiler/apps/cli/dist/main.js
 
 node "$AKB" ingest /path/to/markdown-or-directory --recursive --no-compile --no-commit
+node "$AKB" ingest /path/to/markdown-or-directory --recursive --compile-concurrency 2 --no-commit
 node "$AKB" index --rebuild
 node "$AKB" search "garbage collection"
 node "$AKB" search "garbage collection" --hybrid --format json
 ```
 
 `ingest` 支持单个 Markdown 文件或目录。目录递归导入需要显式传 `--recursive`。默认会在导入后触发 `compile` 并为写入操作创建 git commit；首次批量导入建议加 `--no-compile --no-commit`，确认 `pages/` 和索引正常后再分批运行 compile。
+
+导入阶段会串行写入 Markdown 和更新 SQLite index，避免多个写入者同时改 vault。导入完成后的 compile 阶段可以用 `--compile-concurrency <n>` 做有限并发；每个 source 仍只生成 proposed patch，不会直接应用到页面。建议从 `2` 开始，避免过多并发触发 provider 限流或超时。
 
 `search` 默认使用 BM25，并返回带 `page_id + line_start + line_end` 的 citation。`--hybrid` 会叠加本地 sparse vector score，再交给 confidence-aware ranker 排序。默认会过滤 superseded 页面，历史页面可用 `--include-superseded` 查看。
 
@@ -238,6 +241,8 @@ node "$AKB" ask "wear leveling" --hybrid --format json
 ```
 
 未配置 LLM 时，`ask` 返回 extractive answer，并保留引用。配置 LLM 后会调用 `.akb/config.yaml` 中指定的 DeepSeek、OpenAI 或 Anthropic 生成答案；模型输出必须只引用检索返回的 refs，否则自动降级为 extractive answer。
+
+`ask` 先检索本地知识库，只有找到 evidence 后才调用 LLM。原始问题没有命中时，会自动用问题里的英文缩写或关键词重试检索，例如中文问题里的 `FTL`。人类可读输出会标明是否使用 retrieval fallback，以及成功生成时使用的 provider/model；如果没有任何 evidence，会明确显示 LLM 没有被调用。
 
 ### Confidence Ledger
 

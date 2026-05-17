@@ -161,6 +161,14 @@ node "$AKB" ingest /path/to/my-docs/architecture.md --no-compile --no-commit
 node "$AKB" ingest /path/to/my-docs --recursive --no-compile --no-commit
 ```
 
+如果你已经确认要在导入后立即生成 compile patch，可以限制并发数：
+
+```bash
+node "$AKB" ingest /path/to/my-docs --recursive --compile-concurrency 2 --no-commit
+```
+
+`ingest` 写入 Markdown 和更新索引的阶段仍然是串行的，避免多个写入者同时改 `pages/` 和 `.akb/index.db`。`--compile-concurrency` 只影响导入完成后的 compile 阶段，每个 source 生成独立的 proposed patch，不会自动应用 patch。建议从 `2` 开始，避免过多 LLM 并发触发限流或超时。
+
 如果目录里包含隐藏文件或隐藏文件夹，`ingest` 会在开始时先列出这些路径并询问是否导入；默认不导入。非交互环境中不会等待输入，也会按默认值跳过隐藏项。确认导入隐藏项后，目标路径会自动转成非隐藏路径，例如 `.hidden.md` 会写入为 `pages/hidden.md`，`.secret/child.md` 会写入为 `pages/secret/child.md`。
 
 如果你已经确认需要导入隐藏项，也可以直接使用：
@@ -184,6 +192,7 @@ Ingest [##------------------] 10/125 HLD_02_CONTROLLER_THREAD_EN.md
 - `--include-hidden`：导入隐藏文件和隐藏文件夹，并把写入 `pages/` 的路径转换为非隐藏路径
 - `--no-compile`：导入后不触发 compile。首次批量导入强烈建议使用
 - `--compile`：导入后立即对每个新页面生成 compile patch。只建议在文件数量少或你已经准备好 review patch 时使用
+- `--compile-concurrency <n>`：导入完成后并发 compile 的 source 数量。默认 `1`，建议从 `2` 开始
 - `--no-commit`：跳过自动 git commit，适合试跑和本地调试
 
 导入后检查页面：
@@ -260,6 +269,14 @@ node "$AKB" ask "deploy rollback" --hybrid --format json
 ```bash
 node "$AKB" ask "如何回滚生产部署？" --hybrid
 ```
+
+`ask` 不是自由聊天命令，它会先检索本地知识库，只有找到 evidence 后才调用 LLM。原始问题没有命中时，会自动从问题中提取英文缩写或关键词重试检索。例如中文问题里包含 `FTL`，但英文文档没有中文词时，`ask` 会先用原问题检索，失败后再用 `FTL` 检索。
+
+人类可读输出会显示：
+
+- 是否使用了 retrieval fallback
+- 成功生成时使用的 provider/model
+- 没有 evidence 时，明确提示 LLM 没有被调用
 
 API key 配置方式见第 3 节。不要把真实 key 写入配置文件或提交到远端。
 
