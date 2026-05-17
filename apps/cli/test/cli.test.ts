@@ -3635,6 +3635,163 @@ describe("akb CLI", () => {
     }
   });
 
+  it("records runbook execution success as runtime verification", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "runbook-exec.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_runbook00001",
+        "title: Executable Runbook",
+        "type: runbook",
+        "---",
+        "# Executable Runbook",
+        "",
+        "```bash",
+        "printf runbook-ok",
+        "```",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+
+    const output = runCli(
+      [
+        "runbook",
+        "exec",
+        "page_runbook00001",
+        "--now",
+        "2026-05-17T00:00:00.000Z",
+        "--no-commit",
+      ],
+      vault,
+    );
+
+    expect(output).toContain(
+      "Runbook page_runbook00001 succeeded with 1 step.",
+    );
+    const ledger = readFileSync(
+      join(vault, "pages", ".page_runbook00001.ledger.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(ledger.at(-1)).toMatchObject({
+      kind: "verified",
+      pageId: "page_runbook00001",
+      timestamp: "2026-05-17T00:00:00.000Z",
+      actorId: "runbook-exec",
+      verifierId: "runbook-exec",
+      reason: "runbook_exec: pages/runbook-exec.md (1 step)",
+    });
+  });
+
+  it("records runbook execution failure as runtime contradiction", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "runbook-fail.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_runbookfail1",
+        "title: Failing Runbook",
+        "type: runbook",
+        "---",
+        "# Failing Runbook",
+        "",
+        "```bash",
+        "exit 7",
+        "```",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+
+    const output = runCliFailure(
+      [
+        "runbook",
+        "exec",
+        "page_runbookfail1",
+        "--now",
+        "2026-05-17T00:00:00.000Z",
+        "--no-commit",
+      ],
+      vault,
+    );
+
+    expect(output).toContain("Runbook page_runbookfail1 failed at step 1.");
+    const ledger = readFileSync(
+      join(vault, "pages", ".page_runbookfail1.ledger.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(ledger.at(-1)).toMatchObject({
+      kind: "contradicted_by",
+      pageId: "page_runbookfail1",
+      timestamp: "2026-05-17T00:00:00.000Z",
+      actorId: "runbook-exec",
+      severity: "major",
+      reason: "runbook_exec_failed step 1: exit 7",
+    });
+  });
+
+  it("records linked test success as runtime verification", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "linked-test-page.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_testlink0001",
+        "title: Linked Test Page",
+        "---",
+        "# Linked Test Page",
+        "",
+        "Behavior covered by an external test.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+    writeFileSync(
+      join(vault, "linked.test.ts"),
+      "// @akb-page page_testlink0001\n",
+    );
+
+    const output = runCli(
+      [
+        "test",
+        "--link-pages",
+        "--command",
+        "true",
+        "--now",
+        "2026-05-17T00:00:00.000Z",
+        "--no-commit",
+      ],
+      vault,
+    );
+
+    expect(output).toContain("Linked test command passed for 1 page.");
+    const ledger = readFileSync(
+      join(vault, "pages", ".page_testlink0001.ledger.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(ledger.at(-1)).toMatchObject({
+      kind: "verified",
+      pageId: "page_testlink0001",
+      timestamp: "2026-05-17T00:00:00.000Z",
+      actorId: "test:integration",
+      verifierId: "test:integration",
+      reason: "test_integration_success: true",
+    });
+  });
+
   it("decay writes sparse checkpoints when confidence crosses a threshold", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);

@@ -241,6 +241,21 @@ interface WatchOptions {
   commit?: boolean;
 }
 
+interface RunbookExecOptions {
+  actorId?: string;
+  now?: string;
+  commit?: boolean;
+}
+
+interface LinkedTestOptions {
+  linkPages?: boolean;
+  command?: string;
+  actorId?: string;
+  evidence?: string;
+  now?: string;
+  commit?: boolean;
+}
+
 interface CompileOptions {
   source?: string;
   allPending?: boolean;
@@ -410,6 +425,23 @@ export async function run(argv = process.argv): Promise<void> {
     .option("--now <timestamp>", "clock timestamp for deterministic runs")
     .option("--no-commit", "skip git commit")
     .action(decayCommand);
+  const runbook = program.command("runbook");
+  runbook
+    .command("exec")
+    .argument("<page-id-or-path>")
+    .option("--actor-id <id>", "runtime actor id", "runbook-exec")
+    .option("--now <timestamp>", "clock timestamp for deterministic output")
+    .option("--no-commit", "skip git commit")
+    .action(runbookExecCommand);
+  program
+    .command("test")
+    .option("--link-pages", "link test result to @akb-page annotations")
+    .option("--command <command>", "test command to execute", "pnpm test")
+    .option("--actor-id <id>", "runtime actor id", "test:integration")
+    .option("--evidence <value>", "external evidence URL or id")
+    .option("--now <timestamp>", "clock timestamp for deterministic output")
+    .option("--no-commit", "skip git commit")
+    .action(linkedTestCommand);
   const webhook = program.command("webhook");
   webhook
     .command("ci-success")
@@ -2443,6 +2475,112 @@ async function decayCommand(options: DecayOptions): Promise<void> {
   }
   console.log(
     `Wrote ${written.size} decay checkpoint${written.size === 1 ? "" : "s"}.`,
+  );
+}
+
+async function runbookExecCommand(
+  pageIdOrPath: string,
+  options: RunbookExecOptions,
+): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const file = resolvePageFile(vaultDir, pageIdOrPath);
+  if (!file) {
+    throw new Error(`Page not found: ${pageIdOrPath}`);
+  }
+  const target = pageFromFile(vaultDir, file);
+  const steps = extractRunbookSteps(target.body);
+  if (steps.length === 0) {
+    throw new Error(`No executable runbook steps found for ${target.page.id}`);
+  }
+  const now = parseOptionalNow(options.now) ?? new Date();
+  const actorId = options.actorId ?? "runbook-exec";
+
+  for (const step of steps) {
+    const result = runShellCommand(step.command, vaultDir);
+    if (!result.ok) {
+      const written = writeRuntimeConfidenceEvents(vaultDir, [target], {
+        actorId,
+        evidence: result.summary,
+        signalKind: `runbook_exec_failed step ${step.index}`,
+        mode: "contradicted_by",
+        timestamp: now,
+      });
+      if (written.length > 0 && options.commit !== false) {
+        await commitFiles(vaultDir, written, "record runbook failure");
+      }
+      const message = `Runbook ${target.page.id} failed at step ${step.index}.`;
+      console.log(message);
+      throw new Error(message);
+    }
+  }
+
+  const evidence = `${target.page.path} (${steps.length} step${steps.length === 1 ? "" : "s"})`;
+  const written = writeRuntimeConfidenceEvents(vaultDir, [target], {
+    actorId,
+    evidence,
+    signalKind: "runbook_exec",
+    mode: "verified",
+    timestamp: now,
+  });
+  if (written.length > 0 && options.commit !== false) {
+    await commitFiles(vaultDir, written, "record runbook verification");
+  }
+  console.log(
+    `Runbook ${target.page.id} succeeded with ${steps.length} step${steps.length === 1 ? "" : "s"}.`,
+  );
+}
+
+async function linkedTestCommand(options: LinkedTestOptions): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  if (!options.linkPages) {
+    throw new Error("Use --link-pages to write linked test runtime signals");
+  }
+  const pageIds = linkedTestPageIds(vaultDir);
+  if (pageIds.length === 0) {
+    throw new Error("No @akb-page annotations found");
+  }
+  const targets = pageIds.map((pageId) => {
+    const file = resolvePageFile(vaultDir, pageId);
+    if (!file) {
+      throw new Error(`Linked test references unknown page ${pageId}`);
+    }
+    return pageFromFile(vaultDir, file);
+  });
+  const command = options.command ?? "pnpm test";
+  const actorId = options.actorId ?? "test:integration";
+  const now = parseOptionalNow(options.now) ?? new Date();
+  const evidence = options.evidence ?? command;
+  const result = runShellCommand(command, vaultDir);
+  if (!result.ok) {
+    const written = writeRuntimeConfidenceEvents(vaultDir, targets, {
+      actorId,
+      evidence: result.summary,
+      signalKind: "test_integration_failed",
+      mode: "contradicted_by",
+      timestamp: now,
+    });
+    if (written.length > 0 && options.commit !== false) {
+      await commitFiles(vaultDir, written, "record linked test failure");
+    }
+    const message = `Linked test command failed for ${targets.length} page${targets.length === 1 ? "" : "s"}.`;
+    console.log(message);
+    throw new Error(message);
+  }
+
+  const written = writeRuntimeConfidenceEvents(vaultDir, targets, {
+    actorId,
+    evidence,
+    signalKind: "test_integration_success",
+    mode: "verified",
+    timestamp: now,
+  });
+  if (written.length > 0 && options.commit !== false) {
+    await commitFiles(vaultDir, written, "record linked test verification");
+  }
+  console.log(
+    `Linked test command passed for ${targets.length} page${targets.length === 1 ? "" : "s"}.`,
   );
 }
 
@@ -4894,6 +5032,123 @@ function daysBetweenIso(timestamp: string, now: Date): number {
   return Math.max(0, (now.getTime() - time) / (24 * 60 * 60 * 1000));
 }
 
+function extractRunbookSteps(
+  body: string,
+): Array<{ index: number; language: string; command: string }> {
+  const steps: Array<{ index: number; language: string; command: string }> = [];
+  const lines = body.split(/\r?\n/);
+  let inFence = false;
+  let language = "";
+  let buffer: string[] = [];
+  for (const line of lines) {
+    const fence = line.match(/^```(\S*)\s*$/);
+    if (fence && !inFence) {
+      inFence = true;
+      language = fence[1]?.toLowerCase() ?? "";
+      buffer = [];
+      continue;
+    }
+    if (line.trim() === "```" && inFence) {
+      const command = buffer.join("\n").trim();
+      if (
+        command.length > 0 &&
+        ["", "bash", "sh", "shell", "zsh"].includes(language)
+      ) {
+        steps.push({ index: steps.length + 1, language, command });
+      }
+      inFence = false;
+      language = "";
+      buffer = [];
+      continue;
+    }
+    if (inFence) {
+      buffer.push(line);
+    }
+  }
+  return steps;
+}
+
+function runShellCommand(
+  command: string,
+  cwd: string,
+): { ok: true; summary: string } | { ok: false; summary: string } {
+  const shell = process.env.SHELL ?? "/bin/sh";
+  const summary = firstCommandLine(command);
+  try {
+    execFileSync(shell, ["-lc", command], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return { ok: true, summary };
+  } catch {
+    return { ok: false, summary };
+  }
+}
+
+function firstCommandLine(command: string): string {
+  return (
+    command
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0) ?? "command failed"
+  );
+}
+
+function linkedTestPageIds(vaultDir: string): PageId[] {
+  const pageIds = new Set<PageId>();
+  for (const file of linkedTestCandidateFiles(vaultDir)) {
+    const content = readUtf8File(file);
+    if (!content) {
+      continue;
+    }
+    for (const match of content.matchAll(/@akb-page\s+(page_[a-z0-9]{12})/g)) {
+      pageIds.add(PageIdSchema.parse(match[1]));
+    }
+  }
+  return [...pageIds].sort();
+}
+
+function linkedTestCandidateFiles(root: string): string[] {
+  const ignoredDirectories = new Set([
+    ".akb",
+    ".git",
+    "coverage",
+    "dist",
+    "node_modules",
+  ]);
+  const extensions = new Set([
+    ".cjs",
+    ".cts",
+    ".js",
+    ".jsx",
+    ".md",
+    ".mjs",
+    ".mts",
+    ".ts",
+    ".tsx",
+    ".yaml",
+    ".yml",
+  ]);
+  const files: string[] = [];
+  const visit = (dir: string) => {
+    for (const entry of readdirSync(dir)) {
+      if (ignoredDirectories.has(entry)) {
+        continue;
+      }
+      const path = join(dir, entry);
+      const stat = statSync(path);
+      if (stat.isDirectory()) {
+        visit(path);
+      } else if (stat.isFile() && extensions.has(extname(path))) {
+        files.push(path);
+      }
+    }
+  };
+  visit(root);
+  return files.sort();
+}
+
 type RuntimeSignalMode = "verified" | "contradicted_by";
 
 function runtimeSignalMode(kind: string): RuntimeSignalMode {
@@ -4920,9 +5175,10 @@ function writeRuntimeConfidenceEvents(
     evidence: string;
     signalKind: string;
     mode: RuntimeSignalMode;
+    timestamp?: Date;
   },
 ): string[] {
-  const timestamp = new Date().toISOString();
+  const timestamp = (opts.timestamp ?? new Date()).toISOString();
   const written: string[] = [];
   for (const target of targets) {
     const event =

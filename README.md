@@ -266,10 +266,14 @@ node "$AKB" decay --run --no-commit
 运行时信号可以通过 webhook/watch 写入 ledger：
 
 ```bash
+node "$AKB" runbook exec page_runbook00001 --no-commit
+node "$AKB" test --link-pages --command "pnpm test" --no-commit
 node "$AKB" webhook ci-success --changed-file pages/gc.md --evidence https://ci.example/run/123 --no-commit
 node "$AKB" webhook ci-failure --changed-file pages/gc.md --evidence https://ci.example/run/124 --no-commit
 node "$AKB" watch --once --no-commit
 ```
+
+`runbook exec` 会执行 runbook 页面里的 shell fenced code block。全部步骤成功时写 `verified`，某一步失败时写 `contradicted_by`。`test --link-pages` 会扫描 `@akb-page <page_id>` 标注，执行指定测试命令，并把测试结果写入对应页面 ledger。
 
 ### Supersede
 
@@ -398,7 +402,7 @@ pnpm demo
 
 已实现：
 
-- Confidence Ledger：JSONL ledger、score materialization、SQLite confidence projection、source weights、decay、verification、supersession、runtime CI signals、stale decision lint、按 `references` 反查文件 confidence
+- Confidence Ledger：JSONL ledger、score materialization、SQLite confidence projection、source weights、decay、verification、supersession、runtime CI signals、runbook/test 强验证、stale decision lint、按 `references` 反查文件 confidence
 - Confidence-aware retrieval：CLI/MCP search rerank、superseded filtering、hybrid retrieval
 - LLM Compile：DeepSeek / OpenAI / Anthropic-backed 5-stage pipeline、heuristic fallback、patch-as-proposal、apply/reject workflow、lineage、replay
 - `akb ask`：extractive fallback、provider-generated cited answer、bad citation guard、no-answer handling

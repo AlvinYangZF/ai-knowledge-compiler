@@ -411,7 +411,39 @@ node "$AKB" decay --run --no-commit
 node "$AKB" decay --run --now 2026-05-17T00:00:00.000Z --no-commit
 ```
 
-### 7.6 接收外部 CI/runtime 信号
+### 7.6 执行 runbook / linked tests 产生强 runtime 信号
+
+如果一个页面是可执行 runbook，可以把 shell 代码块作为真实验证来源：
+
+````markdown
+```bash
+pnpm test
+```
+````
+
+执行 runbook：
+
+```bash
+node "$AKB" runbook exec pages/deploy-runbook.md --no-commit
+```
+
+`runbook exec` 会依次执行页面中的 `bash` / `sh` / `shell` / `zsh` fenced code block。所有步骤成功时写入 `verified` 事件，actor id 默认为 `runbook-exec`；任一步骤失败时写入 `contradicted_by`，severity 为 `major`，并返回非 0。
+
+测试也可以显式链接到页面。在测试文件、Markdown 或 YAML 中加入：
+
+```ts
+// @akb-page page_deploy000001
+```
+
+然后运行：
+
+```bash
+node "$AKB" test --link-pages --command "pnpm test" --no-commit
+```
+
+命令会扫描 `@akb-page <page_id>` 标注，执行 `--command` 指定的测试命令。测试通过时给关联页面写 `verified`，失败时写 `contradicted_by`。没有显式 `@akb-page` 标注时会拒绝写 ledger，避免把“测试通过”误归因到无关页面。
+
+### 7.7 接收外部 CI/runtime 信号
 
 `webhook` 用来把外部系统的结果转成 ledger 事件。例如 CI 成功可以证明相关页面仍然有效，CI 失败可以说明相关页面可能已经被现实行为反驳。
 
@@ -683,7 +715,7 @@ must-hit pass rate:  5/5 (100%)
 - Obsidian 兼容的 Markdown / `[[wikilinks]]`
 - Confidence Ledger JSONL 事件流
 - confidence projection rebuild / recompute / show / file report
-- decay、verify、runtime webhook/watch 信号
+- decay、verify、runbook/test 强 runtime verification、runtime webhook/watch 信号
 - supersede 链和 `--unlink`
 - DeepSeek / OpenAI / Anthropic-backed `ask`
 - DeepSeek / OpenAI / Anthropic-backed compile pipeline
@@ -699,7 +731,6 @@ must-hit pass rate:  5/5 (100%)
 
 后续 demo 应该在对应能力实现后继续补充：
 
-- 强 runtime verification：`akb runbook exec` 和 `akb test --link-pages`
 - section-level confidence：按 Markdown header 维护更细粒度 confidence
 - code intelligence：从 codebase 反向生成设计文档、ADR 和上下文包
 - GraphRAG / relation graph projection
