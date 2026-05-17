@@ -2,7 +2,7 @@
 
 这份文档面向第一次使用 `akb` 的用户，目标是从零开始配置一个自己的知识库，并逐步启用检索、问答、confidence ledger、compile patch workflow 和 MCP 接入。
 
-`akb` 的核心约定是：Markdown 是事实源，`.akb/index.db`、confidence projection、runtime cache 等都是可以重建的投影。你需要提交到 git 的主要是 Markdown 页面和 ledger JSONL；不要提交 `.akb/index.db`、`.akb/lint/`、coverage、dist 等生成物。
+`akb` 的核心约定是：Markdown 是事实源，`.akb/index.db`、confidence projection、runtime cache 等都是可以重建的投影。你需要提交到 git 的主要是 Markdown 页面和 ledger JSONL；不要提交 `.akb/index.db`、`.akb/lint/`、`.akb/code-intel/`、coverage、dist 等生成物。
 
 ## 0. 准备环境
 
@@ -41,7 +41,7 @@ cd /tmp/my-akb-vault
 - `pages/`：你的 Markdown 知识页面
 - `.akb/config.yaml`：知识库配置
 - `.akb/eval/golden.yaml`：检索回归测试集
-- `.gitignore`：默认忽略 `.akb/index.db`、`.akb/lint/` 等生成物
+- `.gitignore`：默认忽略 `.akb/index.db`、`.akb/lint/`、`.akb/code-intel/` 等生成物
 - `.git/`：vault 自身是一个 git 仓库
 
 检查配置文件：
@@ -635,6 +635,22 @@ node "$AKB" web build --output .akb/web
 
 生成结果是 `.akb/web/index.html`。这个页面内嵌当前 vault 的页面列表、正文、confidence 状态、section report、patch 摘要、lineage 摘要、eval report 摘要和 relation graph。它是本地 review 产物，可以直接打开，不需要提交到 git。
 
+### 11.3 生成 code intelligence report
+
+如果你的知识库引用了代码文件，或者你想让 agent 先理解代码库的文件结构，可以生成浅层 code intelligence report：
+
+```bash
+node "$AKB" code scan src --output .akb/code-intel/report.json
+```
+
+这个命令会递归扫描 TypeScript / JavaScript 文件，并生成：
+
+- 文件列表
+- 每个文件的行数、import 数、export 数
+- 相对 import 关系图，例如 `src/index.ts -> src/format.ts`
+
+`code scan` 是确定性扫描，不调用 LLM，也不需要配置 API key。`.akb/code-intel/report.json` 是本地投影文件，可以交给 agent、人工 review，或作为后续 LLM 反向生成设计文档 / ADR 的输入；默认不需要提交到 git。
+
 ## 12. 生成 context pack 给 agent 使用
 
 当你要开启一个 coding agent session，或者想把某个问题相关的知识打包给外部工具时，可以生成 context pack：
@@ -788,6 +804,7 @@ must-hit pass rate:  5/5 (100%)
 - chunk lineage / reverse lineage
 - context pack
 - relation graph projection
+- code intelligence report
 - static Web UI snapshot
 - team quality gate
 - MCP stdio / HTTP server
@@ -797,7 +814,7 @@ must-hit pass rate:  5/5 (100%)
 
 后续 demo 应该在对应能力实现后继续补充：
 
-- code intelligence：从 codebase 反向生成设计文档、ADR 和上下文包
+- LLM-assisted code intelligence：基于 `code scan` report 反向生成设计文档、ADR 和上下文包
 - GraphRAG traversal
 - 团队协作工作流：patch reviewer 和多人 review 分派
 

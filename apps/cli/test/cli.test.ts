@@ -100,6 +100,9 @@ describe("akb CLI", () => {
     expect(readFileSync(join(vault, ".gitignore"), "utf8")).toContain(
       ".akb/lint/",
     );
+    expect(readFileSync(join(vault, ".gitignore"), "utf8")).toContain(
+      ".akb/code-intel/",
+    );
     expect(existsSync(join(vault, "pages", ".gitkeep"))).toBe(true);
   });
 
@@ -957,6 +960,66 @@ describe("akb CLI", () => {
     expect(text).toContain("out wiki_link -> page_graphgc00001");
     expect(text).toContain("out references -> file:src/ftl.ts");
     expect(text).toContain("out supersedes -> page_graphold0001");
+  });
+
+  it("scans a codebase into a code intelligence report", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    mkdirSync(join(vault, "src"), { recursive: true });
+    writeFileSync(
+      join(vault, "src", "index.ts"),
+      [
+        "import { formatAnswer } from './format';",
+        "export function answer(value: string) {",
+        "  return formatAnswer(value);",
+        "}",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(vault, "src", "format.ts"),
+      [
+        "export function formatAnswer(value: string) {",
+        "  return value.trim();",
+        "}",
+      ].join("\n"),
+    );
+
+    const output = runCli(
+      ["code", "scan", "src", "--output", ".akb/code-intel/report.json"],
+      vault,
+    );
+
+    expect(output).toContain(
+      "Wrote code intelligence .akb/code-intel/report.json with 2 files and 1 import.",
+    );
+    const report = JSON.parse(
+      readFileSync(join(vault, ".akb", "code-intel", "report.json"), "utf8"),
+    );
+    expect(report.schema_version).toBe("code-intel/0.1");
+    expect(report.root).toBe("src");
+    expect(report.files).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "src/index.ts",
+          line_count: 4,
+          import_count: 1,
+          export_count: 1,
+        }),
+        expect.objectContaining({
+          path: "src/format.ts",
+          line_count: 3,
+          import_count: 0,
+          export_count: 1,
+        }),
+      ]),
+    );
+    expect(report.imports).toEqual([
+      {
+        from: "src/index.ts",
+        to: "src/format.ts",
+        specifier: "./format",
+      },
+    ]);
   });
 
   it("builds a static web UI snapshot for the vault", () => {

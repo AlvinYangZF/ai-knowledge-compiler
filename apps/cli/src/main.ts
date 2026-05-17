@@ -80,6 +80,10 @@ interface GraphOptions {
   output?: string;
 }
 
+interface CodeScanOptions {
+  output?: string;
+}
+
 interface WebBuildOptions {
   output?: string;
 }
@@ -104,6 +108,20 @@ interface RelationGraphEdge {
   to: string;
   relation: "wiki_link" | "references" | "supersedes";
   evidence: string;
+}
+
+interface CodeIntelFile {
+  path: string;
+  extension: string;
+  line_count: number;
+  import_count: number;
+  export_count: number;
+}
+
+interface CodeIntelImport {
+  from: string;
+  to: string;
+  specifier: string;
 }
 
 interface AskCitation {
@@ -451,6 +469,12 @@ export async function run(argv = process.argv): Promise<void> {
     .argument("<page-id-or-path-or-file>")
     .option("--format <format>", "text or json", parseFormat, "text")
     .action(graphShowCommand);
+  const code = program.command("code");
+  code
+    .command("scan")
+    .argument("<path>")
+    .option("--output <path>", "write code intelligence JSON to a file")
+    .action(codeScanCommand);
   const web = program.command("web");
   web
     .command("build")
@@ -658,7 +682,16 @@ async function initCommand(name: string): Promise<void> {
   writeFileSync(join(vaultDir, "pages", ".gitkeep"), "");
   writeFileSync(
     join(vaultDir, ".gitignore"),
-    ".akb/index.db\n.akb/index.db-*\n.akb/lint/\n",
+    [
+      ".akb/index.db",
+      ".akb/index.db-*",
+      ".akb/code-intel/",
+      ".akb/context/",
+      ".akb/graph/",
+      ".akb/lint/",
+      ".akb/web/",
+      "",
+    ].join("\n"),
   );
   writeFileSync(
     join(vaultDir, "README.md"),
@@ -1291,6 +1324,184 @@ function resolveGraphNodeId(
     return fileNode;
   }
   return target;
+}
+
+async function codeScanCommand(
+  targetPath: string,
+  options: CodeScanOptions,
+): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const report = buildCodeIntelReport(vaultDir, targetPath);
+  if (options.output) {
+    const outputPath = resolve(vaultDir, options.output);
+    mkdirSync(dirname(outputPath), { recursive: true });
+    writeFileSync(outputPath, `${JSON.stringify(report, null, 2)}\n`);
+    const relativeOutput = toPosix(relative(vaultDir, outputPath));
+    console.log(
+      `Wrote code intelligence ${relativeOutput} with ${report.files.length} file${report.files.length === 1 ? "" : "s"} and ${report.imports.length} import${report.imports.length === 1 ? "" : "s"}.`,
+    );
+    return;
+  }
+  console.log(JSON.stringify(report, null, 2));
+}
+
+function buildCodeIntelReport(
+  vaultDir: string,
+  targetPath: string,
+): {
+  schema_version: "code-intel/0.1";
+  generated_at: string;
+  root: string;
+  files: CodeIntelFile[];
+  imports: CodeIntelImport[];
+} {
+  const rootPath = resolve(vaultDir, targetPath);
+  if (!existsSync(rootPath)) {
+    throw new Error(`Code path does not exist: ${targetPath}`);
+  }
+  const files = codeFiles(rootPath).sort((left, right) =>
+    toPosix(relative(vaultDir, left)).localeCompare(
+      toPosix(relative(vaultDir, right)),
+    ),
+  );
+  const knownFiles = new Set(files.map((file) => realpathSync(file)));
+  const fileReports: CodeIntelFile[] = [];
+  const imports: CodeIntelImport[] = [];
+  for (const file of files) {
+    const content = readUtf8File(file);
+    if (content === undefined) {
+      continue;
+    }
+    const extractedImports = extractCodeImportSpecifiers(content);
+    const filePath = toPosix(relative(vaultDir, file));
+    fileReports.push({
+      path: filePath,
+      extension: extname(file),
+      line_count: countLines(content),
+      import_count: extractedImports.length,
+      export_count: countCodeExports(content),
+    });
+    for (const specifier of extractedImports) {
+      const target = resolveRelativeCodeImport(file, specifier, knownFiles);
+      if (target) {
+        imports.push({
+          from: filePath,
+          to: toPosix(relative(vaultDir, target)),
+          specifier,
+        });
+      }
+    }
+  }
+  return {
+    schema_version: "code-intel/0.1",
+    generated_at: new Date().toISOString(),
+    root: toPosix(relative(vaultDir, rootPath)) || ".",
+    files: fileReports.sort((left, right) =>
+      left.path.localeCompare(right.path),
+    ),
+    imports: imports.sort((left, right) =>
+      `${left.from}:${left.specifier}:${left.to}`.localeCompare(
+        `${right.from}:${right.specifier}:${right.to}`,
+      ),
+    ),
+  };
+}
+
+const codeFileExtensions = new Set([
+  ".cjs",
+  ".cts",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".mts",
+  ".ts",
+  ".tsx",
+]);
+
+const ignoredCodeDirectories = new Set([
+  ".akb",
+  ".git",
+  "coverage",
+  "dist",
+  "node_modules",
+]);
+
+function codeFiles(path: string): string[] {
+  const stat = statSync(path);
+  if (stat.isFile()) {
+    return codeFileExtensions.has(extname(path)) ? [path] : [];
+  }
+  if (!stat.isDirectory()) {
+    return [];
+  }
+  const files: string[] = [];
+  for (const entry of readdirSync(path, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      if (!ignoredCodeDirectories.has(entry.name)) {
+        files.push(...codeFiles(join(path, entry.name)));
+      }
+    } else if (entry.isFile() && codeFileExtensions.has(extname(entry.name))) {
+      files.push(join(path, entry.name));
+    }
+  }
+  return files;
+}
+
+function extractCodeImportSpecifiers(content: string): string[] {
+  const specifiers: string[] = [];
+  const importPattern =
+    /\b(?:import|export)\s+(?:type\s+)?(?:[^'"]*?\s+from\s+)?["']([^"']+)["']/g;
+  for (const match of content.matchAll(importPattern)) {
+    if (match[1]) {
+      specifiers.push(match[1]);
+    }
+  }
+  const requirePattern = /\brequire\(\s*["']([^"']+)["']\s*\)/g;
+  for (const match of content.matchAll(requirePattern)) {
+    if (match[1]) {
+      specifiers.push(match[1]);
+    }
+  }
+  return specifiers;
+}
+
+function resolveRelativeCodeImport(
+  fromFile: string,
+  specifier: string,
+  knownFiles: Set<string>,
+): string | undefined {
+  if (!specifier.startsWith(".")) {
+    return undefined;
+  }
+  const base = resolve(dirname(fromFile), specifier);
+  const candidates = [
+    base,
+    ...[...codeFileExtensions].map((extension) => `${base}${extension}`),
+    ...[...codeFileExtensions].map((extension) =>
+      join(base, `index${extension}`),
+    ),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      const realpath = realpathSync(candidate);
+      if (knownFiles.has(realpath)) {
+        return candidate;
+      }
+    }
+  }
+  return undefined;
+}
+
+function countCodeExports(content: string): number {
+  return (content.match(/^\s*export\s+/gm) ?? []).length;
+}
+
+function countLines(content: string): number {
+  if (content.length === 0) {
+    return 0;
+  }
+  return content.split(/\r?\n/).length;
 }
 
 async function webBuildCommand(options: WebBuildOptions): Promise<void> {

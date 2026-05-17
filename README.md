@@ -49,7 +49,7 @@ Karpathy 在 2026 年 4 月提出的 [LLM Wiki 模式](https://gist.github.com/k
 | **Chunk Lineage**（derived chunk 可溯源 + replay） | ⚠️ 仅页级 / session 级 | ✅ **核心差异** |
 | **Runtime Verification**（CI / runbook 自动验证知识） | ❌ 无 | ✅ **核心差异** |
 | **内建 Eval 框架**（每个 PR 跑 golden set 回归） | ❌ 无 | ✅ **核心差异** |
-| **代码反向解析**（codebase → 设计文档） | ❌ 无（面向 research/PKM） | ✅ **核心差异（规划中）** |
+| **代码反向解析**（codebase → 设计文档） | ❌ 无（面向 research/PKM） | ✅ **核心差异**（浅层结构扫描已实现） |
 
 中期对标：**Karpathy LLM Wiki 模式的工程化实现**——同时具备 MCP 协议、git 原生、citation、confidence、code intel。这是目前还没人把所有零件拼齐的位置。
 
@@ -151,7 +151,7 @@ cd /tmp/akb-demo
 - `pages/`：canonical Markdown 页面
 - `.akb/config.yaml`：vault 配置
 - `.akb/eval/golden.yaml`：eval golden set
-- `.gitignore`：忽略 `.akb/index.db`、`.akb/lint/` 等投影/诊断输出
+- `.gitignore`：忽略 `.akb/index.db`、`.akb/lint/`、`.akb/code-intel/` 等投影/诊断输出
 - git 仓库
 
 最小配置如下：
@@ -348,6 +348,14 @@ node "$AKB" graph show page_gc0000000000
 
 Graph projection 从 Markdown 派生，不入 git；当前包含 `wiki_link`、`references` 和 `supersedes` 三类边。
 
+生成 code intelligence report：
+
+```bash
+node "$AKB" code scan src --output .akb/code-intel/report.json
+```
+
+`code scan` 会递归扫描 TypeScript / JavaScript 文件，忽略 `.akb`、`.git`、`node_modules`、`dist` 和 `coverage`，生成文件列表、行数、import/export 统计和相对 import 关系。这个 report 是确定性投影，不调用 LLM，也不需要提交；可以作为后续人工 review、agent context 或 LLM 反向生成设计文档 / ADR 的输入。
+
 生成静态 Web UI：
 
 ```bash
@@ -435,6 +443,7 @@ pnpm demo
 - `akb ask`：extractive fallback、provider-generated cited answer、bad citation guard、no-answer handling
 - Context pack：按查询生成带 citation、confidence、patch 和 lineage 摘要的 agent 上下文包
 - Relation graph projection：从 wikilink、frontmatter references 和 supersedes 派生 graph export/show
+- Code intelligence：`code scan` 生成代码文件摘要和相对 import graph
 - Team quality gate：`gate run` 串联 lint、changed-file confidence、compile degraded ratio 和可选 eval
 - v0.1 migration and projection rebuild commands
 
@@ -443,7 +452,7 @@ pnpm demo
 ### v0.2 及以后
 
 - Section-level confidence ledger events（当前 v0.1 已有按 header 的只读 report）
-- Code intelligence —— codebase 反向解析成设计文档 / ADR
+- LLM-assisted code intelligence —— 基于 `code scan` report 反向生成设计文档 / ADR
 - GraphRAG traversal、团队协作
 
 ---
