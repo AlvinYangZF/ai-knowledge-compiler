@@ -12,6 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import {
   buildHeuristicCompilePatch,
@@ -48,6 +49,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 interface IngestOptions {
   tag?: string[];
   force?: boolean;
+  includeHidden?: boolean;
   commit?: boolean;
   recursive?: boolean;
   compile?: boolean;
@@ -286,6 +288,10 @@ export async function run(argv = process.argv): Promise<void> {
     .argument("<path>")
     .option("--tag <tag>", "add a tag to imported pages", collect, [])
     .option("--force", "overwrite existing page file")
+    .option(
+      "--include-hidden",
+      "include hidden files and directories, importing them as non-hidden paths",
+    )
     .option("--compile", "compile imported pages into reviewable patches")
     .option("--no-compile", "skip compile after ingest")
     .option("--no-commit", "skip git commit")
@@ -504,17 +510,34 @@ async function ingestCommand(
   const vaultDir = process.cwd();
   assertVault(vaultDir);
   const source = resolve(vaultDir, inputPath);
-  const files = markdownFiles(source, options.recursive ?? true);
+  const recursive = options.recursive ?? true;
+  const hiddenEntries = hiddenEntriesForIngest(source, recursive);
+  const includeHidden = await shouldIncludeHiddenEntries(
+    hiddenEntries,
+    options.includeHidden === true,
+  );
+  const files = markdownFilesForIngest(source, recursive, includeHidden);
   const index = new SearchIndex({ dbPath: join(vaultDir, ".akb", "index.db") });
+  const existingPagePathsById = pagePathByIdMap(vaultDir);
   const written: string[] = [];
   const removed: string[] = [];
+  const sourceIsDirectory = statSync(source).isDirectory();
 
+  console.log(
+    `Found ${files.length} markdown file${files.length === 1 ? "" : "s"} to ingest.`,
+  );
   try {
-    for (const file of files) {
-      const relativeSource = statSync(source).isDirectory()
+    for (const [fileIndex, file] of files.entries()) {
+      const relativeSource = sourceIsDirectory
         ? relative(source, file)
         : basename(file);
-      const targetRelative = toPosix(join("pages", relativeSource));
+      console.log(
+        ingestProgressLine(fileIndex + 1, files.length, relativeSource),
+      );
+      const targetSource = includeHidden
+        ? nonHiddenRelativePath(relativeSource)
+        : relativeSource;
+      const targetRelative = toPosix(join("pages", targetSource));
       const target = join(vaultDir, targetRelative);
       if (existsSync(target) && !options.force) {
         throw new Error(
@@ -533,7 +556,7 @@ async function ingestCommand(
       );
       const imported = parseMarkdown(finalContent);
       const importedId = String(imported.frontmatter.id) as PageId;
-      const existingPath = findPagePathById(vaultDir, importedId);
+      const existingPath = existingPagePathsById.get(importedId);
       if (existingPath && resolve(existingPath) !== resolve(target)) {
         if (!options.force) {
           throw new Error(
@@ -542,6 +565,7 @@ async function ingestCommand(
         }
         rmSync(existingPath, { force: true });
         index.deletePage(importedId);
+        existingPagePathsById.delete(importedId);
         removed.push(toPosix(relative(vaultDir, existingPath)));
       }
       const replacedPageId = existsSync(target)
@@ -552,8 +576,10 @@ async function ingestCommand(
       const { page, body, bodyStartLine } = pageFromFile(vaultDir, target);
       if (replacedPageId && replacedPageId !== page.id) {
         index.deletePage(replacedPageId);
+        existingPagePathsById.delete(replacedPageId);
       }
       index.upsertPage(page, body, { bodyStartLine });
+      existingPagePathsById.set(page.id, target);
       written.push(targetRelative);
     }
   } finally {
@@ -3596,12 +3622,159 @@ function markdownFiles(path: string, recursive = true): string[] {
   return files.sort();
 }
 
+function markdownFilesForIngest(
+  path: string,
+  recursive: boolean,
+  includeHidden: boolean,
+): string[] {
+  if (!existsSync(path)) {
+    throw new Error(`Path does not exist: ${path}`);
+  }
+  if (!includeHidden && isHiddenName(basename(path))) {
+    return [];
+  }
+  const stat = statSync(path);
+  if (stat.isFile()) {
+    if (extname(path) !== ".md") {
+      console.warn(`Skipping non-markdown file: ${path}`);
+      return [];
+    }
+    return [path];
+  }
+  if (!stat.isDirectory()) {
+    return [];
+  }
+  const files: string[] = [];
+  for (const entry of readdirSync(path, { withFileTypes: true })) {
+    if (!includeHidden && isHiddenName(entry.name)) {
+      continue;
+    }
+    const next = join(path, entry.name);
+    if (entry.isDirectory()) {
+      if (recursive) {
+        files.push(...markdownFilesForIngest(next, recursive, includeHidden));
+      }
+    } else if (entry.isFile() && extname(entry.name) === ".md") {
+      files.push(next);
+    }
+  }
+  return files.sort();
+}
+
+function hiddenEntriesForIngest(path: string, recursive: boolean): string[] {
+  if (!existsSync(path)) {
+    throw new Error(`Path does not exist: ${path}`);
+  }
+  const stat = statSync(path);
+  if (stat.isFile()) {
+    return isHiddenName(basename(path)) ? [basename(path)] : [];
+  }
+  if (!stat.isDirectory()) {
+    return [];
+  }
+  const hiddenEntries = new Set<string>();
+  const visitDirectory = (directory: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const next = join(directory, entry.name);
+      if (isHiddenName(entry.name)) {
+        hiddenEntries.add(toPosix(relative(path, next)));
+        continue;
+      }
+      if (entry.isDirectory() && recursive) {
+        visitDirectory(next);
+      }
+    }
+  };
+  visitDirectory(path);
+  return [...hiddenEntries].sort();
+}
+
+async function shouldIncludeHiddenEntries(
+  hiddenEntries: string[],
+  includeHiddenOption: boolean,
+): Promise<boolean> {
+  if (hiddenEntries.length === 0) {
+    return includeHiddenOption;
+  }
+  console.log("Hidden files/directories found:");
+  for (const entry of hiddenEntries) {
+    console.log(`  - ${entry}`);
+  }
+  if (includeHiddenOption) {
+    console.log("Including hidden files/directories.");
+    return true;
+  }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.log("Skipping hidden files/directories by default.");
+    return false;
+  }
+  const readline = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  try {
+    const answer = await readline.question(
+      "Import hidden files/directories? [y/N] ",
+    );
+    const includeHidden = answer.trim().toLowerCase() === "y";
+    console.log(
+      includeHidden
+        ? "Including hidden files/directories."
+        : "Skipping hidden files/directories by default.",
+    );
+    return includeHidden;
+  } finally {
+    readline.close();
+  }
+}
+
+function nonHiddenRelativePath(path: string): string {
+  return toPosix(path)
+    .split("/")
+    .map((segment) => {
+      if (!isHiddenName(segment)) {
+        return segment;
+      }
+      return segment.replace(/^\.+/, "") || "hidden";
+    })
+    .join("/");
+}
+
+function isHiddenName(name: string): boolean {
+  return name.startsWith(".") && name !== "." && name !== "..";
+}
+
 function readUtf8File(path: string): string | undefined {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(path));
   } catch {
     return undefined;
   }
+}
+
+function ingestProgressLine(
+  current: number,
+  total: number,
+  sourcePath: string,
+): string {
+  const width = 20;
+  const filled =
+    total <= 0 ? width : Math.min(width, Math.round((current / total) * width));
+  const bar = `${"#".repeat(filled)}${"-".repeat(width - filled)}`;
+  return `Ingest [${bar}] ${current}/${total} ${toPosix(sourcePath)}`;
+}
+
+function pagePathByIdMap(vaultDir: string): Map<PageId, string> {
+  const paths = new Map<PageId, string>();
+  for (const file of markdownFiles(join(vaultDir, "pages"))) {
+    try {
+      const pageId = parseMarkdown(readFileSync(file, "utf8")).frontmatter.id;
+      if (typeof pageId === "string") {
+        paths.set(pageId as PageId, file);
+      }
+    } catch {}
+  }
+  return paths;
 }
 
 function findPagePathById(

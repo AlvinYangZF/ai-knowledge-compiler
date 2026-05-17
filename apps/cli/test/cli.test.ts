@@ -530,6 +530,86 @@ describe("akb CLI", () => {
     expect(existsSync(join(vault, "pages", "nested", "child.md"))).toBe(false);
   });
 
+  it("prints ingest progress with the total markdown file count", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "source");
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, "first.md"), "# First\n\nFirst note.");
+    writeFileSync(join(source, "second.md"), "# Second\n\nSecond note.");
+
+    const output = runCli(
+      ["ingest", source, "--recursive", "--no-compile", "--no-commit"],
+      vault,
+    );
+
+    expect(output).toContain("Found 2 markdown files to ingest.");
+    expect(output).toContain("Ingest [##########----------] 1/2 first.md");
+    expect(output).toContain("Ingest [####################] 2/2 second.md");
+    expect(output).toContain("Ingested 2 pages");
+  });
+
+  it("skips hidden ingest entries by default and reports them", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "source");
+    mkdirSync(join(source, ".secret"), { recursive: true });
+    writeFileSync(join(source, "visible.md"), "# Visible\n\nVisible note.");
+    writeFileSync(join(source, ".hidden.md"), "# Hidden\n\nHidden note.");
+    writeFileSync(
+      join(source, ".secret", "child.md"),
+      "# Secret Child\n\nSecret note.",
+    );
+
+    const output = runCli(
+      ["ingest", source, "--recursive", "--no-compile", "--no-commit"],
+      vault,
+    );
+
+    expect(output).toContain("Hidden files/directories found:");
+    expect(output).toContain("  - .hidden.md");
+    expect(output).toContain("  - .secret");
+    expect(output).toContain("Skipping hidden files/directories by default.");
+    expect(output).toContain("Found 1 markdown file to ingest.");
+    expect(existsSync(join(vault, "pages", "visible.md"))).toBe(true);
+    expect(existsSync(join(vault, "pages", ".hidden.md"))).toBe(false);
+    expect(existsSync(join(vault, "pages", "hidden.md"))).toBe(false);
+    expect(existsSync(join(vault, "pages", ".secret", "child.md"))).toBe(false);
+  });
+
+  it("can include hidden ingest entries as non-hidden target paths", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "source");
+    mkdirSync(join(source, ".secret"), { recursive: true });
+    writeFileSync(join(source, "visible.md"), "# Visible\n\nVisible note.");
+    writeFileSync(join(source, ".hidden.md"), "# Hidden\n\nHidden note.");
+    writeFileSync(
+      join(source, ".secret", "child.md"),
+      "# Secret Child\n\nSecret note.",
+    );
+
+    const output = runCli(
+      [
+        "ingest",
+        source,
+        "--recursive",
+        "--include-hidden",
+        "--no-compile",
+        "--no-commit",
+      ],
+      vault,
+    );
+
+    expect(output).toContain("Including hidden files/directories.");
+    expect(output).toContain("Found 3 markdown files to ingest.");
+    expect(existsSync(join(vault, "pages", "visible.md"))).toBe(true);
+    expect(existsSync(join(vault, "pages", "hidden.md"))).toBe(true);
+    expect(existsSync(join(vault, "pages", "secret", "child.md"))).toBe(true);
+    expect(existsSync(join(vault, "pages", ".hidden.md"))).toBe(false);
+    expect(existsSync(join(vault, "pages", ".secret", "child.md"))).toBe(false);
+  });
+
   it("rejects duplicate page ids unless force is used", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);

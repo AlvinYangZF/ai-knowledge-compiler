@@ -1,119 +1,217 @@
-# Demo
+# 中文 Demo：一步一步配置自己的 `akb` 知识库
 
-This demo exercises the implemented local `akb` loop through v0.1:
+这份文档面向第一次使用 `akb` 的用户，目标是从零开始配置一个自己的知识库，并逐步启用检索、问答、confidence ledger、compile patch workflow 和 MCP 接入。
+
+`akb` 的核心约定是：Markdown 是事实源，`.akb/index.db`、confidence projection、runtime cache 等都是可以重建的投影。你需要提交到 git 的主要是 Markdown 页面和 ledger JSONL；不要提交 `.akb/index.db`、`.akb/lint/`、coverage、dist 等生成物。
+
+## 0. 准备环境
+
+在项目根目录安装依赖并构建：
 
 ```bash
-pnpm demo
+cd /path/to/ai-knowledge-compiler
+pnpm install
+pnpm build
 ```
 
-`pnpm demo` runs `scripts/demo.sh`. The script builds the workspace, creates a temporary vault, ingests the sample Markdown pages, compiles pending sources into reviewable patches, rebuilds the SQLite FTS index, runs searches, and evaluates the sample golden set.
+为了后续命令更短，先设置 CLI 路径：
 
-The sample vault currently contains 15 Markdown pages and a 5-query golden set. A passing run ends with:
+```bash
+export AKB=/path/to/ai-knowledge-compiler/apps/cli/dist/main.js
+node "$AKB" --help
+```
+
+开发时也可以直接使用源码入口：
+
+```bash
+pnpm exec tsx apps/cli/src/main.ts --help
+```
+
+## 1. 创建自己的知识库
+
+选择一个目录作为你的知识库。下面以 `/tmp/my-akb-vault` 为例：
+
+```bash
+node "$AKB" init /tmp/my-akb-vault
+cd /tmp/my-akb-vault
+```
+
+初始化后会得到：
+
+- `pages/`：你的 Markdown 知识页面
+- `.akb/config.yaml`：知识库配置
+- `.akb/eval/golden.yaml`：检索回归测试集
+- `.gitignore`：默认忽略 `.akb/index.db`、`.akb/lint/` 等生成物
+- `.git/`：vault 自身是一个 git 仓库
+
+检查配置文件：
+
+```bash
+cat .akb/config.yaml
+```
+
+最小配置形态如下：
+
+```yaml
+version: "0.0"
+workspace:
+  name: "my-akb-vault"
+  vault_dir: "."
+index:
+  engine: "sqlite-fts5"
+  path: ".akb/index.db"
+mcp:
+  host: "127.0.0.1"
+  port: 8765
+```
+
+## 2. 准备你的 Markdown 文件
+
+把已有知识整理成 Markdown 文件。推荐每个主题一个文件，例如：
 
 ```text
-precision@5:  0.20
-precision@10: 0.10
-recall@5:     1.00
-recall@10:    1.00
-must-hit pass rate:  5/5 (100%)
+/path/to/my-docs/
+  architecture.md
+  deploy-runbook.md
+  incident-review.md
 ```
 
-The demo uses the no-secret path. If `DEEPSEEK_API_KEY` is not set, compile still runs and emits degraded heuristic patches with `compileMeta.degraded=true`.
+一个最小页面可以这样写：
 
-## Implemented Coverage
+```markdown
+---
+title: Deploy Runbook
+tags:
+  - deploy
+  - runbook
+---
 
-The automated demo covers these implemented capabilities:
+# Deploy Runbook
 
-- Workspace build through `pnpm -r build`
-- Vault creation through `akb init`
-- Markdown ingest from `examples/sample-vault/`
-- Pending-source compile into `.akb/patches/*.yaml`
-- Heuristic fallback when DeepSeek credentials are absent
-- SQLite FTS5 index rebuild
-- BM25 search with line-number citations
-- JSON search output
-- Eval harness against the sample golden set
+Production deploy requires a clean CI run and a verified rollback plan.
 
-Additional implemented capabilities are covered by automated tests and can be checked manually with the commands below:
+## Rollback
 
-- Hybrid search and confidence-aware rerank
-- `akb ask` extractive fallback and DeepSeek-generated cited answers
-- Confidence Ledger migration, projection rebuild, score recompute, decay, verification, and runtime signal ingestion
-- Supersession chains, including `--unlink`
-- Patch review workflow: `patch list`, `patch show`, `patch apply`, `patch reject`
-- Compile replay for heuristic and DeepSeek-backed patches
-- Chunk lineage and reverse lineage
-- MCP server over stdio and HTTP with `search_knowledge` and `get_page`
+Rollback uses the previous stable image tag.
+```
 
-## Manual Walkthrough
+如果你已经有 Obsidian vault，也可以直接导入其中的 Markdown。`akb` 会保留 `[[wikilinks]]`。
 
-After `pnpm build`, run commands manually with a local CLI path:
+## 3. 导入 Markdown
+
+重要：`ingest` 默认会在导入后继续执行 `compile`，为每个新页面生成 reviewable patch。首次批量导入自己的目录时，建议先加 `--no-compile`，只完成导入和索引，确认页面结构正常后再按需运行 compile。
+
+如果没有配置 `DEEPSEEK_API_KEY`，`compile` 不会调用大模型，而是走 degraded heuristic fallback；这不依赖 DeepSeek API key。但对大量 Markdown 文件来说，导入后逐页 compile 仍然可能很慢，因为每个 source 都要扫描 vault 里的候选页面。若已经配置了 DeepSeek key，则默认 compile 会对每个 source 调用 LLM，更应该避免在首次大目录导入时自动触发。
+
+导入单个文件：
 
 ```bash
-AKB=/path/to/ai-knowledge-compiler/apps/cli/dist/main.js
+node "$AKB" ingest /path/to/my-docs/architecture.md --no-compile --no-commit
+```
 
-node "$AKB" init /tmp/akb-demo
-cd /tmp/akb-demo
-node "$AKB" ingest /path/to/ai-knowledge-compiler/examples/sample-vault --recursive --no-commit
-node "$AKB" compile --all-pending
+导入整个目录：
+
+```bash
+node "$AKB" ingest /path/to/my-docs --recursive --no-compile --no-commit
+```
+
+如果目录里包含隐藏文件或隐藏文件夹，`ingest` 会在开始时先列出这些路径并询问是否导入；默认不导入。非交互环境中不会等待输入，也会按默认值跳过隐藏项。确认导入隐藏项后，目标路径会自动转成非隐藏路径，例如 `.hidden.md` 会写入为 `pages/hidden.md`，`.secret/child.md` 会写入为 `pages/secret/child.md`。
+
+如果你已经确认需要导入隐藏项，也可以直接使用：
+
+```bash
+node "$AKB" ingest /path/to/my-docs --recursive --include-hidden --no-compile --no-commit
+```
+
+导入开始后会先打印总数，并逐个显示进度：
+
+```text
+Found 125 markdown files to ingest.
+Ingest [##------------------] 10/125 HLD_02_CONTROLLER_THREAD_EN.md
+```
+
+常用选项：
+
+- `--recursive`：递归导入目录下的 Markdown
+- `--tag <tag>`：给导入页面追加 tag
+- `--force`：覆盖已有同名页面
+- `--include-hidden`：导入隐藏文件和隐藏文件夹，并把写入 `pages/` 的路径转换为非隐藏路径
+- `--no-compile`：导入后不触发 compile。首次批量导入强烈建议使用
+- `--compile`：导入后立即对每个新页面生成 compile patch。只建议在文件数量少或你已经准备好 review patch 时使用
+- `--no-commit`：跳过自动 git commit，适合试跑和本地调试
+
+导入后检查页面：
+
+```bash
+find pages -maxdepth 2 -type f -name "*.md" | sort
+git status --short
+```
+
+如果你已经执行了不带 `--no-compile` 的批量导入并感觉卡住，可以先中断命令，然后重新执行：
+
+```bash
+node "$AKB" ingest /path/to/my-docs --recursive --no-compile --no-commit
 node "$AKB" index --rebuild
-node "$AKB" search "garbage collection"
-node "$AKB" search "wear leveling" --hybrid --format json
-node "$AKB" eval --set .akb/eval/golden.yaml
 ```
 
-The generated vault is plain Markdown under `pages/`, with `[[wikilinks]]` preserved. Open `/tmp/akb-demo` as an Obsidian vault to inspect the pages manually.
-
-## Confidence Checks
-
-Initialize and inspect v0.1 confidence state:
+如果中断前已经打印了 `Ingested N pages.`，说明 Markdown 多半已经写入 `pages/`，只是后续 compile 阶段还在跑。这种情况下通常不需要重新 ingest，直接重建索引即可：
 
 ```bash
-node "$AKB" migrate to-v0.1 --no-commit
-node "$AKB" projection rebuild --confidence
-node "$AKB" confidence show page_gc0000000000
-node "$AKB" confidence recompute page_gc0000000000 --format json
-```
-
-Record verification and time-decay signals:
-
-```bash
-node "$AKB" verify page_gc0000000000 --by-agent codex --reason "manual demo review" --no-commit
-node "$AKB" decay --run --no-commit
-```
-
-Record runtime signals from external systems:
-
-```bash
-node "$AKB" webhook ci-success --changed-file pages/gc.md --evidence https://ci.example/run/123 --no-commit
-node "$AKB" webhook ci-failure --changed-file pages/gc.md --evidence https://ci.example/run/124 --no-commit
-node "$AKB" watch --once --no-commit
-```
-
-## Compile And Patch Checks
-
-Inspect pending patches:
-
-```bash
+node "$AKB" index --rebuild
 node "$AKB" compile status
-node "$AKB" patch list
-node "$AKB" patch show patch_page_gc0000000000
 ```
 
-Replay a patch:
+如果重新 ingest 时提示 `Target page already exists`，也说明页面已经导入过。不要急着加 `--force` 覆盖，先检查 `pages/` 里的文件是否符合预期。
+
+确认页面导入正常后，再用 `compile --source <page-id-or-path>` 或 `compile --all-pending` 分批生成 patch。
+
+## 4. 建立索引并搜索
+
+重建 SQLite FTS5 索引：
 
 ```bash
-node "$AKB" compile replay patch_page_gc0000000000
+node "$AKB" index --rebuild
 ```
 
-Choose one review outcome for a patch:
+执行基础搜索：
 
 ```bash
-node "$AKB" patch apply patch_page_gc0000000000 --reviewed --no-commit
-node "$AKB" patch reject patch_page_gc0000000000 --reason "demo rejection" --no-commit
+node "$AKB" search "deploy rollback"
 ```
 
-DeepSeek-backed compile can be checked by adding LLM config to `.akb/config.yaml` and exporting the configured secret:
+输出会包含：
+
+- `page_id`
+- Markdown 路径
+- 标题
+- snippet
+- `line_start` / `line_end` 行号 citation
+
+执行 hybrid search：
+
+```bash
+node "$AKB" search "deploy rollback" --hybrid
+node "$AKB" search "deploy rollback" --hybrid --format json
+```
+
+`--hybrid` 会结合 BM25、本地 sparse vector score 和 confidence-aware rerank。默认搜索会过滤 superseded 页面；如需查看历史页面：
+
+```bash
+node "$AKB" search "deploy rollback" --include-superseded
+```
+
+## 5. 用 `ask` 进行带引用问答
+
+没有配置 LLM 时，`ask` 会使用 extractive answer，也就是从检索结果中抽取可引用片段：
+
+```bash
+node "$AKB" ask "如何回滚生产部署？"
+node "$AKB" ask "deploy rollback" --hybrid --format json
+```
+
+配置 LLM 后，`ask` 会调用 DeepSeek 生成答案，并要求答案只能引用检索到的 refs。模型如果引用了不存在的 refs，会自动降级为 extractive answer。
+
+在 `.akb/config.yaml` 中加入：
 
 ```yaml
 llm:
@@ -123,44 +221,190 @@ llm:
   api_key_env: "DEEPSEEK_API_KEY"
 ```
 
+设置环境变量：
+
 ```bash
 export DEEPSEEK_API_KEY=...
-node "$AKB" compile --source page_gc0000000000
-node "$AKB" compile replay patch_page_gc0000000000
+node "$AKB" ask "如何回滚生产部署？" --hybrid
 ```
 
-DeepSeek-backed replay re-runs the provider pipeline and fails if replay degrades to heuristic output.
+secret 只放在环境变量中，不写入 `.akb/config.yaml`，也不要提交到 git。
 
-## Ask Checks
+## 6. 启用 Confidence Ledger
 
-Without LLM config, `ask` returns an extractive answer with citations:
+Confidence Ledger 是每个页面旁边的 append-only JSONL 事件流，用来记录来源、验证、衰减、矛盾、supersede 等事件。
+
+将现有 vault 迁移到 v0.1 ledger 形态：
 
 ```bash
-node "$AKB" ask "How does garbage collection relate to wear leveling?"
-node "$AKB" ask "wear leveling" --hybrid --format json
+node "$AKB" migrate to-v0.1 --no-commit
 ```
 
-With LLM config, `ask` calls DeepSeek and accepts only answers that cite available refs. Invalid citations degrade back to extractive output.
-
-## Supersede And Lineage Checks
-
-Create supersession links:
+重建 confidence projection：
 
 ```bash
-node "$AKB" supersede page_gc0000000000 --by page_watermark000 --reason "demo supersession" --no-commit
-node "$AKB" supersede page_gc0000000000 --by page_writeamp0000 --unlink --reason "replace superseder" --no-commit
+node "$AKB" projection rebuild --confidence
 ```
 
-Inspect lineage:
+查看某个页面的 confidence：
 
 ```bash
-node "$AKB" lineage page_gc0000000000
-node "$AKB" lineage --reverse page_gc0000000000
+node "$AKB" confidence show <page-id-or-path>
+node "$AKB" confidence recompute <page-id-or-path> --format json
 ```
 
-## MCP Checks
+记录人工或 agent 验证：
 
-Automated tests cover both in-memory MCP transport and streamable HTTP transport. After building, Claude Code can be pointed at a generated vault with:
+```bash
+node "$AKB" verify pages/deploy-runbook.md \
+  --by-agent codex \
+  --reason "manual demo review" \
+  --no-commit
+```
+
+写入时间衰减 checkpoint：
+
+```bash
+node "$AKB" decay --run --no-commit
+```
+
+接收外部 CI/runtime 信号：
+
+```bash
+node "$AKB" webhook ci-success \
+  --changed-file pages/deploy-runbook.md \
+  --evidence https://ci.example/run/123 \
+  --no-commit
+
+node "$AKB" webhook ci-failure \
+  --changed-file pages/deploy-runbook.md \
+  --evidence https://ci.example/run/124 \
+  --no-commit
+```
+
+如果你把 runtime signal 写成文件，也可以用 watch 处理：
+
+```bash
+node "$AKB" watch --once --no-commit
+```
+
+## 7. 使用 compile 生成可 review 的 patch
+
+`compile` 用来把新 source 对现有 vault 的影响编译成 patch。它不会直接修改 Markdown，而是生成 `.akb/patches/*.yaml`，等待 review。
+
+推荐工作流是：先用 `ingest --no-compile` 完成批量导入，再从少量重要页面开始手动 compile。这样可以避免第一次导入大目录时长时间等待，也能让 review 范围更小。
+
+查看待 compile 的 source：
+
+```bash
+node "$AKB" compile status
+```
+
+编译单个页面：
+
+```bash
+node "$AKB" compile --source <page-id-or-path>
+```
+
+编译所有 pending source：
+
+```bash
+node "$AKB" compile --all-pending
+```
+
+如果没有配置 `DEEPSEEK_API_KEY`，compile 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。配置 DeepSeek 后，compile 会跑 provider-backed pipeline，并记录 pinned `modelId`、`promptHashes` 和 `resolvedModelId`。
+
+查看 patch：
+
+```bash
+node "$AKB" patch list
+node "$AKB" patch show <patch-id>
+```
+
+回放 patch，确认结果可复现：
+
+```bash
+node "$AKB" compile replay <patch-id>
+```
+
+DeepSeek-backed patch replay 会重新调用 provider。如果 replay 降级为 heuristic，命令会失败，而不是静默通过。
+
+## 8. Review 并应用或拒绝 patch
+
+应用 patch：
+
+```bash
+node "$AKB" patch apply <patch-id> --no-commit
+```
+
+如果 patch 含低置信度或 close-review 变更，需要显式确认：
+
+```bash
+node "$AKB" patch apply <patch-id> --reviewed --no-commit
+```
+
+拒绝 patch：
+
+```bash
+node "$AKB" patch reject <patch-id> --reason "not relevant" --no-commit
+```
+
+应用 patch 后，`akb` 会更新 Markdown，并写入相关 confidence/lineage 信息。
+
+## 9. 管理 supersede 关系
+
+当一个页面被新页面取代时，使用 `supersede`：
+
+```bash
+node "$AKB" supersede <old-page-id-or-path> \
+  --by <new-page-id-or-path> \
+  --reason "new source supersedes old design" \
+  --no-commit
+```
+
+如果旧页面已经有 superseder，默认会拒绝覆盖。确认要替换链路时使用 `--unlink`：
+
+```bash
+node "$AKB" supersede <old-page-id-or-path> \
+  --by <newer-page-id-or-path> \
+  --unlink \
+  --reason "replace superseder" \
+  --no-commit
+```
+
+搜索默认过滤 superseded 页面；需要查看历史页面时加 `--include-superseded`。
+
+## 10. 查看 lineage
+
+查看某个页面或 chunk 的 lineage：
+
+```bash
+node "$AKB" lineage <page-or-chunk-id>
+```
+
+查看某个 source 影响了哪些页面：
+
+```bash
+node "$AKB" lineage --reverse <source-page-or-chunk-id>
+```
+
+lineage 用来解释 compile 生成内容来自哪些 source chunk，也用于 replay 和审计。
+
+## 11. 配置 MCP 给 coding agent 使用
+
+stdio transport：
+
+```bash
+node "$AKB" mcp serve
+```
+
+HTTP transport：
+
+```bash
+node "$AKB" mcp serve --transport http --port 8765
+```
+
+Claude Code MCP 配置示例：
 
 ```json
 {
@@ -168,36 +412,112 @@ Automated tests cover both in-memory MCP transport and streamable HTTP transport
     "akb": {
       "command": "node",
       "args": ["/path/to/ai-knowledge-compiler/apps/cli/dist/main.js", "mcp", "serve"],
-      "cwd": "/tmp/akb-demo"
+      "cwd": "/path/to/my-akb-vault"
     }
   }
 }
 ```
 
-The expected tools are `search_knowledge` and `get_page`.
+当前 MCP server 暴露：
 
-HTTP transport can be started with:
+- `search_knowledge`
+- `get_page`
 
-```bash
-node "$AKB" mcp serve --transport http --port 8765
+检索结果包含行号级 citation，并使用 confidence-aware rerank。
+
+## 12. 为自己的知识库添加 eval
+
+编辑 `.akb/eval/golden.yaml`，加入与你知识库相关的问题：
+
+```yaml
+version: "1.0"
+items:
+  - id: deploy_rollback
+    query: "how to rollback production deploy"
+    must_hit:
+      - page_deployrun001
 ```
 
-## Search Benchmark
-
-To run the search benchmark:
+运行 eval：
 
 ```bash
+node "$AKB" eval --set .akb/eval/golden.yaml
+```
+
+建议把 golden set 当作知识库质量门禁：每次大规模 ingest、compile 或修改 ranker 后都跑一次。
+
+## 13. 运行内置 sample demo
+
+如果你想先看完整样例：
+
+```bash
+cd /path/to/ai-knowledge-compiler
+pnpm demo
+```
+
+`pnpm demo` 会构建工作区、创建临时 vault、导入 `examples/sample-vault/`、编译 pending sources、重建 index、运行 search 和 eval。
+
+当前 sample vault 包含 15 个 Markdown 页面和 5 条 golden queries。通过时会看到类似：
+
+```text
+precision@5:  0.20
+precision@10: 0.10
+recall@5:     1.00
+recall@10:    1.00
+must-hit pass rate:  5/5 (100%)
+```
+
+## 14. 已实现功能总览
+
+当前已经实现并可用于本地知识库的能力：
+
+- `akb init / ingest / index / search / ask / eval`
+- SQLite FTS5 BM25 检索
+- hybrid search 和 confidence-aware rerank
+- 行号级 citation
+- Markdown vault + git-backed workflow
+- Obsidian 兼容的 Markdown / `[[wikilinks]]`
+- Confidence Ledger JSONL 事件流
+- confidence projection rebuild / recompute / show
+- decay、verify、runtime webhook/watch 信号
+- supersede 链和 `--unlink`
+- DeepSeek-backed `ask`
+- DeepSeek-backed compile pipeline
+- heuristic fallback
+- patch proposal / apply / reject
+- compile replay
+- chunk lineage / reverse lineage
+- MCP stdio / HTTP server
+- eval harness 和 search benchmark
+
+## 15. 即将补充的功能
+
+后续 demo 应该在对应能力实现后继续补充：
+
+- 强 runtime verification：`akb runbook exec` 和 `akb test --link-pages`
+- section-level confidence：按 Markdown header 维护更细粒度 confidence
+- code intelligence：从 codebase 反向生成设计文档、ADR 和上下文包
+- context pack：为 agent session 生成可审计上下文包
+- GraphRAG / relation graph projection
+- Web UI：查看页面、confidence 事件、patch、lineage 和 eval 结果
+- 团队协作工作流：patch reviewer、PR check、知识库质量门禁
+
+## 16. 常用验证命令
+
+在项目根目录运行：
+
+```bash
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm coverage
+pnpm demo
 pnpm bench
 ```
 
-## Next Demo Targets
+文档改动通常至少跑：
 
-The following capabilities are planned next and should be added to this demo once implemented:
-
-- Strong runtime verification: `akb runbook exec` and `akb test --link-pages`
-- Section-level confidence for header-scoped confidence materialization
-- Code intelligence: codebase-to-design-doc extraction and ADR/context generation
-- Context-pack generation for agent sessions
-- GraphRAG and relation graph projection
-- Web UI for inspecting pages, confidence events, patches, and lineage
-- Richer team workflows around patch review, PR checks, and reviewer assignment
+```bash
+pnpm lint
+pnpm typecheck
+```
