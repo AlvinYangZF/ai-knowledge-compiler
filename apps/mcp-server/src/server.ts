@@ -38,7 +38,7 @@ export function createAkbMcpServer(cwd = process.cwd()): McpServer {
     dbPath: getIndexPath(cwd),
     readonly: true,
   });
-  const server = new McpServer({ name: "akb", version: "0.0.0" });
+  const server = new McpServer({ name: "akb", version: "0.0.1" });
 
   server.registerTool(
     "search_knowledge",

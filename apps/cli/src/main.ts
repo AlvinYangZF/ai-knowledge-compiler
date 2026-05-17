@@ -281,7 +281,7 @@ export async function run(argv = process.argv): Promise<void> {
   program
     .name("akb")
     .description("AI-native knowledge compiler")
-    .version("0.0.0");
+    .version("0.0.1");
   program.command("init").argument("<name>").action(initCommand);
   program
     .command("ingest")
