@@ -343,6 +343,28 @@ node "$AKB" confidence recompute <page-id-or-path> --format json
 
 `confidence show` 更适合人工查看；`confidence recompute` 更适合审计和测试，因为它会明确返回 replay 了多少个事件。两者都不会写入文件。
 
+如果页面 frontmatter 里维护了 `references:`，可以从代码或文档路径反查相关知识页：
+
+```bash
+node "$AKB" confidence file src/deploy.ts
+```
+
+这个命令会扫描 `pages/*.md` 的 `references:`，列出引用 `src/deploy.ts` 的页面、当前 score，以及 `NEEDS_REVIEW`、`STALE`、`SUPERSEDED` 等状态。路径会按 vault 内相对路径匹配，所以 `src/deploy.ts` 和 `./src/deploy.ts` 会归一化为同一个引用。
+
+需要给脚本读取时使用 JSON，并用 `--events` 带上每个页面的 ledger 事件摘要：
+
+```bash
+node "$AKB" confidence file src/deploy.ts --format json --events
+```
+
+如果想一次生成所有文件引用的审计报告：
+
+```bash
+node "$AKB" confidence report --by-file
+```
+
+报告会写入 `.akb/lint/confidence-by-file.md`，按被引用文件分组列出相关页面、score、状态和最近事件时间。这个文件是 lint/report 产物，不需要提交到 git。
+
 ### 7.4 记录人工或 agent 验证
 
 记录人工或 agent 验证：
@@ -633,7 +655,7 @@ must-hit pass rate:  5/5 (100%)
 - Markdown vault + git-backed workflow
 - Obsidian 兼容的 Markdown / `[[wikilinks]]`
 - Confidence Ledger JSONL 事件流
-- confidence projection rebuild / recompute / show
+- confidence projection rebuild / recompute / show / file report
 - decay、verify、runtime webhook/watch 信号
 - supersede 链和 `--unlink`
 - DeepSeek / OpenAI / Anthropic-backed `ask`

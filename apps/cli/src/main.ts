@@ -159,6 +159,35 @@ interface ConfidenceShowOptions {
 
 interface ConfidenceRecomputeOptions extends ConfidenceShowOptions {}
 
+interface ConfidenceFileOptions extends ConfidenceShowOptions {
+  events?: boolean;
+}
+
+interface ConfidenceReportOptions {
+  byFile?: boolean;
+  now?: string;
+}
+
+interface ConfidenceFilePageSummary {
+  page_id: PageId;
+  path: string;
+  title: string;
+  score: number | null;
+  source_count: number;
+  contradiction_count: number;
+  superseded_by?: PageId;
+  last_verified_at?: string;
+  last_event_at?: string;
+  computed_at: string;
+  status: { flags: string[]; reasons: string[] };
+  events?: ReturnType<typeof summarizeConfidenceEvent>[];
+}
+
+interface ConfidenceByFileEntry {
+  file: string;
+  pages: ConfidenceFilePageSummary[];
+}
+
 interface ProjectionRebuildOptions {
   confidence?: boolean;
   all?: boolean;
@@ -426,6 +455,18 @@ export async function run(argv = process.argv): Promise<void> {
     .option("--format <format>", "text or json", parseFormat, "text")
     .option("--now <timestamp>", "clock timestamp for deterministic replay")
     .action(confidenceRecomputeCommand);
+  confidence
+    .command("file")
+    .argument("<path>")
+    .option("--format <format>", "text or json", parseFormat, "text")
+    .option("--events", "include confidence ledger events in JSON output")
+    .option("--now <timestamp>", "clock timestamp for deterministic output")
+    .action(confidenceFileCommand);
+  confidence
+    .command("report")
+    .option("--by-file", "write confidence report grouped by referenced file")
+    .option("--now <timestamp>", "clock timestamp for deterministic output")
+    .action(confidenceReportCommand);
   const projection = program.command("projection");
   projection
     .command("rebuild")
@@ -3082,6 +3123,205 @@ async function confidenceRecomputeCommand(
   console.log(`  contradictions: ${state.contradictionCount}`);
   console.log(`  last event: ${state.lastEventAt}`);
   console.log(`  computed at: ${state.computedAt}`);
+}
+
+async function confidenceFileCommand(
+  filePath: string,
+  options: ConfidenceFileOptions,
+): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  const now = parseOptionalNow(options.now);
+  const file = normalizeFileReference(vaultDir, filePath);
+  const pages = confidencePagesForFile(vaultDir, file, now, options.events);
+  const report = {
+    file,
+    page_count: pages.length,
+    pages,
+  };
+
+  if (options.format === "json") {
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+
+  printConfidenceFileReport(report);
+}
+
+async function confidenceReportCommand(
+  options: ConfidenceReportOptions,
+): Promise<void> {
+  const vaultDir = process.cwd();
+  assertVault(vaultDir);
+  if (!options.byFile) {
+    throw new Error("Choose a confidence report: --by-file");
+  }
+
+  const entries = confidenceByFileEntries(
+    vaultDir,
+    parseOptionalNow(options.now),
+  );
+  const lintDir = join(vaultDir, ".akb", "lint");
+  mkdirSync(lintDir, { recursive: true });
+  writeFileSync(
+    join(lintDir, "confidence-by-file.md"),
+    renderConfidenceByFileReport(entries),
+  );
+  console.log(
+    `Wrote .akb/lint/confidence-by-file.md for ${entries.length} file reference${entries.length === 1 ? "" : "s"}.`,
+  );
+}
+
+function confidenceByFileEntries(
+  vaultDir: string,
+  now: Date | undefined,
+): ConfidenceByFileEntry[] {
+  const pagesByReference = new Map<string, Page[]>();
+  for (const item of scanVaultPages(vaultDir)) {
+    for (const reference of pageFileReferences(item.page)) {
+      const pages = pagesByReference.get(reference) ?? [];
+      pages.push(item.page);
+      pagesByReference.set(reference, pages);
+    }
+  }
+  return [...pagesByReference.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([file, pages]) => ({
+      file,
+      pages: pages
+        .sort((left, right) => left.path.localeCompare(right.path))
+        .map((page) => confidenceSummaryForPage(vaultDir, page, now, false)),
+    }));
+}
+
+function confidencePagesForFile(
+  vaultDir: string,
+  file: string,
+  now: Date | undefined,
+  includeEvents = false,
+): ConfidenceFilePageSummary[] {
+  return scanVaultPages(vaultDir)
+    .map((item) => item.page)
+    .filter((page) => pageFileReferences(page).includes(file))
+    .sort((left, right) => left.path.localeCompare(right.path))
+    .map((page) =>
+      confidenceSummaryForPage(vaultDir, page, now, includeEvents),
+    );
+}
+
+function confidenceSummaryForPage(
+  vaultDir: string,
+  page: Page,
+  now: Date | undefined,
+  includeEvents: boolean,
+): ConfidenceFilePageSummary {
+  const events = loadConfidenceEvents(vaultDir, page.path, page.id);
+  if (events.length === 0) {
+    return {
+      page_id: page.id,
+      path: page.path,
+      title: page.title,
+      score: null,
+      source_count: 0,
+      contradiction_count: 0,
+      computed_at: (now ?? new Date()).toISOString(),
+      status: {
+        flags: ["MISSING_LEDGER"],
+        reasons: ["no confidence ledger found"],
+      },
+      ...(includeEvents ? { events: [] } : {}),
+    };
+  }
+  const state = computeConfidenceState(events, {
+    now,
+    pageType:
+      typeof page.frontmatter.type === "string"
+        ? page.frontmatter.type
+        : undefined,
+  });
+  const report = buildConfidenceReport(page, events, state);
+  return {
+    page_id: report.page_id,
+    path: report.path,
+    title: report.title,
+    score: report.score,
+    source_count: report.source_count,
+    contradiction_count: report.contradiction_count,
+    superseded_by: report.superseded_by,
+    last_verified_at: report.last_verified_at,
+    last_event_at: report.last_event_at,
+    computed_at: report.computed_at,
+    status: report.status,
+    ...(includeEvents ? { events: report.events } : {}),
+  };
+}
+
+function printConfidenceFileReport(report: {
+  file: string;
+  page_count: number;
+  pages: ConfidenceFilePageSummary[];
+}): void {
+  console.log(report.file);
+  console.log("");
+  if (report.page_count === 0) {
+    console.log("Referenced by 0 pages.");
+    return;
+  }
+  console.log(
+    `Referenced by ${report.page_count} page${report.page_count === 1 ? "" : "s"}:`,
+  );
+  for (const page of report.pages) {
+    console.log(`${page.page_id} ${page.path}`);
+    console.log(
+      `  score: ${page.score === null ? "missing" : page.score.toFixed(4)}`,
+    );
+    console.log(`  status: ${page.status.flags.join(", ") || "OK"}`);
+  }
+}
+
+function renderConfidenceByFileReport(
+  entries: ConfidenceByFileEntry[],
+): string {
+  const lines = ["# Confidence By File", ""];
+  if (entries.length === 0) {
+    lines.push("No file references found.", "");
+    return lines.join("\n");
+  }
+  for (const entry of entries) {
+    lines.push(`## ${entry.file}`, "");
+    lines.push("| Page | Path | Score | Status | Last Event |");
+    lines.push("| --- | --- | --- | --- | --- |");
+    for (const page of entry.pages) {
+      lines.push(
+        `| ${page.page_id} | ${page.path} | ${page.score === null ? "missing" : page.score.toFixed(4)} | ${page.status.flags.join(", ") || "OK"} | ${page.last_event_at ?? ""} |`,
+      );
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+function pageFileReferences(page: Page): string[] {
+  return [
+    ...new Set(
+      toStringArray(page.frontmatter.references).map((reference) =>
+        normalizeReferencePath(reference),
+      ),
+    ),
+  ].sort();
+}
+
+function normalizeFileReference(vaultDir: string, filePath: string): string {
+  const resolved = resolve(vaultDir, filePath);
+  const relativePath = toPosix(relative(vaultDir, resolved));
+  if (!relativePath.startsWith("../") && relativePath !== "..") {
+    return normalizeReferencePath(relativePath);
+  }
+  return normalizeReferencePath(filePath);
+}
+
+function normalizeReferencePath(value: string): string {
+  return toPosix(value.trim()).replace(/^\.\//, "");
 }
 
 function buildConfidenceReport(

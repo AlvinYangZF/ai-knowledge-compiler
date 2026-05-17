@@ -1952,6 +1952,173 @@ describe("akb CLI", () => {
     expect(text).toContain("status:");
   });
 
+  it("shows confidence for pages that reference a code file", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const runbook = join(dir, "deploy-runbook.md");
+    const checklist = join(dir, "deploy-checklist.md");
+    writeFileSync(
+      runbook,
+      [
+        "---",
+        "id: page_fileconf0001",
+        "title: Deploy Runbook",
+        "references:",
+        "  - src/deploy.ts",
+        "---",
+        "# Deploy Runbook",
+        "",
+        "Deploy runbook references deployment code.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      checklist,
+      [
+        "---",
+        "id: page_fileconf0002",
+        "title: Deploy Checklist",
+        "references:",
+        "  - src/deploy.ts",
+        "---",
+        "# Deploy Checklist",
+        "",
+        "Deploy checklist references deployment code.",
+      ].join("\n"),
+    );
+    runCli(["ingest", runbook, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", checklist, "--no-commit", "--no-compile"], vault);
+    writeFileSync(
+      join(vault, "pages", ".page_fileconf0001.ledger.jsonl"),
+      `${JSON.stringify({
+        id: "evt_fileconf0001",
+        kind: "source_added",
+        pageId: "page_fileconf0001",
+        timestamp: "2026-05-01T00:00:00.000Z",
+        actor: "system",
+        actorId: "akb-test",
+        sourceId: "src_fileconf0001",
+        sourceWeight: 1,
+      })}\n${JSON.stringify({
+        id: "evt_fileconf0002",
+        kind: "verified",
+        pageId: "page_fileconf0001",
+        timestamp: "2026-05-10T00:00:00.000Z",
+        actor: "agent",
+        actorId: "agent:codex",
+        verifierType: "agent",
+        verifierId: "agent:codex",
+        reason: "code file reviewed",
+      })}\n`,
+    );
+    writeFileSync(
+      join(vault, "pages", ".page_fileconf0002.ledger.jsonl"),
+      `${JSON.stringify({
+        id: "evt_fileconf0003",
+        kind: "source_added",
+        pageId: "page_fileconf0002",
+        timestamp: "2026-05-01T00:00:00.000Z",
+        actor: "system",
+        actorId: "akb-test",
+        sourceId: "src_fileconf0002",
+        sourceWeight: 0.1,
+      })}\n`,
+    );
+
+    const report = JSON.parse(
+      runCli(
+        [
+          "confidence",
+          "file",
+          "src/deploy.ts",
+          "--format",
+          "json",
+          "--events",
+          "--now",
+          "2026-05-17T00:00:00.000Z",
+        ],
+        vault,
+      ),
+    );
+
+    expect(report.file).toBe("src/deploy.ts");
+    expect(report.page_count).toBe(2);
+    const runbookReport = report.pages.find(
+      (page: { page_id: string }) => page.page_id === "page_fileconf0001",
+    );
+    const checklistReport = report.pages.find(
+      (page: { page_id: string }) => page.page_id === "page_fileconf0002",
+    );
+    expect(runbookReport.score).toBeGreaterThan(0.7);
+    expect(runbookReport.status.flags).toEqual([]);
+    expect(runbookReport.events).toHaveLength(2);
+    expect(checklistReport.score).toBeLessThan(0.5);
+    expect(checklistReport.status.flags).toContain("NEEDS_REVIEW");
+
+    const text = runCli(
+      [
+        "confidence",
+        "file",
+        "src/deploy.ts",
+        "--now",
+        "2026-05-17T00:00:00.000Z",
+      ],
+      vault,
+    );
+    expect(text).toContain("src/deploy.ts");
+    expect(text).toContain("Referenced by 2 pages");
+    expect(text).toContain("page_fileconf0001 pages/deploy-runbook.md");
+    expect(text).toContain("page_fileconf0002 pages/deploy-checklist.md");
+    expect(text).toContain("NEEDS_REVIEW");
+  });
+
+  it("writes a confidence-by-file report", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "file-report.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_filereport01",
+        "title: File Report",
+        "references:",
+        "  - src/deploy.ts",
+        "---",
+        "# File Report",
+        "",
+        "File report references deployment code.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+    writeFileSync(
+      join(vault, "pages", ".page_filereport01.ledger.jsonl"),
+      `${JSON.stringify({
+        id: "evt_filereport01",
+        kind: "source_added",
+        pageId: "page_filereport01",
+        timestamp: "2026-05-01T00:00:00.000Z",
+        actor: "system",
+        actorId: "akb-test",
+        sourceId: "src_filereport01",
+        sourceWeight: 0.8,
+      })}\n`,
+    );
+
+    const output = runCli(["confidence", "report", "--by-file"], vault);
+    const report = readFileSync(
+      join(vault, ".akb", "lint", "confidence-by-file.md"),
+      "utf8",
+    );
+
+    expect(output).toContain(
+      "Wrote .akb/lint/confidence-by-file.md for 1 file reference.",
+    );
+    expect(report).toContain("# Confidence By File");
+    expect(report).toContain("## src/deploy.ts");
+    expect(report).toContain("page_filereport01");
+    expect(report).toContain("pages/file-report.md");
+  });
+
   it("verifies a page by appending a confidence ledger event", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
