@@ -386,6 +386,175 @@ describe("compile pipeline", () => {
     );
   });
 
+  it("repairs invalid DeepSeek synthesize changes before falling back", async () => {
+    const calls: Array<{ responseSchemaName: string; messages: unknown[] }> =
+      [];
+    const provider = {
+      model: "deepseek-v4-pro",
+      completeJson: async (call: {
+        responseSchemaName: string;
+        messages: unknown[];
+      }) => {
+        calls.push(call);
+        if (call.responseSchemaName === "segment") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              units: [
+                {
+                  id: "su_repair",
+                  sourceChunkIds: ["page_compilepkg35:c0"],
+                  text: "GC repair update.",
+                  kind: "claim_cluster",
+                },
+              ],
+            }),
+          };
+        }
+        if (call.responseSchemaName === "classify") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              relation: "extend",
+              confidence: 0.8,
+              reasoning: "Related GC update.",
+            }),
+          };
+        }
+        if (
+          calls.filter((item) => item.responseSchemaName === "synthesize")
+            .length === 1
+        ) {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              changes: [
+                {
+                  type: "modify",
+                  pageId: "page_compilepkg36",
+                  operation: "append_section",
+                  relation: "extend",
+                  content: "## GC Repair\n\nGC repair update.",
+                },
+              ],
+            }),
+          };
+        }
+        return {
+          model: "deepseek-v4-pro",
+          content: JSON.stringify({
+            changes: [
+              {
+                type: "modify",
+                pageId: "page_compilepkg36",
+                operation: "append_section",
+                relation: "extend",
+                classifyConfidence: 0.8,
+                reasoning: "Repaired valid patch.",
+                content:
+                  '## GC Repair\n\n<!-- akb:derived source=su_repair method=extend patch=patch_page_compilepkg35 promptHash="sha256:llm" modelId="deepseek-v4-pro" compiledAt="2026-05-16T00:00:00.000Z" -->\nGC repair update.',
+              },
+            ],
+          }),
+        };
+      },
+    };
+
+    const patch = await buildCompilePatch({
+      source: page("page_compilepkg35", "GC Repair", "GC repair update."),
+      candidates: [
+        page("page_compilepkg36", "Garbage Collection", "GC target."),
+      ],
+      provider,
+      now: new Date("2026-05-16T00:00:00.000Z"),
+    });
+
+    expect(patch.compileMeta.provider).toBe("deepseek");
+    expect(patch.compileMeta.degraded).toBe(false);
+    expect(patch.compileMeta.llmCallCount).toBe(4);
+    expect(calls.map((call) => call.responseSchemaName)).toEqual([
+      "segment",
+      "classify",
+      "synthesize",
+      "synthesize",
+    ]);
+    expect(JSON.stringify(calls[3])).toContain("content missing akb:derived");
+    expect(JSON.stringify(calls[3])).toContain("Return corrected JSON only");
+    expect(patch.changes[0]).toMatchObject({
+      type: "modify",
+      pageId: "page_compilepkg36",
+      relation: "extend",
+    });
+  });
+
+  it("reports invalid DeepSeek synthesize changes after repair fails", async () => {
+    const provider = {
+      model: "deepseek-v4-pro",
+      completeJson: async (call: { responseSchemaName: string }) => {
+        if (call.responseSchemaName === "segment") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              units: [
+                {
+                  id: "su_badrepair",
+                  sourceChunkIds: ["page_compilepkg37:c0"],
+                  text: "GC bad repair update.",
+                  kind: "claim_cluster",
+                },
+              ],
+            }),
+          };
+        }
+        if (call.responseSchemaName === "classify") {
+          return {
+            model: "deepseek-v4-pro",
+            content: JSON.stringify({
+              relation: "extend",
+              confidence: 0.8,
+              reasoning: "Related GC update.",
+            }),
+          };
+        }
+        return {
+          model: "deepseek-v4-pro",
+          content: JSON.stringify({
+            changes: [
+              {
+                type: "modify",
+                pageId: "page_compilepkg38",
+                operation: "append_section",
+                relation: "extend",
+                content: "## GC Bad Repair\n\nGC bad repair update.",
+              },
+            ],
+          }),
+        };
+      },
+    };
+
+    const patch = await buildCompilePatch({
+      source: page(
+        "page_compilepkg37",
+        "GC Bad Repair",
+        "GC bad repair update.",
+      ),
+      candidates: [
+        page("page_compilepkg38", "Garbage Collection", "GC target."),
+      ],
+      provider,
+      now: new Date("2026-05-16T00:00:00.000Z"),
+    });
+
+    expect(patch.compileMeta.provider).toBe("heuristic");
+    expect(patch.compileMeta.degradedReason).toContain(
+      "DeepSeek synthesize returned invalid patch changes",
+    );
+    expect(patch.compileMeta.degradedReason).toContain(
+      "content missing akb:derived",
+    );
+  });
+
   it("falls back with sanitized errors when DeepSeek provider fails", async () => {
     const patch = await buildCompilePatch({
       source: page("page_compilepkg29", "GC Secret", "GC secret update."),

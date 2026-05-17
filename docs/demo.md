@@ -364,7 +364,7 @@ node "$AKB" compile --all-pending
 
 如果没有设置对应 API key 环境变量，compile 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。配置 DeepSeek、OpenAI 或 Anthropic 后，compile 会跑 provider-backed pipeline，并记录 pinned `modelId`、`promptHashes` 和 `resolvedModelId`。
 
-Provider-backed compile 的单次 LLM 请求默认 120 秒超时。超时、provider 不可用或模型输出不合法时，`akb` 会降级生成 heuristic patch，因此导入成功不依赖每一次 LLM compile 都成功。
+Provider-backed compile 的单次 LLM 请求默认 120 秒超时。模型生成的 patch changes 如果不符合本地 schema，`akb` 会把校验错误反馈给模型并自动重试一次；重试后仍无效、请求超时或 provider 不可用时，才会降级生成 heuristic patch。因此导入成功不依赖每一次 LLM compile 都成功。
 
 查看 patch：
 

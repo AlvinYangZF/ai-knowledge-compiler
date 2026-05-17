@@ -521,7 +521,7 @@ async function buildProviderCompilePatch(
       },
     ];
   } else {
-    const synthesizePrompt = JSON.stringify({
+    const synthesizePayload = {
       task: "synthesize",
       patchId,
       relation,
@@ -535,24 +535,73 @@ async function buildProviderCompilePatch(
             body: target.body,
           }
         : undefined,
-    });
+      requiredOutput: synthesizeOutputContract({
+        source: opts.source,
+        target,
+        patchId,
+        model,
+        timestamp,
+      }),
+    };
     const synthesizeResult = await provider.completeJson({
       responseSchemaName: "synthesize",
       messages: compileMessages(
-        "Generate patch changes for the classified relation. Return JSON only.",
-        synthesizePrompt,
+        [
+          "Generate valid akb compile patch changes for the classified relation.",
+          "Return JSON only with a top-level changes array.",
+          "Every modify/create content field must include an akb:derived HTML marker.",
+          "Do not return prose, markdown fences, summaries, or any key other than valid JSON patch data.",
+        ].join(" "),
+        JSON.stringify(synthesizePayload),
       ),
     });
     resolvedModel = synthesizeResult.model || resolvedModel;
-    const synthesize = parseJsonObject(synthesizeResult.content, "synthesize");
     llmCallCount += 1;
-    changes = parsePatchChanges(synthesize, {
+    const patchContext = {
       relation,
       classifyConfidence,
       reasoning,
       target,
       source: opts.source,
-    });
+    };
+    try {
+      changes = parseSynthesizePatchChanges(
+        synthesizeResult.content,
+        patchContext,
+      );
+    } catch (error) {
+      const validationError = errorMessage(error);
+      const repairResult = await provider.completeJson({
+        responseSchemaName: "synthesize",
+        messages: compileMessages(
+          [
+            "Repair invalid akb compile patch JSON.",
+            "Return corrected JSON only with a valid top-level changes array.",
+            "Every content field must include an akb:derived HTML marker.",
+            "Do not include prose, markdown fences, or explanations.",
+          ].join(" "),
+          JSON.stringify({
+            ...synthesizePayload,
+            previousInvalidResponse: synthesizeResult.content,
+            validationError,
+            repairInstruction:
+              "Return corrected JSON only. Preserve the classified relation and target page.",
+          }),
+        ),
+      });
+      resolvedModel = repairResult.model || resolvedModel;
+      llmCallCount += 1;
+      try {
+        changes = parseSynthesizePatchChanges(
+          repairResult.content,
+          patchContext,
+        );
+      } catch (repairError) {
+        throw new Error(
+          `${providerLabel(providerName)} synthesize returned invalid patch changes after repair: ${errorMessage(repairError)}`,
+        );
+      }
+    }
   }
 
   const promptHashes = {
@@ -934,167 +983,253 @@ function parseConfidence(value: unknown): number {
     : 0.5;
 }
 
+interface PatchChangesContext {
+  relation: CompileRelation;
+  classifyConfidence: number;
+  reasoning: string;
+  target?: CompilePageInput;
+  source: CompilePageInput;
+}
+
+function parseSynthesizePatchChanges(
+  content: string,
+  context: PatchChangesContext,
+): CompilePatchChange[] {
+  const synthesize = parseJsonObject(content, "synthesize");
+  return parsePatchChanges(synthesize, context);
+}
+
 function parsePatchChanges(
   payload: Record<string, unknown>,
-  context: {
-    relation: CompileRelation;
-    classifyConfidence: number;
-    reasoning: string;
-    target?: CompilePageInput;
-    source: CompilePageInput;
-  },
+  context: PatchChangesContext,
 ): CompilePatchChange[] {
   const rawChanges = Array.isArray(payload.changes) ? payload.changes : [];
-  const changes = rawChanges.flatMap((change): CompilePatchChange[] => {
-    if (!isRecord(change) || typeof change.type !== "string") {
-      return [];
-    }
-    if (change.type === "modify") {
-      if (
-        change.operation !== "append_section" &&
-        change.operation !== "replace_section" &&
-        change.operation !== "insert_after_section"
-      ) {
+  const rejectionReasons: string[] = [];
+  const changes = rawChanges.flatMap(
+    (change, changeIndex): CompilePatchChange[] => {
+      const reject = (reason: string): [] => {
+        rejectionReasons.push(`changes[${changeIndex}]: ${reason}`);
         return [];
+      };
+      if (!isRecord(change) || typeof change.type !== "string") {
+        return reject("change must be an object with a type");
       }
-      const pageId =
-        context.target?.page.id ??
-        (typeof change.pageId === "string" ? change.pageId : undefined);
-      const targetSection =
-        change.operation === "replace_section" &&
-        typeof change.targetSection === "string" &&
-        change.targetSection.trim().length > 0
-          ? change.targetSection
-          : change.operation === "insert_after_section" &&
-              typeof change.targetSection === "string" &&
-              change.targetSection.trim().length > 0
+      if (change.type === "modify") {
+        if (
+          change.operation !== "append_section" &&
+          change.operation !== "replace_section" &&
+          change.operation !== "insert_after_section"
+        ) {
+          return reject("modify operation is unsupported");
+        }
+        const pageId =
+          context.target?.page.id ??
+          (typeof change.pageId === "string" ? change.pageId : undefined);
+        const targetSection =
+          change.operation === "replace_section" &&
+          typeof change.targetSection === "string" &&
+          change.targetSection.trim().length > 0
             ? change.targetSection
-            : undefined;
-      const content = typeof change.content === "string" ? change.content : "";
-      if (
-        !pageId ||
-        !isLineageMarkedContent(content) ||
-        ((change.operation === "replace_section" ||
-          change.operation === "insert_after_section") &&
-          !targetSection)
-      ) {
-        return [];
+            : change.operation === "insert_after_section" &&
+                typeof change.targetSection === "string" &&
+                change.targetSection.trim().length > 0
+              ? change.targetSection
+              : undefined;
+        const content =
+          typeof change.content === "string" ? change.content : "";
+        if (!pageId) {
+          return reject("modify change is missing pageId");
+        }
+        if (!isLineageMarkedContent(content)) {
+          return reject("modify content missing akb:derived marker");
+        }
+        if (
+          (change.operation === "replace_section" ||
+            change.operation === "insert_after_section") &&
+          !targetSection
+        ) {
+          return reject("section operation missing targetSection");
+        }
+        const classifyConfidence =
+          typeof change.classifyConfidence === "number"
+            ? Math.min(
+                parseConfidence(change.classifyConfidence),
+                context.classifyConfidence,
+              )
+            : context.classifyConfidence;
+        return [
+          {
+            type: "modify",
+            pageId,
+            operation:
+              change.operation === "replace_section"
+                ? "replace_section"
+                : change.operation === "insert_after_section"
+                  ? "insert_after_section"
+                  : "append_section",
+            targetSection,
+            relation:
+              change.relation === "merge" ||
+              change.relation === "contradict" ||
+              change.relation === "extend"
+                ? change.relation
+                : context.relation === "merge" ||
+                    context.relation === "contradict" ||
+                    context.relation === "extend"
+                  ? context.relation
+                  : "extend",
+            classifyConfidence,
+            reasoning:
+              typeof change.reasoning === "string"
+                ? change.reasoning
+                : context.reasoning,
+            needsCloseReview:
+              change.needsCloseReview === true || classifyConfidence < 0.5
+                ? true
+                : undefined,
+            content,
+            confidenceImpact: isRecord(change.confidenceImpact)
+              ? change.confidenceImpact
+              : {
+                  kind:
+                    context.relation === "contradict"
+                      ? "contradicted_by"
+                      : "source_added",
+                  sourceWeight: 0.8,
+                },
+          },
+        ];
       }
-      const classifyConfidence =
-        typeof change.classifyConfidence === "number"
-          ? Math.min(
-              parseConfidence(change.classifyConfidence),
-              context.classifyConfidence,
-            )
-          : context.classifyConfidence;
-      return [
-        {
-          type: "modify",
-          pageId,
-          operation:
-            change.operation === "replace_section"
-              ? "replace_section"
-              : change.operation === "insert_after_section"
-                ? "insert_after_section"
-                : "append_section",
-          targetSection,
-          relation:
-            change.relation === "merge" ||
-            change.relation === "contradict" ||
-            change.relation === "extend"
-              ? change.relation
-              : context.relation === "merge" ||
-                  context.relation === "contradict" ||
-                  context.relation === "extend"
-                ? context.relation
-                : "extend",
-          classifyConfidence,
-          reasoning:
-            typeof change.reasoning === "string"
-              ? change.reasoning
-              : context.reasoning,
-          needsCloseReview:
-            change.needsCloseReview === true || classifyConfidence < 0.5
-              ? true
-              : undefined,
-          content,
-          confidenceImpact: isRecord(change.confidenceImpact)
-            ? change.confidenceImpact
-            : {
-                kind:
-                  context.relation === "contradict"
-                    ? "contradicted_by"
-                    : "source_added",
-                sourceWeight: 0.8,
-              },
-        },
-      ];
-    }
-    if (change.type === "create") {
-      const newPageId =
-        typeof change.newPageId === "string"
-          ? change.newPageId
-          : stablePageId(`${context.source.page.id}:new`);
-      const content = typeof change.content === "string" ? change.content : "";
-      const relation = change.relation === "supersede" ? "supersede" : "new";
-      const supersedes =
-        typeof change.supersedes === "string" ? change.supersedes : undefined;
-      const confidenceImpact = isRecord(change.confidenceImpact)
-        ? change.confidenceImpact
-        : relation === "supersede" && context.target
-          ? {
-              kind: "supersedes",
-              supersededPageId: context.target.page.id,
-            }
-          : { kind: "source_added", sourceWeight: 0.8 };
-      if (
-        !isValidCompilePageId(newPageId) ||
-        !isLineageMarkedContent(content) ||
-        !isSafeCompileCreatePath(change.path) ||
-        (relation === "supersede" &&
+      if (change.type === "create") {
+        const newPageId =
+          typeof change.newPageId === "string"
+            ? change.newPageId
+            : stablePageId(`${context.source.page.id}:new`);
+        const content =
+          typeof change.content === "string" ? change.content : "";
+        const relation = change.relation === "supersede" ? "supersede" : "new";
+        const supersedes =
+          typeof change.supersedes === "string" ? change.supersedes : undefined;
+        const confidenceImpact = isRecord(change.confidenceImpact)
+          ? change.confidenceImpact
+          : relation === "supersede" && context.target
+            ? {
+                kind: "supersedes",
+                supersededPageId: context.target.page.id,
+              }
+            : { kind: "source_added", sourceWeight: 0.8 };
+        if (!isValidCompilePageId(newPageId)) {
+          return reject("create newPageId is invalid");
+        }
+        if (!isLineageMarkedContent(content)) {
+          return reject("create content missing akb:derived marker");
+        }
+        if (!isSafeCompileCreatePath(change.path)) {
+          return reject("create path must be a safe pages/*.md path");
+        }
+        if (
+          relation === "supersede" &&
           (!isValidCompilePageId(supersedes) ||
             confidenceImpact.kind !== "supersedes" ||
-            confidenceImpact.supersededPageId !== supersedes))
-      ) {
-        return [];
+            confidenceImpact.supersededPageId !== supersedes)
+        ) {
+          return reject(
+            "supersede create is missing valid supersedes metadata",
+          );
+        }
+        const classifyConfidence =
+          typeof change.classifyConfidence === "number"
+            ? Math.min(
+                parseConfidence(change.classifyConfidence),
+                context.classifyConfidence,
+              )
+            : context.classifyConfidence;
+        return [
+          {
+            type: "create",
+            newPageId,
+            path:
+              typeof change.path === "string"
+                ? change.path
+                : `pages/compiled/${slugify(context.source.page.title)}.md`,
+            relation,
+            classifyConfidence,
+            reasoning:
+              typeof change.reasoning === "string"
+                ? change.reasoning
+                : context.reasoning,
+            needsCloseReview:
+              change.needsCloseReview === true || classifyConfidence < 0.5
+                ? true
+                : undefined,
+            supersedes,
+            content,
+            confidenceImpact,
+          },
+        ];
       }
-      const classifyConfidence =
-        typeof change.classifyConfidence === "number"
-          ? Math.min(
-              parseConfidence(change.classifyConfidence),
-              context.classifyConfidence,
-            )
-          : context.classifyConfidence;
-      return [
-        {
-          type: "create",
-          newPageId,
-          path:
-            typeof change.path === "string"
-              ? change.path
-              : `pages/compiled/${slugify(context.source.page.title)}.md`,
-          relation,
-          classifyConfidence,
-          reasoning:
-            typeof change.reasoning === "string"
-              ? change.reasoning
-              : context.reasoning,
-          needsCloseReview:
-            change.needsCloseReview === true || classifyConfidence < 0.5
-              ? true
-              : undefined,
-          supersedes,
-          content,
-          confidenceImpact,
-        },
-      ];
-    }
-    return [];
-  });
+      return reject("change type is unsupported");
+    },
+  );
   if (changes.length > 0) {
     return changes;
   }
-  throw new Error("synthesize response produced no valid patch changes");
+  if (!Array.isArray(payload.changes)) {
+    throw new Error("synthesize response missing changes array");
+  }
+  const reasonSummary =
+    rejectionReasons.length > 0
+      ? `: ${rejectionReasons.slice(0, 3).join("; ")}`
+      : "";
+  throw new Error(
+    `synthesize response produced no valid patch changes${reasonSummary}`,
+  );
+}
+
+function synthesizeOutputContract(opts: {
+  source: CompilePageInput;
+  target?: CompilePageInput;
+  patchId: string;
+  model: string;
+  timestamp: string;
+}): Record<string, unknown> {
+  const sourceUnit = `${opts.source.page.id}:su0`;
+  return {
+    requiredTopLevelShape: { changes: [] },
+    modifyChangeShape: {
+      type: "modify",
+      pageId: opts.target?.page.id ?? "<target page id>",
+      operation: "append_section | replace_section | insert_after_section",
+      targetSection: "required for replace_section or insert_after_section",
+      relation: "extend | merge | contradict",
+      classifyConfidence: "0..1",
+      reasoning: "short reason",
+      content: [
+        "## New Section",
+        "",
+        `<!-- akb:derived source=${sourceUnit} method=extend patch=${opts.patchId} promptHash="sha256:..." modelId="${opts.model}" compiledAt="${opts.timestamp}" -->`,
+        "Content grounded in the source page.",
+      ].join("\n"),
+      confidenceImpact: { kind: "source_added", sourceWeight: 0.8 },
+    },
+    createChangeShape: {
+      type: "create",
+      newPageId: "page_example12345",
+      path: "pages/compiled/example.md",
+      relation: "new | supersede",
+      classifyConfidence: "0..1",
+      reasoning: "short reason",
+      content: [
+        "---",
+        "id: page_example12345",
+        "title: Example",
+        "---",
+        `<!-- akb:derived source=${sourceUnit} method=new patch=${opts.patchId} promptHash="sha256:..." modelId="${opts.model}" compiledAt="${opts.timestamp}" -->`,
+        "Content grounded in the source page.",
+      ].join("\n"),
+      confidenceImpact: { kind: "source_added", sourceWeight: 0.8 },
+    },
+  };
 }
 
 function derivedChunksForChanges(opts: {
@@ -1184,7 +1319,7 @@ function isSafeCompileCreatePath(value: unknown): boolean {
 }
 
 function sanitizedErrorMessage(error: unknown, secret?: string): string {
-  let message = error instanceof Error ? error.message : String(error);
+  let message = errorMessage(error);
   if (secret) {
     message = message.split(secret).join("[redacted]");
   }
@@ -1192,6 +1327,10 @@ function sanitizedErrorMessage(error: unknown, secret?: string): string {
   message = message.replace(/Bearer\s+\S+/gi, "[redacted]");
   message = message.replace(/https?:\/\/\S+/gi, "[redacted-url]");
   return message;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function heuristicDegradedReason(
