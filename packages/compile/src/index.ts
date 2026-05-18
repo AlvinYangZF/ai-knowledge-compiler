@@ -10,17 +10,19 @@ export interface CompilePageInput {
 export interface BuildCompilePatchOptions {
   source: CompilePageInput;
   candidates: CompilePageInput[];
-  providerName?: LlmProviderName;
+  providerName?: CompileProviderName;
   model?: string;
   baseUrl?: string;
   apiKeyEnv?: string;
   apiKey?: string;
   deepseekApiKey?: string;
   provider?: CompileJsonProvider;
+  agentId?: string;
   now?: Date;
 }
 
 export type LlmProviderName = "deepseek" | "openai" | "anthropic";
+export type CompileProviderName = LlmProviderName | "agent";
 
 export interface DeepSeekProviderOptions {
   apiKey: string;
@@ -47,7 +49,7 @@ export interface DeepSeekJsonResult {
 }
 
 export interface CompileJsonProvider {
-  readonly providerName?: LlmProviderName;
+  readonly providerName?: CompileProviderName;
   readonly model?: string;
   completeJson(call: DeepSeekJsonCall): Promise<DeepSeekJsonResult>;
 }
@@ -57,9 +59,10 @@ export interface CompilePatchDocument {
   status: "proposed" | "applied" | "rejected";
   source: { sourceId: string; pageId: string; ingestPath: string };
   compileMeta: {
-    provider: LlmProviderName | "heuristic";
+    provider: CompileProviderName | "heuristic";
     modelId: string;
     resolvedModelId?: string;
+    agentId?: string;
     apiKeyEnv?: string;
     promptHashes: {
       segment: string;
@@ -71,7 +74,7 @@ export interface CompilePatchDocument {
     pipelineVersion: "compile/0.1";
     stages: Array<{
       name: "segment" | "locate" | "classify" | "synthesize" | "emit";
-      provider: "deterministic" | LlmProviderName | "heuristic";
+      provider: "deterministic" | CompileProviderName | "heuristic";
       degraded: boolean;
     }>;
     segmentCount: number;
@@ -147,7 +150,10 @@ function defaultBaseUrlForProvider(providerName: LlmProviderName): string {
   return "https://api.deepseek.com";
 }
 
-function defaultModelForProvider(providerName: LlmProviderName): string {
+function defaultModelForProvider(providerName: CompileProviderName): string {
+  if (providerName === "agent") {
+    return "local-agent";
+  }
   if (providerName === "openai") {
     return "gpt-4.1-mini";
   }
@@ -157,7 +163,10 @@ function defaultModelForProvider(providerName: LlmProviderName): string {
   return "deepseek-v4-flash";
 }
 
-function providerLabel(providerName: LlmProviderName): string {
+function providerLabel(providerName: CompileProviderName): string {
+  if (providerName === "agent") {
+    return "Local agent";
+  }
   if (providerName === "openai") {
     return "OpenAI";
   }
@@ -415,9 +424,9 @@ export async function buildCompilePatch(
   const apiKey = opts.apiKey ?? opts.deepseekApiKey;
   const provider =
     opts.provider ??
-    (apiKey
+    (apiKey && providerName !== "agent"
       ? createCompileJsonProvider({
-          providerName,
+          providerName: providerName as LlmProviderName,
           apiKey,
           baseUrl: opts.baseUrl,
           model,
@@ -439,7 +448,7 @@ export async function buildCompilePatch(
 async function buildProviderCompilePatch(
   opts: BuildCompilePatchOptions,
   provider: CompileJsonProvider,
-  providerName: LlmProviderName,
+  providerName: CompileProviderName,
 ): Promise<CompilePatchDocument> {
   const started = Date.now();
   const model =
@@ -661,6 +670,7 @@ async function buildProviderCompilePatch(
       provider: providerName,
       modelId: model,
       ...(resolvedModel !== model ? { resolvedModelId: resolvedModel } : {}),
+      ...(opts.agentId ? { agentId: opts.agentId } : {}),
       ...(opts.apiKeyEnv ? { apiKeyEnv: opts.apiKeyEnv } : {}),
       promptHashes,
       pipelineVersion: "compile/0.1",
@@ -842,6 +852,7 @@ export function buildHeuristicCompilePatch(
     compileMeta: {
       provider: "heuristic",
       modelId: model,
+      ...(opts.agentId ? { agentId: opts.agentId } : {}),
       ...(opts.apiKeyEnv ? { apiKeyEnv: opts.apiKeyEnv } : {}),
       promptHashes: Object.fromEntries(
         PIPELINE_STAGES.map((stage) => [
@@ -1439,10 +1450,13 @@ function errorMessage(error: unknown): string {
 
 function heuristicDegradedReason(
   opts: BuildCompilePatchOptions,
-  providerName: LlmProviderName,
+  providerName: CompileProviderName,
 ): string {
   if (opts.apiKey || opts.deepseekApiKey || opts.provider) {
     return "Provider-backed compile was not run; used heuristic fallback";
+  }
+  if (providerName === "agent") {
+    return "local agent provider not configured";
   }
   if (opts.apiKeyEnv) {
     return `${opts.apiKeyEnv} not set`;

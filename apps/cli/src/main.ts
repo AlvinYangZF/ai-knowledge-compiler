@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -17,7 +17,9 @@ import { pathToFileURL } from "node:url";
 import {
   buildHeuristicCompilePatch,
   buildCompilePatch as buildProviderCompilePatch,
+  type CompileJsonProvider,
   type CompilePageInput,
+  type CompileProviderName,
   createCompileJsonProvider,
   type LlmProviderName,
 } from "@akb/compile";
@@ -68,6 +70,7 @@ interface IngestOptions {
   recursive?: boolean;
   compile?: boolean;
   compileConcurrency?: number;
+  byAgent?: string;
 }
 
 interface IndexOptions {
@@ -338,6 +341,7 @@ interface CompileOptions {
   allPending?: boolean;
   dryRun?: boolean;
   model?: string;
+  byAgent?: string;
 }
 
 interface CompileRunSummary {
@@ -451,6 +455,10 @@ export async function run(argv = process.argv): Promise<void> {
       "number of imported pages to compile in parallel",
       parsePositiveInt,
       1,
+    )
+    .option(
+      "--by-agent <id>",
+      "compile imported pages with a configured local agent",
     )
     .option("--no-commit", "skip git commit")
     .option("--recursive", "recursively ingest markdown files from directories")
@@ -666,6 +674,7 @@ export async function run(argv = process.argv): Promise<void> {
     .option("--all-pending", "compile all sources without existing patches")
     .option("--dry-run", "show candidate changes without writing a patch")
     .option("--model <model>", "compile model id")
+    .option("--by-agent <id>", "compile with a configured local agent")
     .action(compileCommand);
   compile.command("status").action(compileStatusCommand);
   compile.command("replay").argument("<patch-id>").action(compileReplayCommand);
@@ -872,7 +881,11 @@ async function ingestCommand(
         existingPagePathsById.delete(replacedPageId);
       }
       index.upsertPage(page, body, { bodyStartLine });
-      const ledgerPath = recordIngestSourceAdded(vaultDir, page);
+      const ledgerPath = recordIngestSourceAdded(
+        vaultDir,
+        page,
+        options.byAgent,
+      );
       if (ledgerPath) {
         ledgerFiles.push(ledgerPath);
       }
@@ -897,13 +910,16 @@ async function ingestCommand(
     `Ingested ${written.length} page${written.length === 1 ? "" : "s"}.`,
   );
   if (options.compile !== false) {
-    await compileImportedPages(written, options.compileConcurrency ?? 1);
+    await compileImportedPages(written, options.compileConcurrency ?? 1, {
+      byAgent: options.byAgent,
+    });
   }
 }
 
 async function compileImportedPages(
   sources: string[],
   concurrency: number,
+  options: Pick<CompileOptions, "byAgent" | "model"> = {},
 ): Promise<void> {
   if (sources.length === 0) {
     return;
@@ -923,7 +939,7 @@ async function compileImportedPages(
       while (nextIndex < sources.length) {
         const source = sources[nextIndex];
         nextIndex += 1;
-        const patch = await compileOneSource(vaultDir, config, source, {});
+        const patch = await compileOneSource(vaultDir, config, source, options);
         recordCompileSummary(summary, patch, false);
       }
     }),
@@ -955,6 +971,7 @@ function frontmatterDefaultsForIngest(
 function recordIngestSourceAdded(
   vaultDir: string,
   page: Page,
+  byAgent?: string,
 ): string | undefined {
   const sourceKey =
     page.frontmatter.source_hash ??
@@ -971,13 +988,14 @@ function recordIngestSourceAdded(
   const timestamp = normalizeEventTimestamp(
     page.frontmatter.imported_at ?? page.frontmatter.created_at,
   );
+  const agentActor = byAgent ? localAgentActorIdentity(byAgent) : undefined;
   const event = parseConfidenceEvent({
     id: stableId("evt", `${page.id}:${sourceKey}:${timestamp}`),
     kind: "source_added",
     pageId: page.id,
     timestamp,
-    actor: "system",
-    actorId: "akb-ingest",
+    actor: agentActor?.actor ?? "system",
+    actorId: agentActor?.actorId ?? "akb-ingest",
     sourceId: stableId("src", sourceKey),
     sourceKey,
     sourceWeight: sourceWeightForPage(vaultDir, page),
@@ -5315,6 +5333,127 @@ function roundForReport(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
+function localAgentCompileProvider(
+  config: Config,
+  byAgent: string,
+  model?: string,
+): { agentId: string; provider: CompileJsonProvider } {
+  const normalizedAgentId = normalizeLocalAgentId(byAgent);
+  const agentId = `agent:${normalizedAgentId}`;
+  const configured =
+    config.agents?.[normalizedAgentId] ?? config.agents?.[agentId];
+  const command = configured?.command ?? normalizedAgentId;
+  const args = configured?.args ?? [];
+  const timeoutMs = configured?.timeout_ms ?? 600_000;
+  const providerModel = model ?? `local-agent:${normalizedAgentId}`;
+  return {
+    agentId,
+    provider: {
+      providerName: "agent",
+      model: providerModel,
+      async completeJson(call) {
+        const stdout = await runLocalAgentCompileCall({
+          agentId,
+          command,
+          args,
+          timeoutMs,
+          request: {
+            agentId,
+            model: providerModel,
+            responseSchemaName: call.responseSchemaName,
+            messages: call.messages,
+            instructions:
+              "Return JSON only for the requested akb compile response schema.",
+          },
+        });
+        const trimmed = stdout.trim();
+        if (trimmed.length === 0) {
+          throw new Error(`Local agent ${agentId} returned empty output`);
+        }
+        try {
+          const parsed = JSON.parse(trimmed) as unknown;
+          if (isRecord(parsed) && typeof parsed.content === "string") {
+            return {
+              content: parsed.content,
+              model:
+                typeof parsed.model === "string" ? parsed.model : providerModel,
+            };
+          }
+          if (isRecord(parsed) && typeof parsed.result === "string") {
+            return {
+              content: parsed.result,
+              model:
+                typeof parsed.model === "string" ? parsed.model : providerModel,
+            };
+          }
+        } catch {
+          // Raw JSON schema output is also valid; the compile parser will handle it.
+        }
+        return { content: trimmed, model: providerModel };
+      },
+    },
+  };
+}
+
+function runLocalAgentCompileCall(opts: {
+  agentId: string;
+  command: string;
+  args: string[];
+  timeoutMs: number;
+  request: Record<string, unknown>;
+}): Promise<string> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(opts.command, opts.args, {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (error: Error | undefined, output = "") => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      if (error) {
+        rejectPromise(error);
+        return;
+      }
+      resolvePromise(output);
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      finish(
+        new Error(
+          `Local agent ${opts.agentId} timed out after ${opts.timeoutMs}ms`,
+        ),
+      );
+    }, opts.timeoutMs);
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", (error) => {
+      finish(new Error(`Local agent ${opts.agentId} failed: ${error.message}`));
+    });
+    child.on("close", (code) => {
+      if (code === 0) {
+        finish(undefined, stdout);
+        return;
+      }
+      const details = stderr.trim() || `exit code ${code ?? "unknown"}`;
+      finish(new Error(`Local agent ${opts.agentId} failed: ${details}`));
+    });
+    child.stdin.end(`${JSON.stringify(opts.request)}\n`);
+  });
+}
+
 async function compileCommand(options: CompileOptions): Promise<void> {
   const vaultDir = process.cwd();
   assertVault(vaultDir);
@@ -5344,13 +5483,20 @@ async function compileOneSource(
   sourceRef: string,
   options: CompileOptions,
 ): Promise<PatchDocument> {
-  const { apiKey, apiKeyEnv } = configuredLlmApiKey(config.llm);
+  const localAgent = options.byAgent
+    ? localAgentCompileProvider(config, options.byAgent, options.model)
+    : undefined;
+  const { apiKey, apiKeyEnv } = localAgent
+    ? { apiKey: undefined, apiKeyEnv: undefined }
+    : configuredLlmApiKey(config.llm);
   const patch = await buildCompilePatch(vaultDir, sourceRef, {
-    providerName: config.llm?.provider,
-    model: options.model ?? config.llm?.model,
+    providerName: localAgent ? "agent" : config.llm?.provider,
+    provider: localAgent?.provider,
+    agentId: localAgent?.agentId,
+    model: options.model ?? localAgent?.provider.model ?? config.llm?.model,
     apiKey,
     apiKeyEnv,
-    baseUrl: config.llm?.base_url,
+    baseUrl: localAgent ? undefined : config.llm?.base_url,
   });
   if (options.dryRun) {
     console.log(
@@ -6726,7 +6872,9 @@ function buildCompilePatch(
   vaultDir: string,
   sourceRef: string,
   options: {
-    providerName?: LlmProviderName;
+    providerName?: CompileProviderName;
+    provider?: CompileJsonProvider;
+    agentId?: string;
     model?: string;
     baseUrl?: string;
     apiKey?: string;
@@ -6743,6 +6891,8 @@ function buildCompilePatch(
     source,
     candidates: scanVaultPages(vaultDir),
     providerName: options.providerName,
+    provider: options.provider,
+    agentId: options.agentId,
     model,
     baseUrl: options.baseUrl,
     apiKey: options.apiKey,
