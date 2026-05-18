@@ -108,6 +108,14 @@ const LlmConfigSchema = z
     };
   });
 
+const AgentConfigSchema = z
+  .object({
+    command: z.string().min(1),
+    args: z.array(z.string()).default([]),
+    timeout_ms: z.number().int().positive().optional(),
+  })
+  .strict();
+
 export const ConfigSchema = z.object({
   version: z.literal("0.0"),
   workspace: z.object({
@@ -128,6 +136,7 @@ export const ConfigSchema = z.object({
     })
     .optional(),
   llm: LlmConfigSchema.optional(),
+  agents: z.record(z.string(), AgentConfigSchema).optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

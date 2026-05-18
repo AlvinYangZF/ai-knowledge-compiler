@@ -3,7 +3,7 @@
 > **The persistent, auditable memory layer for coding agents.**
 > coding agent 的可审计持久记忆层。
 
-> ⚠️ **状态：v0.1 本地闭环可运行**。当前已有 TypeScript monorepo、Markdown ingest、SQLite FTS5 + hybrid search、confidence-aware ranker、Confidence Ledger、LLM compile patch workflow、citation-first `ask`、eval harness、MCP server、sample vault 和端到端 demo。还不是 npm 发布版本，CLI 与 schema 仍可能调整。
+> ⚠️ **状态：v0.1 本地闭环可运行**。当前已有 TypeScript monorepo、Markdown ingest、SQLite FTS5 + hybrid search、confidence-aware ranker、Confidence Ledger、LLM/local-agent compile patch workflow、citation-first `ask`、eval harness、MCP server、sample vault 和端到端 demo。还不是 npm 发布版本，CLI 与 schema 仍可能调整。
 
 ---
 
@@ -123,7 +123,7 @@ Karpathy 在 2026 年 4 月提出的 [LLM Wiki 模式](https://gist.github.com/k
 | --- | --- | --- | --- |
 | 创建 vault | `init` | 否 | `pages/`、`.akb/config.yaml`、ledger 后续提交 |
 | 导入 Markdown | `ingest --no-compile` | 否 | `pages/*.md` 提交 |
-| LLM compile patch | `compile` / `ingest --compile` | 可选；缺 key 时 degraded heuristic fallback | `.akb/patches/*.yaml` 用于 review |
+| Compile patch | `compile` / `ingest --compile` / `--by-agent` | 可选；可用 provider API 或本地 agent，缺配置时 degraded heuristic fallback | `.akb/patches/*.yaml` 用于 review |
 | Review patch | `patch apply` / `patch reject` | 否 | 应用后提交 Markdown + ledger |
 | 检索与问答 | `search` / `ask` | `search` 否；`ask` 有 evidence 且配置 key 时调用 LLM | 无新增 canonical 产物 |
 | Confidence 审计 | `confidence show/sections/file/report` | 否 | ledger 提交；report 不提交 |
@@ -230,16 +230,32 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 
 只需要设置你实际使用的 provider 对应的 key。未设置环境变量时，`ask` 会降级为 extractive answer，`compile` 会生成 degraded heuristic patch。
 
+如果希望 `compile` 不直接调用 LLM provider API，而是交给本地 agent 命令，可以在同一个配置文件里增加 `agents`：
+
+```yaml
+agents:
+  codex:
+    command: "codex"
+    args: ["exec", "-", "--sandbox", "read-only", "--skip-git-repo-check"]
+    timeout_ms: 600000
+  claude:
+    command: "claude"
+    args: ["--print", "--output-format", "json"]
+    timeout_ms: 600000
+```
+
+本地 agent 模式通过 `--by-agent <id>` 启用，例如 `--by-agent codex`。`akb` 会把 compile stage 请求以 JSON 写入命令 stdin，请求里包含 `agentId`、`model`、`responseSchemaName` 和 `messages`；命令需要把符合 stage schema 的 JSON 输出到 stdout。stdout 可以是原始 schema JSON，也可以是 `{ "model": "...", "content": "{...}" }` 或 `{ "model": "...", "result": "{...}" }` wrapper。该模式不会读取 `.akb/config.yaml` 里的 LLM API key，但本地 agent 自身可能使用它自己的登录态、订阅或环境变量。
+
 ### 推荐工作流
 
 第一次配置自己的知识库时，建议按这个顺序走：
 
 1. `init` 创建 vault，并确认 `.akb/config.yaml`。
-2. 可选配置 LLM provider，只把真实 API key 放在本机环境变量。
+2. 可选配置 LLM provider 或本地 agent；真实 API key 只放在本机环境变量。
 3. `ingest --recursive --no-compile --no-commit` 先导入 Markdown、文档导出和少量明确指定的代码文件，不立即 compile。
 4. `index --rebuild` 后用 `search` / `ask` 验证基础检索。
 5. `migrate to-v0.1 --no-commit` 初始化 Confidence Ledger。
-6. 对少量关键页面运行 `compile --source ...` 或小并发 `ingest --compile-concurrency 2`，review 后再 `patch apply`。
+6. 对少量关键页面运行 `compile --source ...`、`compile --source ... --by-agent codex` 或小并发 `ingest --compile-concurrency 2`，review 后再 `patch apply`。
 7. 用 `confidence file`、`context pack`、`graph export`、`code scan`、`web build` 做审计和 agent 上下文准备。
 8. 在 PR/CI 场景用 `gate run` 把 lint、confidence、compile degraded ratio 和 eval 串起来。
 
@@ -253,6 +269,7 @@ node "$AKB" ingest /path/to/src/gc.c --no-compile --no-commit
 node "$AKB" ingest /path/to/codebase --recursive --include-code --no-compile --no-commit
 node "$AKB" ingest /path/to/docs --recursive --converter external --strict-convert --no-compile --no-commit
 node "$AKB" ingest /path/to/docs --recursive --compile-concurrency 2 --no-commit
+node "$AKB" ingest /path/to/docs --recursive --by-agent codex --compile-concurrency 2 --no-commit
 node "$AKB" index --rebuild
 node "$AKB" search "garbage collection"
 node "$AKB" search "garbage collection" --hybrid --format json
@@ -262,7 +279,7 @@ node "$AKB" search "garbage collection" --hybrid --format json
 
 目录递归导入需要显式传 `--recursive`。目录导入默认不包含代码文件，避免把整个工程源码意外灌入知识库；单个代码文件会直接导入，目录代码导入需要显式加 `--include-code`。默认会在导入后触发 `compile` 并为写入操作创建 git commit；首次批量导入建议加 `--no-compile --no-commit`，确认 `pages/` 和索引正常后再分批运行 compile。
 
-导入阶段会串行写入 Markdown 和更新 SQLite index，避免多个写入者同时改 vault。导入完成后的 compile 阶段可以用 `--compile-concurrency <n>` 做有限并发；每个 source 仍只生成 proposed patch，不会直接应用到页面。批量 compile 结束后会打印 `Compile summary`，汇总 total、provider success、degraded、provider 分布和 degraded reason 计数。LLM compile provider 请求默认 120 秒超时，建议并发从 `2` 开始，避免过多并发触发 provider 限流或超时。
+导入阶段会串行写入 Markdown 和更新 SQLite index，避免多个写入者同时改 vault。导入完成后的 compile 阶段可以用 `--compile-concurrency <n>` 做有限并发；每个 source 仍只生成 proposed patch，不会直接应用到页面。加 `--by-agent <id>` 后，source_added ledger 会记录为 `actorId: agent:<id>`，导入后的 compile 也会使用该本地 agent。批量 compile 结束后会打印 `Compile summary`，汇总 total、provider success、degraded、provider 分布和 degraded reason 计数。LLM compile provider 请求默认 120 秒超时，本地 agent 默认 600 秒超时；建议并发从 `2` 开始，避免过多并发触发 provider 限流、agent 排队或超时。
 
 `search` 默认使用 BM25，并返回带 `page_id + line_start + line_end` 的 citation。`--hybrid` 会叠加本地 sparse vector score，再交给 confidence-aware ranker 排序。默认会过滤 superseded 页面，历史页面可用 `--include-superseded` 查看。
 
@@ -332,15 +349,17 @@ node "$AKB" supersede page_old000000000 --by page_newer0000000 --unlink --reason
 
 ```bash
 node "$AKB" compile --source page_compile00002
+node "$AKB" compile --source page_compile00002 --by-agent codex
 node "$AKB" compile --all-pending
+node "$AKB" compile --all-pending --by-agent claude
 node "$AKB" compile status
 node "$AKB" patch list
 node "$AKB" patch show patch_page_compile00002
 ```
 
-没有设置对应 API key 环境变量时，compile 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。配置 DeepSeek、OpenAI 或 Anthropic 后，compile 会跑 provider-backed pipeline，并记录 pinned `modelId`、`promptHashes` 和 `resolvedModelId`。
+没有设置对应 API key 环境变量，也没有通过 `--by-agent` 指定本地 agent 时，compile 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。配置 DeepSeek、OpenAI 或 Anthropic 后，compile 会跑 provider-backed pipeline，并记录 pinned `modelId`、`promptHashes` 和 `resolvedModelId`。使用 `--by-agent <id>` 时，compile 会执行 `.akb/config.yaml` 中配置的本地命令，patch 中记录 `provider: agent`、`modelId: local-agent:<id>` 和 `agentId: agent:<id>`。
 
-Provider-backed compile 的单次 LLM 请求默认 120 秒超时。`classify` 的 relation 和 `synthesize` 的 patch changes 如果不符合本地 schema，`akb` 会把校验错误反馈给模型并自动重试一次；重试后仍无效、请求超时或 provider 不可用时，才会降级生成 heuristic patch，不阻塞 ingest。
+Provider-backed compile 的单次 LLM 请求默认 120 秒超时，本地 agent compile 默认 600 秒超时。`classify` 的 relation 和 `synthesize` 的 patch changes 如果不符合本地 schema，`akb` 会把校验错误反馈给模型或本地 agent 并自动重试一次；重试后仍无效、请求超时、provider 不可用或 agent 命令失败时，才会降级生成 heuristic patch，不阻塞 ingest。
 
 `compile --all-pending` 也会在末尾打印 `Compile summary`。这对排查大批量 LLM compile 很有用：如果 degraded 数量偏高，先看 `Degraded reasons` 里是 API key、timeout、classify relation 还是 synthesize patch schema 问题。
 
@@ -475,7 +494,7 @@ pnpm demo
 
 - Confidence Ledger：JSONL ledger、score materialization、SQLite confidence projection、source weights、decay、verification、supersession、runtime CI signals、runbook/test 强验证、stale decision lint、section-level confidence report、按 `references` 反查文件 confidence
 - Confidence-aware retrieval：CLI/MCP search rerank、superseded filtering、hybrid retrieval
-- LLM Compile：DeepSeek / OpenAI / Anthropic-backed 5-stage pipeline、heuristic fallback、patch-as-proposal、apply/reject workflow、lineage、replay
+- LLM Compile：DeepSeek / OpenAI / Anthropic-backed 5-stage pipeline、本地 agent-backed `ingest --by-agent` / `compile --by-agent`、heuristic fallback、patch-as-proposal、apply/reject workflow、lineage、replay
 - `akb ask`：extractive fallback、provider-generated cited answer、bad citation guard、no-answer handling
 - Context pack：按查询生成带 citation、confidence、patch 和 lineage 摘要的 agent 上下文包
 - Relation graph projection：从 wikilink、frontmatter references 和 supersedes 派生 graph export/show

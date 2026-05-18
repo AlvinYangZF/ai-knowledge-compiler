@@ -76,6 +76,33 @@ function runCliFailure(args: string[], cwd: string): string {
   throw new Error("Expected command to fail");
 }
 
+function writeFakeCompileAgent(
+  path: string,
+  wrapperKey: "content" | "result" = "content",
+): void {
+  writeFileSync(
+    path,
+    [
+      'import { readFileSync } from "node:fs";',
+      'const request = JSON.parse(readFileSync(0, "utf8"));',
+      "if (typeof request.model !== 'string') throw new Error('missing model');",
+      "const user = JSON.parse(request.messages?.[1]?.content ?? '{}');",
+      "const sourcePageId = user.sourcePage?.id ?? user.units?.[0]?.id?.replace(/:su\\d+$/, '') ?? 'page_agentsrc0001';",
+      "let content;",
+      "if (request.responseSchemaName === 'segment') {",
+      "  content = { units: [{ id: sourcePageId + ':su0', sourceChunkIds: [sourcePageId + ':c0'], text: 'Agent compiled local source.', kind: 'claim_cluster' }] };",
+      "} else if (request.responseSchemaName === 'classify') {",
+      "  content = { relation: 'extend', confidence: 0.88, reasoning: 'Local agent classified the source as an extension.' };",
+      "} else {",
+      "  const derivedMarker = '<!-- akb:derived source=' + sourcePageId + ':su0 method=extend patch=' + (user.patchId ?? 'patch_' + sourcePageId) + ' promptHash=\"sha256:agent-test\" modelId=\"local-agent:codex\" compiledAt=\"2026-05-18T00:00:00.000Z\" -->';",
+      "  content = { changes: [{ type: 'modify', pageId: 'page_agenttgt0001', operation: 'append_section', relation: 'extend', classifyConfidence: 0.88, reasoning: 'Local agent synthesized a patch.', content: ['## Local Agent Update', '', derivedMarker, 'Agent compiled local source.'].join('\\n'), confidenceImpact: { kind: 'source_added', sourceWeight: 0.8 } }] };",
+      "}",
+      `process.stdout.write(JSON.stringify({ model: 'fake-local-agent', ${wrapperKey}: JSON.stringify(content) }));`,
+      "",
+    ].join("\n"),
+  );
+}
+
 function webSnapshotFromHtml(html: string): Record<string, unknown> {
   const match = html.match(/<script>window\.__AKB_DATA__ = (.*);<\/script>/);
   if (!match) {
@@ -1823,6 +1850,159 @@ describe("akb CLI", () => {
     expect(output).toContain("  heuristic: 2");
     expect(output).toContain("Degraded reasons:");
     expect(output).toContain("llm.api_key_env not configured for deepseek: 2");
+  });
+
+  it("compiles a source through a configured local agent", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const agentScript = join(dir, "fake-agent.mjs");
+    writeFakeCompileAgent(agentScript, "result");
+    writeFileSync(
+      join(vault, ".akb", "config.yaml"),
+      [
+        'version: "0.0"',
+        "workspace:",
+        '  name: "vault"',
+        '  vault_dir: "."',
+        "index:",
+        '  engine: "sqlite-fts5"',
+        '  path: ".akb/index.db"',
+        "mcp:",
+        '  host: "127.0.0.1"',
+        "  port: 8765",
+        "agents:",
+        "  codex:",
+        `    command: "${process.execPath}"`,
+        "    args:",
+        `      - "${agentScript}"`,
+        "    timeout_ms: 5000",
+        "",
+      ].join("\n"),
+    );
+    const target = join(dir, "agent-target.md");
+    const source = join(dir, "agent-source.md");
+    writeFileSync(
+      target,
+      [
+        "---",
+        "id: page_agenttgt0001",
+        "title: Agent Target",
+        "---",
+        "# Agent Target",
+        "",
+        "Local agent target page.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_agentsrc0001",
+        "title: Agent Source",
+        "---",
+        "# Agent Source",
+        "",
+        "Local agent source material.",
+      ].join("\n"),
+    );
+    runCli(["ingest", target, "--no-commit", "--no-compile"], vault);
+    runCli(["ingest", source, "--no-commit", "--no-compile"], vault);
+
+    const output = runCli(
+      ["compile", "--source", "page_agentsrc0001", "--by-agent", "codex"],
+      vault,
+    );
+
+    expect(output).toContain(
+      "Compiled page_agentsrc0001 -> patch_page_agentsrc0001",
+    );
+    const patch = readFileSync(
+      join(vault, ".akb", "patches", "patch_page_agentsrc0001.yaml"),
+      "utf8",
+    );
+    expect(patch).toContain("provider: agent");
+    expect(patch).toContain("modelId: local-agent:codex");
+    expect(patch).toContain("resolvedModelId: fake-local-agent");
+    expect(patch).toContain("agentId: agent:codex");
+    expect(patch).toContain("pageId: page_agenttgt0001");
+  });
+
+  it("uses a local agent for ingest-triggered compile", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const agentScript = join(dir, "fake-agent.mjs");
+    writeFakeCompileAgent(agentScript);
+    writeFileSync(
+      join(vault, ".akb", "config.yaml"),
+      [
+        'version: "0.0"',
+        "workspace:",
+        '  name: "vault"',
+        '  vault_dir: "."',
+        "index:",
+        '  engine: "sqlite-fts5"',
+        '  path: ".akb/index.db"',
+        "mcp:",
+        '  host: "127.0.0.1"',
+        "  port: 8765",
+        "agents:",
+        "  codex:",
+        `    command: "${process.execPath}"`,
+        "    args:",
+        `      - "${agentScript}"`,
+        "    timeout_ms: 5000",
+        "",
+      ].join("\n"),
+    );
+    const target = join(dir, "agent-ingest-target.md");
+    const source = join(dir, "agent-ingest-source.md");
+    writeFileSync(
+      target,
+      [
+        "---",
+        "id: page_agenttgt0001",
+        "title: Agent Target",
+        "---",
+        "# Agent Target",
+        "",
+        "Local agent target page.",
+      ].join("\n"),
+    );
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_agentsrc0001",
+        "title: Agent Source",
+        "---",
+        "# Agent Source",
+        "",
+        "Local agent source material.",
+      ].join("\n"),
+    );
+    runCli(["ingest", target, "--no-commit", "--no-compile"], vault);
+
+    const output = runCli(
+      ["ingest", source, "--no-commit", "--by-agent", "codex"],
+      vault,
+    );
+
+    expect(output).toContain(
+      "Compiled page_agentsrc0001 -> patch_page_agentsrc0001",
+    );
+    const patch = readFileSync(
+      join(vault, ".akb", "patches", "patch_page_agentsrc0001.yaml"),
+      "utf8",
+    );
+    expect(patch).toContain("provider: agent");
+    expect(patch).toContain("agentId: agent:codex");
+    const ledger = readFileSync(
+      join(vault, "pages", ".page_agentsrc0001.ledger.jsonl"),
+      "utf8",
+    );
+    const sourceAdded = JSON.parse(ledger.trim().split(/\r?\n/)[0] ?? "{}");
+    expect(sourceAdded.actor).toBe("agent");
+    expect(sourceAdded.actorId).toBe("agent:codex");
   });
 
   it("skips hidden ingest entries by default and reports them", () => {

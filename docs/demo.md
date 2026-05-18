@@ -15,23 +15,24 @@
 | review artifact | `.akb/patches/*.yaml` | `compile` 生成的待 review patch | 按团队约定；应用前先 review |
 | projection/report | `.akb/index.db`、`.akb/lint/`、`.akb/context/`、`.akb/graph/`、`.akb/code-intel/`、`.akb/web/` | 搜索索引、审计报告、agent 上下文和本地 UI | 否 |
 
-只有两个常用路径会尝试调用 LLM：
+只有两个常用路径会尝试调用模型能力：
 
 - `ask`：先检索本地知识库；只有找到 evidence 且配置了 API key 环境变量时才调用 LLM。没有 evidence 时不会调用。
-- `compile`：配置 API key 后使用 provider-backed pipeline；没有 key、超时或输出不符合 schema 时降级为 degraded heuristic patch。
+- `compile`：可以使用 DeepSeek / OpenAI / Anthropic provider API，也可以用 `--by-agent <id>` 调用本地 agent 命令；没有 key、没有 agent、超时或输出不符合 schema 时降级为 degraded heuristic patch。
 
-其他命令，包括 `ingest --no-compile`、`index`、`search`、`confidence`、`runbook exec`、`test --link-pages`、`graph`、`code scan`、`web build`、`gate run`，都不依赖 LLM。
+其他命令，包括 `ingest --no-compile`、`index`、`search`、`confidence`、`runbook exec`、`test --link-pages`、`lint`、`graph`、`code scan`、`web build`、`gate run`，都不依赖 LLM。
 
 推荐第一次建库按这个顺序走：
 
 1. 初始化 vault。
-2. 可选配置 LLM provider 和本机环境变量。
+2. 可选配置 LLM provider 和本机环境变量，或配置本地 agent。
 3. 先用 `ingest --no-compile` 导入 Markdown。
 4. `index --rebuild` 后验证 `search` / `ask`。
 5. `migrate to-v0.1` 初始化 Confidence Ledger。
 6. 对关键页面小批量运行 `compile`，review patch 后再应用。
-7. 生成 `context pack`、`graph`、`code scan`、`web build` 作为 agent/review 辅助。
-8. 用 `gate run` 接入 PR/CI。
+7. 先单独运行 `lint`，修复明显的结构和 confidence 问题。
+8. 生成 `context pack`、`graph`、`code scan`、`web build` 作为 agent/review 辅助。
+9. 用 `gate run` 接入 PR/CI。
 
 ## 1. 准备环境
 
@@ -126,7 +127,7 @@ Rollback uses the previous stable image tag.
 
 如果你已经有 Obsidian vault，也可以直接导入其中的 Markdown。`akb` 会保留 `[[wikilinks]]`。
 
-## 4. 配置大模型 API Key
+## 4. 配置大模型 API Key 或本地 agent
 
 如果希望 `ingest` 后的 `compile` 阶段直接使用大模型能力，需要先在 `.akb/config.yaml` 中配置 LLM provider、model 和 API key 环境变量名。`akb` 支持 DeepSeek、OpenAI 和 Anthropic；真实 API key 只放在本机环境变量中，不写入配置文件，避免误提交到远端。
 
@@ -172,6 +173,30 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 
 如果暂时不设置 API key 环境变量，`ask` 会降级为 extractive answer；`compile` 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。
 
+如果不想让 `akb` 直接调用 LLM provider API，也可以配置本地 agent 命令，然后在 `ingest` 或 `compile` 时使用 `--by-agent <id>`：
+
+```yaml
+agents:
+  codex:
+    command: "codex"
+    args:
+      - "exec"
+      - "-"
+      - "--sandbox"
+      - "read-only"
+      - "--skip-git-repo-check"
+    timeout_ms: 600000
+  claude:
+    command: "claude"
+    args:
+      - "--print"
+      - "--output-format"
+      - "json"
+    timeout_ms: 600000
+```
+
+本地 agent 模式的契约是：`akb` 会把一次 compile stage 请求以 JSON 写入该命令的 stdin，请求里包含 `agentId`、`model`、`responseSchemaName` 和 `messages`；命令需要把符合当前 stage schema 的 JSON 输出到 stdout。stdout 可以是原始 schema JSON，也可以是 wrapper JSON，例如 `{ "model": "...", "content": "{...}" }` 或 `{ "model": "...", "result": "{...}" }`。如果你使用的 Codex / Claude CLI 不能稳定输出纯 JSON，建议写一个很薄的 wrapper 脚本来适配这个 stdin/stdout 契约。
+
 ## 5. 导入 Markdown、文档和代码
 
 重要：`ingest` 默认会在导入后继续执行 `compile`，为每个新页面生成 reviewable patch。首次批量导入自己的目录时，建议先加 `--no-compile`，只完成导入、格式规范化和索引，确认页面结构正常后再按需运行 compile。
@@ -207,7 +232,13 @@ node "$AKB" ingest /path/to/project --recursive --include-code --no-compile --no
 node "$AKB" ingest /path/to/my-docs --recursive --compile-concurrency 2 --no-commit
 ```
 
-`ingest` 写入 Markdown 和更新索引的阶段仍然是串行的，避免多个写入者同时改 `pages/` 和 `.akb/index.db`。`--compile-concurrency` 只影响导入完成后的 compile 阶段，每个 source 生成独立的 proposed patch，不会自动应用 patch。批量 compile 结束后会打印 `Compile summary`，汇总 total、provider success、degraded、provider 分布和 degraded reason 计数。LLM compile provider 请求默认 120 秒超时，建议并发从 `2` 开始，避免过多 LLM 并发触发限流或超时。
+如果希望导入后的 compile 阶段交给本地 agent，而不是直接使用 LLM API key：
+
+```bash
+node "$AKB" ingest /path/to/my-docs --recursive --by-agent codex --compile-concurrency 2 --no-commit
+```
+
+`ingest` 写入 Markdown 和更新索引的阶段仍然是串行的，避免多个写入者同时改 `pages/` 和 `.akb/index.db`。`--compile-concurrency` 只影响导入完成后的 compile 阶段，每个 source 生成独立的 proposed patch，不会自动应用 patch。加 `--by-agent <id>` 后，source_added ledger 会记录为 `actorId: agent:<id>`，导入后的 compile 也会使用该本地 agent。批量 compile 结束后会打印 `Compile summary`，汇总 total、provider success、degraded、provider 分布和 degraded reason 计数。LLM compile provider 请求默认 120 秒超时；本地 agent 默认 600 秒超时。建议并发从 `2` 开始，避免过多 LLM 或 agent 并发触发限流、排队或超时。
 
 如果目录里包含隐藏文件或隐藏文件夹，`ingest` 会在开始时先列出这些路径并询问是否导入；默认不导入。非交互环境中不会等待输入，也会按默认值跳过隐藏项。确认导入隐藏项后，目标路径会自动转成非隐藏路径，例如 `.hidden.md` 会写入为 `pages/hidden.md`，`.secret/child.md` 会写入为 `pages/secret/child.md`。
 
@@ -237,6 +268,7 @@ Ingest [##------------------] 10/125 HLD_02_CONTROLLER_THREAD_EN.md -> pages/HLD
 - `--no-compile`：导入后不触发 compile。首次批量导入强烈建议使用
 - `--compile`：导入后立即对每个新页面生成 compile patch。只建议在文件数量少或你已经准备好 review patch 时使用
 - `--compile-concurrency <n>`：导入完成后并发 compile 的 source 数量。默认 `1`，建议从 `2` 开始
+- `--by-agent <id>`：导入后的 compile 阶段使用 `.akb/config.yaml` 中配置的本地 agent；不直接读取 LLM API key
 - `--no-commit`：跳过自动 git commit，适合试跑和本地调试
 
 导入后检查页面：
@@ -566,17 +598,19 @@ node "$AKB" compile status
 
 ```bash
 node "$AKB" compile --source <page-id-or-path>
+node "$AKB" compile --source <page-id-or-path> --by-agent codex
 ```
 
 编译所有 pending source：
 
 ```bash
 node "$AKB" compile --all-pending
+node "$AKB" compile --all-pending --by-agent claude
 ```
 
-如果没有设置对应 API key 环境变量，compile 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。配置 DeepSeek、OpenAI 或 Anthropic 后，compile 会跑 provider-backed pipeline，并记录 pinned `modelId`、`promptHashes` 和 `resolvedModelId`。
+如果没有设置对应 API key 环境变量，也没有通过 `--by-agent` 指定本地 agent，compile 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。配置 DeepSeek、OpenAI 或 Anthropic 后，compile 会跑 provider-backed pipeline，并记录 pinned `modelId`、`promptHashes` 和 `resolvedModelId`。使用 `--by-agent <id>` 时，compile 会执行本地 agent 命令，patch 中记录 `provider: agent`、`modelId: local-agent:<id>` 和 `agentId: agent:<id>`。
 
-Provider-backed compile 的单次 LLM 请求默认 120 秒超时。`classify` 的 relation 和 `synthesize` 的 patch changes 如果不符合本地 schema，`akb` 会把校验错误反馈给模型并自动重试一次；重试后仍无效、请求超时或 provider 不可用时，才会降级生成 heuristic patch。因此导入成功不依赖每一次 LLM compile 都成功。
+Provider-backed compile 的单次 LLM 请求默认 120 秒超时，本地 agent compile 默认 600 秒超时。`classify` 的 relation 和 `synthesize` 的 patch changes 如果不符合本地 schema，`akb` 会把校验错误反馈给模型或本地 agent 并自动重试一次；重试后仍无效、请求超时、provider 不可用或 agent 命令失败时，才会降级生成 heuristic patch。因此导入成功不依赖每一次 compile 都成功。
 
 `compile --all-pending` 和导入后的批量 compile 会在末尾打印 `Compile summary`。如果 degraded 数量偏高，先看 `Degraded reasons`，它会按原因聚合显示 API key、timeout、classify relation 或 synthesize patch schema 等问题。
 
@@ -782,7 +816,32 @@ node "$AKB" eval --set .akb/eval/golden.yaml
 
 建议把 golden set 当作知识库质量门禁：每次大规模 ingest、compile 或修改 ranker 后都跑一次。
 
-## 16. 运行团队质量门禁
+## 16. 运行知识库健康检查
+
+`lint` 用来在本地检查知识库健康状态。它不调用 LLM，只从 Markdown、ledger、lineage 和 projection 中找问题：
+
+```bash
+node "$AKB" lint
+```
+
+为了复现衰减相关问题，可以固定时钟：
+
+```bash
+node "$AKB" lint --now 2026-05-18T00:00:00.000Z
+```
+
+当前 lint 会检查几类问题：
+
+- low-confidence 页面，并写入 `.akb/lint/low-confidence.md`
+- stale 页面，例如长期没有验证的 ADR，并写入 `.akb/lint/stale.md`
+- broken wikilink 和 supersession cycle，这类结构问题会让命令返回非 0
+- unresolved contradiction，除非页面已经 superseded 或被后续验证重新确认
+- orphan pages，并写入 `.akb/lint/orphan-pages.md` 和 `.akb/lint/suggestions.md`
+- derived ratio 过高和 orphaned lineage，并写入 `.akb/lint/derived-ratio.md` / `.akb/lint/orphaned-lineage.md`
+
+`.akb/lint/*.md` 都是诊断报告，不需要提交。建议在大规模 ingest、compile、patch apply 或改 ranker 之后先跑一次 `lint`，再跑 `gate run`。
+
+## 17. 运行团队质量门禁
 
 `gate run` 用于 CI/PR 场景，把几个质量信号串成一个明确的通过/失败出口：
 
@@ -809,7 +868,7 @@ node "$AKB" gate run \
 
 失败时命令返回非 0，并打印具体失败项，适合直接接到 PR check。
 
-## 17. 运行内置 sample demo
+## 18. 运行内置 sample demo
 
 如果你想先看完整样例：
 
@@ -830,7 +889,7 @@ recall@10:    1.00
 must-hit pass rate:  5/5 (100%)
 ```
 
-## 18. 已实现功能总览
+## 19. 已实现功能总览
 
 当前已经实现并可用于本地知识库的能力：
 
@@ -842,10 +901,12 @@ must-hit pass rate:  5/5 (100%)
 - Obsidian 兼容的 Markdown / `[[wikilinks]]`
 - Confidence Ledger JSONL 事件流
 - confidence projection rebuild / recompute / show / section report / file report
+- lint 健康检查和 `.akb/lint/*.md` 诊断报告
 - decay、verify、runbook/test 强 runtime verification、runtime webhook/watch 信号
 - supersede 链和 `--unlink`
 - DeepSeek / OpenAI / Anthropic-backed `ask`
 - DeepSeek / OpenAI / Anthropic-backed compile pipeline
+- local agent-backed `ingest --by-agent` / `compile --by-agent`
 - heuristic fallback
 - patch proposal / apply / reject
 - compile replay
@@ -858,7 +919,7 @@ must-hit pass rate:  5/5 (100%)
 - MCP stdio / HTTP server
 - eval harness 和 search benchmark
 
-## 19. v0.2+ 功能边界
+## 20. v0.2+ 功能边界
 
 当前 v0.1 已经完成本地闭环。后续版本会在这些方向继续扩展：
 
@@ -866,7 +927,7 @@ must-hit pass rate:  5/5 (100%)
 - GraphRAG traversal
 - 团队协作工作流：patch reviewer 和多人 review 分派
 
-## 20. 常用验证命令
+## 21. 常用验证命令
 
 在项目根目录运行：
 
