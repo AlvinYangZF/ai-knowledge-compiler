@@ -76,6 +76,14 @@ function runCliFailure(args: string[], cwd: string): string {
   throw new Error("Expected command to fail");
 }
 
+function webSnapshotFromHtml(html: string): Record<string, unknown> {
+  const match = html.match(/<script>window\.__AKB_DATA__ = (.*);<\/script>/);
+  if (!match) {
+    throw new Error("Missing web snapshot script");
+  }
+  return JSON.parse(match[1]) as Record<string, unknown>;
+}
+
 describe("akb CLI", () => {
   let dir: string;
 
@@ -1075,16 +1083,50 @@ describe("akb CLI", () => {
 
     const output = runCli(["web", "build", "--output", ".akb/web"], vault);
     const html = readFileSync(join(vault, ".akb", "web", "index.html"), "utf8");
+    const snapshot = webSnapshotFromHtml(html);
+    const files = snapshot.files as Array<{
+      file: string;
+      page_count: number;
+      min_score: number | null;
+      average_score: number | null;
+      risk_level: string;
+      flags: string[];
+      pages: Array<{
+        page_id: string;
+        path: string;
+        title: string;
+        score: number | null;
+      }>;
+    }>;
 
     expect(output).toContain("Wrote web UI .akb/web/index.html.");
     expect(html).toContain("AKB Vault");
     expect(html).toContain("Pages");
+    expect(html).toContain("Files");
     expect(html).toContain("Confidence");
     expect(html).toContain("Patches");
     expect(html).toContain("Relation Graph");
+    expect(html).toContain("file-filter");
+    expect(html).toContain("view-files");
     expect(html).toContain("Web UI Page");
     expect(html).toContain("patch_web_ui");
     expect(html).toContain("window.__AKB_DATA__");
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatchObject({
+      file: "src/web-ui.ts",
+      page_count: 1,
+      risk_level: "ok",
+      flags: [],
+      pages: [
+        expect.objectContaining({
+          page_id: "page_webui0000001",
+          path: "pages/web-ui-page.md",
+          title: "Web UI Page",
+        }),
+      ],
+    });
+    expect(files[0].min_score).toBe(files[0].pages[0].score);
+    expect(files[0].average_score).toBe(files[0].pages[0].score);
   });
 
   it("fails the quality gate for low-confidence changed-file pages", () => {
@@ -1225,6 +1267,156 @@ describe("akb CLI", () => {
     expect(output).toContain("Ingest [##########----------] 1/2 first.md");
     expect(output).toContain("Ingest [####################] 2/2 second.md");
     expect(output).toContain("Ingested 2 pages");
+  });
+
+  it("normalizes text files into markdown pages during ingest", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "plain.txt");
+    writeFileSync(source, "plain text knowledge\nsecond line\n");
+
+    const output = runCli(
+      ["ingest", source, "--no-compile", "--no-commit"],
+      vault,
+    );
+
+    expect(output).toContain("Found 1 ingestible source");
+    expect(output).toContain("plain.txt -> pages/plain.txt.md");
+    const page = readFileSync(join(vault, "pages", "plain.txt.md"), "utf8");
+    expect(page).toContain("source_type: text");
+    expect(page).toContain("# plain");
+    expect(page).toContain("plain text knowledge");
+  });
+
+  it("normalizes a single C source file into a code markdown page", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "gc.c");
+    writeFileSync(
+      source,
+      [
+        "#include <stdio.h>",
+        '#include "gc.h"',
+        "",
+        "int gc_should_trigger(void) {",
+        "  return 1;",
+        "}",
+      ].join("\n"),
+    );
+
+    const output = runCli(
+      ["ingest", source, "--no-compile", "--no-commit"],
+      vault,
+    );
+
+    expect(output).toContain("Found 1 ingestible source");
+    expect(output).toContain("gc.c -> pages/gc.c.md");
+    const page = readFileSync(join(vault, "pages", "gc.c.md"), "utf8");
+    expect(page).toContain("type: module");
+    expect(page).toContain("source_type: code");
+    expect(page).toContain("source_subtype: c");
+    expect(page).toContain("code_language: c");
+    expect(page).toContain("gc_should_trigger");
+    expect(page).toContain("```c");
+  });
+
+  it("records a high-weight source_added confidence event for code ingest", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "gc.c");
+    writeFileSync(source, "int gc_should_trigger(void) { return 1; }\n");
+
+    runCli(["ingest", source, "--no-compile", "--no-commit"], vault);
+
+    const page = readFileSync(join(vault, "pages", "gc.c.md"), "utf8");
+    const pageId = page.match(/^id:\s+(page_[a-z0-9]{12})$/m)?.[1];
+    expect(pageId).toBeDefined();
+    const ledgerPath = join(vault, "pages", `.${pageId}.ledger.jsonl`);
+    const event = JSON.parse(
+      readFileSync(ledgerPath, "utf8").trim().split("\n")[0],
+    );
+    expect(event).toMatchObject({
+      kind: "source_added",
+      actor: "system",
+      actorId: "akb-ingest",
+      pageId,
+      sourceWeight: 1,
+    });
+  });
+
+  it("skips code during directory ingest unless include-code is set", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "source");
+    mkdirSync(join(source, "src"), { recursive: true });
+    writeFileSync(join(source, "note.md"), "# Note\n\nMarkdown note.");
+    writeFileSync(
+      join(source, "src", "gc.c"),
+      "int gc_should_trigger(void) { return 1; }\n",
+    );
+
+    const defaultOutput = runCli(
+      ["ingest", source, "--recursive", "--no-compile", "--no-commit"],
+      vault,
+    );
+    expect(defaultOutput).toContain("Found 1 ingestible source");
+    expect(existsSync(join(vault, "pages", "note.md"))).toBe(true);
+    expect(existsSync(join(vault, "pages", "src", "gc.c.md"))).toBe(false);
+
+    const includeCodeOutput = runCli(
+      [
+        "ingest",
+        source,
+        "--recursive",
+        "--include-code",
+        "--force",
+        "--no-compile",
+        "--no-commit",
+      ],
+      vault,
+    );
+    expect(includeCodeOutput).toContain("Found 2 ingestible sources");
+    expect(existsSync(join(vault, "pages", "src", "gc.c.md"))).toBe(true);
+  });
+
+  it("skips document conversion failures by default and fails in strict mode", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "legacy.doc");
+    writeFileSync(source, "legacy binary fixture");
+
+    const output = runCli(
+      [
+        "ingest",
+        source,
+        "--converter",
+        "builtin",
+        "--no-compile",
+        "--no-commit",
+      ],
+      vault,
+    );
+
+    expect(output).toContain("Warning: Skipping legacy.doc");
+    expect(output).toContain("No converter available");
+    expect(output).toContain("Ingested 0 pages");
+    expect(existsSync(join(vault, "pages", "legacy.doc.md"))).toBe(false);
+
+    const failure = runCliFailure(
+      [
+        "ingest",
+        source,
+        "--converter",
+        "builtin",
+        "--strict-convert",
+        "--no-compile",
+        "--no-commit",
+      ],
+      vault,
+    );
+    expect(failure).toContain("Skipping legacy.doc");
+    expect(failure).toContain("No converter available");
+    expect(existsSync(join(vault, "pages", "legacy.doc.md"))).toBe(false);
   });
 
   it("can compile ingested directory pages with bounded concurrency", async () => {
@@ -1728,7 +1920,7 @@ describe("akb CLI", () => {
   it("migrates v0.0 pages to confidence ledgers and shows confidence", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
-    const source = join(dir, "confidence.md");
+    const source = join(vault, "pages", "confidence.md");
     writeFileSync(
       source,
       [
@@ -1745,8 +1937,6 @@ describe("akb CLI", () => {
         "This page should receive a source_added ledger event.",
       ].join("\n"),
     );
-    runCli(["ingest", source, "--no-commit"], vault);
-
     const migrateOutput = runCli(["migrate", "to-v0.1"], vault);
     const ledgerPath = join(vault, "pages", ".page_migrate00010.ledger.jsonl");
     const event = JSON.parse(
@@ -2792,6 +2982,7 @@ describe("akb CLI", () => {
         "---",
         "id: page_stale0000001",
         "title: Stale Runbook",
+        "source_type: chat",
         'created_at: "2025-01-01"',
         'source_path: "./stale.md"',
         "---",
@@ -3949,6 +4140,107 @@ describe("akb CLI", () => {
     expect(ledger.match(/"kind":"verified"/g)?.length).toBe(2);
   });
 
+  it("records webhook runtime signals from a local agent", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "agent-runtime.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_agentrt00001",
+        "title: Agent Runtime Signal Page",
+        "references:",
+        "  - src/agent-runtime.ts",
+        "---",
+        "# Agent Runtime Signal Page",
+        "",
+        "Runtime signal target.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+
+    runCli(
+      [
+        "webhook",
+        "ci-success",
+        "--by-agent",
+        "codex",
+        "--changed-file",
+        "src/agent-runtime.ts",
+        "--evidence",
+        "local-agent-run-1",
+        "--no-commit",
+      ],
+      vault,
+    );
+
+    const ledger = readFileSync(
+      join(vault, "pages", ".page_agentrt00001.ledger.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(ledger.at(-1)).toMatchObject({
+      kind: "verified",
+      actor: "agent",
+      actorId: "agent:codex",
+      verifierType: "agent",
+      verifierId: "codex",
+      reason: "ci_success: local-agent-run-1",
+    });
+  });
+
+  it("uses --by-agent for runtime signal files without coupling to a concrete agent", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "watch-agent.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_watchagent01",
+        "title: Watch Agent Page",
+        "---",
+        "# Watch Agent Page",
+        "",
+        "Runtime signal target.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+    const signalDir = join(vault, ".akb", "runtime-signals");
+    mkdirSync(signalDir, { recursive: true });
+    writeFileSync(
+      join(signalDir, "agent-signal.json"),
+      JSON.stringify({
+        kind: "deploy_success",
+        page_ids: ["page_watchagent01"],
+        evidence: "local-agent-run-2",
+      }),
+    );
+
+    runCli(
+      ["watch", "--once", "--by-agent", "cursor-local", "--no-commit"],
+      vault,
+    );
+
+    const ledger = readFileSync(
+      join(vault, "pages", ".page_watchagent01.ledger.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(ledger.at(-1)).toMatchObject({
+      kind: "verified",
+      actor: "agent",
+      actorId: "agent:cursor-local",
+      verifierId: "cursor-local",
+      reason: "deploy_success: local-agent-run-2",
+    });
+  });
+
   it("records runtime contradiction signals from webhook and watch failures", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
@@ -4089,6 +4381,58 @@ describe("akb CLI", () => {
     });
   });
 
+  it("records runbook execution by a local agent", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "runbook-agent.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_runbookagent",
+        "title: Agent Runbook",
+        "type: runbook",
+        "---",
+        "# Agent Runbook",
+        "",
+        "```bash",
+        "printf agent-runbook-ok",
+        "```",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+
+    runCli(
+      [
+        "runbook",
+        "exec",
+        "page_runbookagent",
+        "--by-agent",
+        "codex",
+        "--now",
+        "2026-05-17T00:00:00.000Z",
+        "--no-commit",
+      ],
+      vault,
+    );
+
+    const ledger = readFileSync(
+      join(vault, "pages", ".page_runbookagent.ledger.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(ledger.at(-1)).toMatchObject({
+      kind: "verified",
+      actor: "agent",
+      actorId: "agent:codex",
+      verifierType: "agent",
+      verifierId: "codex",
+      reason: "runbook_exec: pages/runbook-agent.md (1 step)",
+    });
+  });
+
   it("records runbook execution failure as runtime contradiction", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
@@ -4189,6 +4533,60 @@ describe("akb CLI", () => {
       timestamp: "2026-05-17T00:00:00.000Z",
       actorId: "test:integration",
       verifierId: "test:integration",
+      reason: "test_integration_success: true",
+    });
+  });
+
+  it("records linked test success by any local agent id", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "linked-agent-page.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_testagent001",
+        "title: Linked Agent Test Page",
+        "---",
+        "# Linked Agent Test Page",
+        "",
+        "Behavior covered by an external test.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+    writeFileSync(
+      join(vault, "linked-agent.test.ts"),
+      "// @akb-page page_testagent001\n",
+    );
+
+    runCli(
+      [
+        "test",
+        "--link-pages",
+        "--command",
+        "true",
+        "--by-agent",
+        "custom-local-agent",
+        "--now",
+        "2026-05-17T00:00:00.000Z",
+        "--no-commit",
+      ],
+      vault,
+    );
+
+    const ledger = readFileSync(
+      join(vault, "pages", ".page_testagent001.ledger.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(ledger.at(-1)).toMatchObject({
+      kind: "verified",
+      actor: "agent",
+      actorId: "agent:custom-local-agent",
+      verifierType: "agent",
+      verifierId: "custom-local-agent",
       reason: "test_integration_success: true",
     });
   });
@@ -5326,13 +5724,13 @@ describe("akb CLI", () => {
       ].join("\n"),
     );
     const before = readFileSync(join(vault, "pages", "first.md"), "utf8");
+    const ledgerPath = join(vault, "pages", ".page_atomic000001.ledger.jsonl");
+    const ledgerBefore = readFileSync(ledgerPath, "utf8");
     const failure = runCliFailure(["patch", "apply", "patch_bad"], vault);
 
     expect(failure).toContain("Invalid patch");
     expect(readFileSync(join(vault, "pages", "first.md"), "utf8")).toBe(before);
-    expect(
-      existsSync(join(vault, "pages", ".page_atomic000001.ledger.jsonl")),
-    ).toBe(false);
+    expect(readFileSync(ledgerPath, "utf8")).toBe(ledgerBefore);
   });
 
   it("requires explicit review before applying low-confidence patches", () => {
@@ -5417,6 +5815,8 @@ describe("akb CLI", () => {
       join(vault, "pages", "reject-target.md"),
       "utf8",
     );
+    const ledgerPath = join(vault, "pages", ".page_reject000001.ledger.jsonl");
+    const ledgerBefore = readFileSync(ledgerPath, "utf8");
     writeFileSync(
       join(vault, ".akb", "patches", "patch_reject_me.yaml"),
       [
@@ -5463,9 +5863,7 @@ describe("akb CLI", () => {
     expect(readFileSync(join(vault, "pages", "reject-target.md"), "utf8")).toBe(
       before,
     );
-    expect(
-      existsSync(join(vault, "pages", ".page_reject000001.ledger.jsonl")),
-    ).toBe(false);
+    expect(readFileSync(ledgerPath, "utf8")).toBe(ledgerBefore);
 
     const list = runCli(["patch", "list"], vault);
     expect(list).toContain("patch_reject_me rejected");

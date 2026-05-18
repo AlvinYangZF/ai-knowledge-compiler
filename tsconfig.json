@@ -5,6 +5,7 @@
     { "path": "packages/compile" },
     { "path": "packages/confidence" },
     { "path": "packages/git-store" },
+    { "path": "packages/ingest-engine" },
     { "path": "packages/markdown-engine" },
     { "path": "packages/ranker" },
     { "path": "packages/search-engine" },
