@@ -76,6 +76,14 @@ function runCliFailure(args: string[], cwd: string): string {
   throw new Error("Expected command to fail");
 }
 
+function webSnapshotFromHtml(html: string): Record<string, unknown> {
+  const match = html.match(/<script>window\.__AKB_DATA__ = (.*);<\/script>/);
+  if (!match) {
+    throw new Error("Missing web snapshot script");
+  }
+  return JSON.parse(match[1]) as Record<string, unknown>;
+}
+
 describe("akb CLI", () => {
   let dir: string;
 
@@ -1075,16 +1083,50 @@ describe("akb CLI", () => {
 
     const output = runCli(["web", "build", "--output", ".akb/web"], vault);
     const html = readFileSync(join(vault, ".akb", "web", "index.html"), "utf8");
+    const snapshot = webSnapshotFromHtml(html);
+    const files = snapshot.files as Array<{
+      file: string;
+      page_count: number;
+      min_score: number | null;
+      average_score: number | null;
+      risk_level: string;
+      flags: string[];
+      pages: Array<{
+        page_id: string;
+        path: string;
+        title: string;
+        score: number | null;
+      }>;
+    }>;
 
     expect(output).toContain("Wrote web UI .akb/web/index.html.");
     expect(html).toContain("AKB Vault");
     expect(html).toContain("Pages");
+    expect(html).toContain("Files");
     expect(html).toContain("Confidence");
     expect(html).toContain("Patches");
     expect(html).toContain("Relation Graph");
+    expect(html).toContain("file-filter");
+    expect(html).toContain("view-files");
     expect(html).toContain("Web UI Page");
     expect(html).toContain("patch_web_ui");
     expect(html).toContain("window.__AKB_DATA__");
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatchObject({
+      file: "src/web-ui.ts",
+      page_count: 1,
+      risk_level: "ok",
+      flags: [],
+      pages: [
+        expect.objectContaining({
+          page_id: "page_webui0000001",
+          path: "pages/web-ui-page.md",
+          title: "Web UI Page",
+        }),
+      ],
+    });
+    expect(files[0].min_score).toBe(files[0].pages[0].score);
+    expect(files[0].average_score).toBe(files[0].pages[0].score);
   });
 
   it("fails the quality gate for low-confidence changed-file pages", () => {

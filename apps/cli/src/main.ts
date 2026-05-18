@@ -1685,9 +1685,10 @@ function buildWebSnapshot(vaultDir: string) {
     };
   });
   return {
-    schema_version: "web-snapshot/0.1",
+    schema_version: "web-snapshot/0.2",
     generated_at: new Date().toISOString(),
     pages,
+    files: webFileConfidenceEntries(vaultDir),
     patches: loadAllPatches(vaultDir).map((patch) => ({
       id: patch.id,
       status: patch.status,
@@ -1757,10 +1758,15 @@ input { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding:
 .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
 button { border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 8px 10px; font-size: 14px; cursor: pointer; color: var(--ink); }
 button.active { border-color: var(--accent); color: var(--accent); background: #edf7f2; }
-.page-list { margin-top: 14px; display: grid; gap: 8px; }
-.page-item { width: 100%; text-align: left; display: block; }
+.sidebar-controls { display: grid; gap: 10px; }
+.filter-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.filter-row button { font-size: 12px; padding: 6px 8px; }
+select { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 8px 9px; font-size: 13px; background: white; color: var(--ink); }
+.page-list, .file-list { margin-top: 14px; display: grid; gap: 8px; }
+.page-item, .file-item { width: 100%; text-align: left; display: block; }
 .page-item .title { font-weight: 650; display: block; overflow-wrap: anywhere; }
-.page-item .meta { color: var(--muted); font-size: 12px; display: block; margin-top: 2px; overflow-wrap: anywhere; }
+.file-item .title { font-weight: 650; display: block; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.page-item .meta, .file-item .meta { color: var(--muted); font-size: 12px; display: block; margin-top: 2px; overflow-wrap: anywhere; }
 section.view { display: none; }
 section.view.active { display: block; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
@@ -1772,6 +1778,18 @@ section.view.active { display: block; }
 .status { font-weight: 700; color: var(--accent); }
 .status.warn { color: var(--warn); }
 .status.bad { color: var(--bad); }
+.risk { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 7px; font-size: 12px; font-weight: 700; color: var(--accent); background: #f7faf8; }
+.risk.warn { color: var(--warn); background: #fff8eb; }
+.risk.bad { color: var(--bad); background: #fff0f0; }
+.score-meter { display: grid; grid-template-columns: minmax(72px, 1fr) 52px; gap: 8px; align-items: center; min-width: 132px; }
+.score-track { height: 8px; border-radius: 999px; background: #e7ede9; overflow: hidden; }
+.score-fill { display: block; height: 100%; background: var(--accent); }
+.score-fill.warn { background: var(--warn); }
+.score-fill.bad { background: var(--bad); }
+.file-heading { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 14px; }
+.file-heading h2 { margin: 0 0 4px; font-size: 22px; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.file-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.file-summary .metric { min-width: 0; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; border-bottom: 1px solid var(--line); padding: 8px 6px; vertical-align: top; }
@@ -1784,6 +1802,7 @@ th, td { text-align: left; border-bottom: 1px solid var(--line); padding: 8px 6p
   <div class="subtitle">Static review UI for pages, Confidence Ledger state, patches, lineage, eval results, and relation graph projection.</div>
   <div class="metrics">
     <div class="metric"><strong id="metric-pages">0</strong><span>Pages</span></div>
+    <div class="metric"><strong id="metric-files">0</strong><span>Files</span></div>
     <div class="metric"><strong id="metric-patches">0</strong><span>Patches</span></div>
     <div class="metric"><strong id="metric-edges">0</strong><span>Graph Edges</span></div>
     <div class="metric"><strong id="metric-eval">0</strong><span>Eval Reports</span></div>
@@ -1791,12 +1810,12 @@ th, td { text-align: left; border-bottom: 1px solid var(--line); padding: 8px 6p
 </header>
 <div class="shell">
   <aside>
-    <input id="filter" placeholder="Filter pages">
-    <div id="page-list" class="page-list"></div>
+    <div id="sidebar"></div>
   </aside>
   <main>
     <div class="tabs">
       <button data-tab="page" class="active">Pages</button>
+      <button data-tab="files">Files</button>
       <button data-tab="confidence">Confidence</button>
       <button data-tab="patches">Patches</button>
       <button data-tab="lineage">Lineage</button>
@@ -1804,6 +1823,7 @@ th, td { text-align: left; border-bottom: 1px solid var(--line); padding: 8px 6p
       <button data-tab="graph">Relation Graph</button>
     </div>
     <section id="view-page" class="view active"></section>
+    <section id="view-files" class="view"></section>
     <section id="view-confidence" class="view"></section>
     <section id="view-patches" class="view"></section>
     <section id="view-lineage" class="view"></section>
@@ -1814,24 +1834,56 @@ th, td { text-align: left; border-bottom: 1px solid var(--line); padding: 8px 6p
 <script>window.__AKB_DATA__ = ${data};</script>
 <script>
 const data = window.__AKB_DATA__;
+const files = data.files || [];
 let selectedId = data.pages[0]?.id ?? null;
+let selectedFile = files[0]?.file ?? null;
 let activeTab = "page";
+let pageFilterQuery = "";
+let fileFilterQuery = "";
+let fileRiskFilter = "all";
+let fileSortMode = "risk";
 const byId = new Map(data.pages.map((page) => [page.id, page]));
+const byFile = new Map(files.map((file) => [file.file, file]));
 const $ = (id) => document.getElementById(id);
 const text = (value) => value == null || value === "" ? "-" : String(value);
 function statusClass(flags) { return flags?.length ? (flags.includes("NEEDS_REVIEW") || flags.includes("SUPERSEDED") ? "bad" : "warn") : ""; }
+function riskClass(risk) { return risk === "ok" ? "" : (risk === "stale" || risk === "superseded" ? "warn" : "bad"); }
+function riskLabel(risk) { return String(risk || "ok").replaceAll("_", " ").toUpperCase(); }
+function scoreText(value) { return value == null ? "missing" : Number(value).toFixed(4); }
 function setText(id, value) { $(id).textContent = String(value); }
+function el(tag, className, value) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (value !== undefined) node.textContent = String(value);
+  return node;
+}
 function renderShell() {
   setText("metric-pages", data.pages.length);
+  setText("metric-files", files.length);
   setText("metric-patches", data.patches.length);
   setText("metric-edges", data.graph.edges.length);
   setText("metric-eval", data.eval_reports.length);
-  renderPageList();
+  renderSidebar();
   renderActiveView();
 }
+function renderSidebar() {
+  if (activeTab === "files") {
+    renderFileList();
+    return;
+  }
+  renderPageList();
+}
 function renderPageList() {
-  const query = $("filter").value.toLowerCase();
-  const list = $("page-list");
+  const sidebar = $("sidebar");
+  sidebar.textContent = "";
+  const input = el("input");
+  input.id = "filter";
+  input.placeholder = "Filter pages";
+  input.value = pageFilterQuery;
+  input.oninput = () => { pageFilterQuery = input.value; renderPageList(); };
+  const list = el("div", "page-list");
+  sidebar.append(input, list);
+  const query = pageFilterQuery.toLowerCase();
   list.textContent = "";
   data.pages.filter((page) => [page.title, page.path, page.id].join(" ").toLowerCase().includes(query)).forEach((page) => {
     const button = document.createElement("button");
@@ -1844,6 +1896,68 @@ function renderPageList() {
     meta.textContent = page.path + " | " + text(page.confidence.score?.toFixed?.(4));
     button.append(title, meta);
     button.onclick = () => { selectedId = page.id; renderShell(); };
+    list.append(button);
+  });
+}
+function visibleFiles() {
+  const query = fileFilterQuery.toLowerCase();
+  const rows = files.filter((file) => {
+    const matchesRisk = fileRiskFilter === "all" || file.risk_level === fileRiskFilter;
+    const haystack = [file.file, ...file.pages.flatMap((page) => [page.title, page.path, page.page_id])].join(" ").toLowerCase();
+    return matchesRisk && haystack.includes(query);
+  });
+  return rows.sort((left, right) => {
+    if (fileSortMode === "path") return left.file.localeCompare(right.file);
+    if (fileSortMode === "pages") return right.page_count - left.page_count || left.file.localeCompare(right.file);
+    if (fileSortMode === "score") return nullableNumberSort(left.min_score, right.min_score) || left.file.localeCompare(right.file);
+    return riskRank(left.risk_level) - riskRank(right.risk_level) || nullableNumberSort(left.min_score, right.min_score) || right.page_count - left.page_count || left.file.localeCompare(right.file);
+  });
+}
+function nullableNumberSort(left, right) {
+  if (left == null && right == null) return 0;
+  if (left == null) return -1;
+  if (right == null) return 1;
+  return left - right;
+}
+function riskRank(risk) {
+  return { missing_ledger: 0, needs_review: 1, stale: 2, superseded: 3, ok: 4 }[risk] ?? 5;
+}
+function renderFileList() {
+  const sidebar = $("sidebar");
+  sidebar.textContent = "";
+  const controls = el("div", "sidebar-controls");
+  const input = el("input");
+  input.id = "file-filter";
+  input.placeholder = "Filter files";
+  input.value = fileFilterQuery;
+  input.oninput = () => { fileFilterQuery = input.value; renderFileList(); renderFiles(); };
+  const filterRow = el("div", "filter-row");
+  [["all", "All"], ["needs_review", "Needs Review"], ["stale", "Stale"], ["missing_ledger", "Missing Ledger"], ["superseded", "Superseded"], ["ok", "OK"]].forEach(([value, label]) => {
+    const button = el("button", value === fileRiskFilter ? "active" : "", label);
+    button.onclick = () => { fileRiskFilter = value; renderFileList(); renderFiles(); };
+    filterRow.append(button);
+  });
+  const sort = document.createElement("select");
+  [["risk", "Sort by risk"], ["score", "Sort by score"], ["pages", "Sort by page count"], ["path", "Sort by path"]].forEach(([value, label]) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    sort.append(option);
+  });
+  sort.value = fileSortMode;
+  sort.onchange = () => { fileSortMode = sort.value; renderFileList(); renderFiles(); };
+  const list = el("div", "file-list");
+  controls.append(input, filterRow, sort, list);
+  sidebar.append(controls);
+  const rows = visibleFiles();
+  if (!rows.some((file) => file.file === selectedFile)) {
+    selectedFile = rows[0]?.file ?? null;
+  }
+  rows.forEach((file) => {
+    const button = el("button", "file-item" + (file.file === selectedFile ? " active" : ""));
+    button.append(el("span", "title", file.file));
+    button.append(el("span", "meta", riskLabel(file.risk_level) + " | min " + scoreText(file.min_score) + " | " + file.page_count + " page" + (file.page_count === 1 ? "" : "s")));
+    button.onclick = () => { selectedFile = file.file; renderShell(); };
     list.append(button);
   });
 }
@@ -1860,6 +1974,7 @@ function renderActiveView() {
   document.querySelectorAll("section.view").forEach((view) => view.classList.toggle("active", view.id === "view-" + activeTab));
   const page = byId.get(selectedId);
   renderPage(page);
+  renderFiles();
   renderConfidence(page);
   renderPatches(page);
   renderLineage(page);
@@ -1873,6 +1988,64 @@ function renderPage(page) {
   const pre = document.createElement("pre");
   pre.textContent = page.body;
   root.append(panel(page.title, pre));
+}
+function appendMetric(root, value, label) {
+  const metric = el("div", "metric");
+  metric.append(el("strong", "", value), el("span", "", label));
+  root.append(metric);
+}
+function scoreMeter(score) {
+  const meter = el("span", "score-meter");
+  const track = el("span", "score-track");
+  const fill = el("span", "score-fill" + (score == null || score < 0.5 ? " bad" : score < 0.7 ? " warn" : ""));
+  fill.style.width = score == null ? "0%" : Math.max(0, Math.min(100, score * 100)) + "%";
+  track.append(fill);
+  meter.append(track, el("span", "muted", scoreText(score)));
+  return meter;
+}
+function renderFiles() {
+  const root = $("view-files");
+  root.textContent = "";
+  const file = byFile.get(selectedFile);
+  if (!file) {
+    const empty = el("div");
+    empty.append(el("p", "muted", "No referenced files found. File confidence depends on page references frontmatter."));
+    root.append(panel("Files", empty));
+    return;
+  }
+  const heading = el("div", "file-heading");
+  const headingText = el("div");
+  headingText.append(el("h2", "", file.file), el("p", "muted", "Knowledge pages that reference this file."));
+  heading.append(headingText, el("span", "risk " + riskClass(file.risk_level), riskLabel(file.risk_level)));
+  const summary = el("div", "file-summary");
+  appendMetric(summary, scoreText(file.min_score), "Minimum score");
+  appendMetric(summary, scoreText(file.average_score), "Average score");
+  appendMetric(summary, file.page_count, "Referenced pages");
+  appendMetric(summary, file.flags.length ? file.flags.join(", ") : "OK", "Flags");
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  ["Page", "Score", "Status", "Evidence", "Freshness"].forEach((label) => headRow.append(el("th", "", label)));
+  thead.append(headRow);
+  const tbody = document.createElement("tbody");
+  file.pages.forEach((page) => {
+    const row = document.createElement("tr");
+    const pageCell = document.createElement("td");
+    const pageButton = el("button", "", page.title);
+    pageButton.onclick = () => { selectedId = page.page_id; activeTab = "confidence"; renderShell(); };
+    pageCell.append(pageButton, el("br"), el("span", "muted", page.page_id + " | " + page.path));
+    const scoreCell = document.createElement("td");
+    scoreCell.append(scoreMeter(page.score));
+    const statusCell = document.createElement("td");
+    statusCell.append(el("span", "status " + statusClass(page.status.flags), page.status.flags.join(", ") || "OK"));
+    if (page.status.reasons.length) {
+      statusCell.append(el("br"), el("span", "muted", page.status.reasons.join("; ")));
+    }
+    row.append(pageCell, scoreCell, statusCell, el("td", "", "sources " + page.source_count + " | contradictions " + page.contradiction_count), el("td", "", "verified " + text(page.last_verified_at) + " | event " + text(page.last_event_at)));
+    tbody.append(row);
+  });
+  table.append(thead, tbody);
+  root.append(heading, summary, panel("Referenced Pages", table));
 }
 function renderConfidence(page) {
   const root = $("view-confidence");
@@ -1918,8 +2091,7 @@ function renderGraph(page) {
   table.innerHTML = "<table><thead><tr><th>From</th><th>Relation</th><th>To</th></tr></thead><tbody>" + rows.map((edge) => "<tr><td>" + edge.from + "</td><td>" + edge.relation + "</td><td>" + edge.to + "</td></tr>").join("") + "</tbody></table>";
   root.append(panel("Relation Graph", table));
 }
-document.querySelectorAll(".tabs button").forEach((button) => button.onclick = () => { activeTab = button.dataset.tab; renderActiveView(); });
-$("filter").oninput = renderPageList;
+document.querySelectorAll(".tabs button").forEach((button) => button.onclick = () => { activeTab = button.dataset.tab; renderShell(); });
 renderShell();
 </script>
 </body>
@@ -4670,6 +4842,105 @@ function confidenceByFileEntries(
         .sort((left, right) => left.path.localeCompare(right.path))
         .map((page) => confidenceSummaryForPage(vaultDir, page, now, false)),
     }));
+}
+
+type WebFileRiskLevel =
+  | "missing_ledger"
+  | "needs_review"
+  | "stale"
+  | "superseded"
+  | "ok";
+
+interface WebFileConfidenceEntry {
+  file: string;
+  page_count: number;
+  min_score: number | null;
+  average_score: number | null;
+  risk_level: WebFileRiskLevel;
+  flags: string[];
+  pages: ConfidenceFilePageSummary[];
+}
+
+function webFileConfidenceEntries(vaultDir: string): WebFileConfidenceEntry[] {
+  return confidenceByFileEntries(vaultDir, undefined)
+    .map((entry) => {
+      const scores = entry.pages
+        .map((page) => page.score)
+        .filter((score): score is number => typeof score === "number");
+      const flags = [
+        ...new Set(entry.pages.flatMap((page) => page.status.flags)),
+      ].sort();
+      return {
+        file: entry.file,
+        page_count: entry.pages.length,
+        min_score: scores.length === 0 ? null : Math.min(...scores),
+        average_score:
+          scores.length === 0
+            ? null
+            : roundWebScore(
+                scores.reduce((sum, score) => sum + score, 0) / scores.length,
+              ),
+        risk_level: webFileRiskLevel(flags),
+        flags,
+        pages: entry.pages,
+      };
+    })
+    .sort(compareWebFileConfidenceEntries);
+}
+
+function roundWebScore(value: number): number {
+  return Math.round(value * 10000) / 10000;
+}
+
+function webFileRiskLevel(flags: string[]): WebFileRiskLevel {
+  if (flags.includes("MISSING_LEDGER")) {
+    return "missing_ledger";
+  }
+  if (flags.includes("NEEDS_REVIEW")) {
+    return "needs_review";
+  }
+  if (flags.includes("STALE")) {
+    return "stale";
+  }
+  if (flags.includes("SUPERSEDED")) {
+    return "superseded";
+  }
+  return "ok";
+}
+
+function webFileRiskRank(level: WebFileRiskLevel): number {
+  return {
+    missing_ledger: 0,
+    needs_review: 1,
+    stale: 2,
+    superseded: 3,
+    ok: 4,
+  }[level];
+}
+
+function compareWebFileConfidenceEntries(
+  left: WebFileConfidenceEntry,
+  right: WebFileConfidenceEntry,
+): number {
+  return (
+    webFileRiskRank(left.risk_level) - webFileRiskRank(right.risk_level) ||
+    nullableScoreSort(left.min_score, right.min_score) ||
+    right.page_count - left.page_count ||
+    left.file.localeCompare(right.file)
+  );
+}
+
+function nullableScoreSort(left: number | null, right: number | null): number {
+  if (left === null && right === null) {
+    return 0;
+  }
+  if (left === null) {
+    return -1;
+  }
+  if (right === null) {
+    return 1;
+  }
+  return left - right;
 }
 
 function confidencePagesForFile(

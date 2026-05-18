@@ -681,7 +681,7 @@ node "$AKB" graph show <page-id-or-path>
 node "$AKB" web build --output .akb/web
 ```
 
-生成结果是 `.akb/web/index.html`。这个页面内嵌当前 vault 的页面列表、正文、confidence 状态、section report、patch 摘要、lineage 摘要、eval report 摘要和 relation graph。它是本地 review 产物，可以直接打开，不需要提交到 git。
+生成结果是 `.akb/web/index.html`。这个页面内嵌当前 vault 的页面列表、正文、confidence 状态、按文件聚合的 confidence、section report、patch 摘要、lineage 摘要、eval report 摘要和 relation graph。`Files` 视图会从页面 `references:` 反查文件，展示每个文件关联的知识页、最低 confidence、风险标记和最近验证状态，适合 reviewer 从变更文件开始判断哪些知识需要复核。它是本地 review 产物，可以直接打开，不需要提交到 git。
 
 ### 12.3 生成 code intelligence report
 

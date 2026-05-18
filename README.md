@@ -398,7 +398,7 @@ node "$AKB" code scan src --output .akb/code-intel/report.json
 node "$AKB" web build --output .akb/web
 ```
 
-`web build` 会生成 `.akb/web/index.html`，内嵌当前 vault 的页面、confidence、section report、patch、lineage、eval 和 relation graph snapshot。这个文件是本地 review 产物，不需要提交。
+`web build` 会生成 `.akb/web/index.html`，内嵌当前 vault 的页面、按文件聚合的 confidence、section report、patch、lineage、eval 和 relation graph snapshot。`Files` 视图会按页面 frontmatter 的 `references:` 分组，帮助 reviewer 从变更文件反查依赖它的知识页和对应 confidence。这个文件是本地 review 产物，不需要提交。
 
 运行团队质量门禁：
 
