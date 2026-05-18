@@ -172,22 +172,33 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 
 如果暂时不设置 API key 环境变量，`ask` 会降级为 extractive answer；`compile` 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。
 
-## 5. 导入 Markdown
+## 5. 导入 Markdown、文档和代码
 
-重要：`ingest` 默认会在导入后继续执行 `compile`，为每个新页面生成 reviewable patch。首次批量导入自己的目录时，建议先加 `--no-compile`，只完成导入和索引，确认页面结构正常后再按需运行 compile。
+重要：`ingest` 默认会在导入后继续执行 `compile`，为每个新页面生成 reviewable patch。首次批量导入自己的目录时，建议先加 `--no-compile`，只完成导入、格式规范化和索引，确认页面结构正常后再按需运行 compile。
 
-如果没有设置对应 API key 环境变量，`compile` 不会调用大模型，而是走 degraded heuristic fallback。但对大量 Markdown 文件来说，导入后逐页 compile 仍然可能很慢，因为每个 source 都要扫描 vault 里的候选页面。若已经设置了 API key，则默认 compile 会对每个 source 调用 LLM，更应该避免在首次大目录导入时自动触发。
+如果没有设置对应 API key 环境变量，`compile` 不会调用大模型，而是走 degraded heuristic fallback。但对大量 Markdown、PDF、Word 或代码文件来说，导入后逐页 compile 仍然可能很慢，因为每个 source 都要扫描 vault 里的候选页面。若已经设置了 API key，则默认 compile 会对每个 source 调用 LLM，更应该避免在首次大目录导入时自动触发。
 
 导入单个文件：
 
 ```bash
 node "$AKB" ingest /path/to/my-docs/architecture.md --no-compile --no-commit
+node "$AKB" ingest /path/to/my-docs/spec.pdf --no-compile --no-commit
+node "$AKB" ingest /path/to/my-docs/notes.docx --no-compile --no-commit
+node "$AKB" ingest /path/to/project/src/gc.c --no-compile --no-commit
 ```
 
 导入整个目录：
 
 ```bash
 node "$AKB" ingest /path/to/my-docs --recursive --no-compile --no-commit
+```
+
+`ingest` 会把非 Markdown 输入统一转换成 Markdown canonical page：`spec.pdf` 写成 `pages/spec.pdf.md`，`notes.docx` 写成 `pages/notes.docx.md`，`src/gc.c` 写成 `pages/src/gc.c.md`。代码页会保留 fenced source block，并写入 `source_type: code`、`code_language`、`line_count` 等 frontmatter。PDF/DOC/DOCX 依赖本机可用转换器；可用 `--converter auto|builtin|external` 选择策略，用 `--strict-convert` 要求任何转换失败都让命令失败。
+
+目录导入默认不包含代码文件，避免把整个代码库意外导入。确认要把代码作为最高权重知识源导入时，显式加：
+
+```bash
+node "$AKB" ingest /path/to/project --recursive --include-code --no-compile --no-commit
 ```
 
 如果你已经确认要在导入后立即生成 compile patch，可以限制并发数：
@@ -209,16 +220,20 @@ node "$AKB" ingest /path/to/my-docs --recursive --include-hidden --no-compile --
 导入开始后会先打印总数，并逐个显示进度：
 
 ```text
-Found 125 markdown files to ingest.
-Ingest [##------------------] 10/125 HLD_02_CONTROLLER_THREAD_EN.md
+Found 125 ingestible sources to ingest.
+Ingest [##------------------] 10/125 HLD_02_CONTROLLER_THREAD_EN.md -> pages/HLD_02_CONTROLLER_THREAD_EN.md
 ```
 
 常用选项：
 
-- `--recursive`：递归导入目录下的 Markdown
+- `--recursive`：递归导入目录下支持的 Markdown、文档和文本格式
 - `--tag <tag>`：给导入页面追加 tag
 - `--force`：覆盖已有同名页面
 - `--include-hidden`：导入隐藏文件和隐藏文件夹，并把写入 `pages/` 的路径转换为非隐藏路径
+- `--include-code`：目录导入时包含支持的代码文件；单个代码文件导入不需要这个选项
+- `--no-include-documents`：只导入 Markdown，跳过 PDF、Word、文本和 markup 文档
+- `--converter <auto|builtin|external>`：选择转换器策略，默认 `auto`
+- `--strict-convert`：任一转换失败就让命令失败，适合 CI 或正式批量导入
 - `--no-compile`：导入后不触发 compile。首次批量导入强烈建议使用
 - `--compile`：导入后立即对每个新页面生成 compile patch。只建议在文件数量少或你已经准备好 review patch 时使用
 - `--compile-concurrency <n>`：导入完成后并发 compile 的 source 数量。默认 `1`，建议从 `2` 开始

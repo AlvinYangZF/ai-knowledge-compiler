@@ -236,7 +236,7 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 
 1. `init` 创建 vault，并确认 `.akb/config.yaml`。
 2. 可选配置 LLM provider，只把真实 API key 放在本机环境变量。
-3. `ingest --recursive --no-compile --no-commit` 先导入 Markdown，不立即 compile。
+3. `ingest --recursive --no-compile --no-commit` 先导入 Markdown、文档导出和少量明确指定的代码文件，不立即 compile。
 4. `index --rebuild` 后用 `search` / `ask` 验证基础检索。
 5. `migrate to-v0.1 --no-commit` 初始化 Confidence Ledger。
 6. 对少量关键页面运行 `compile --source ...` 或小并发 `ingest --compile-concurrency 2`，review 后再 `patch apply`。
@@ -248,14 +248,19 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 ```bash
 AKB=/path/to/ai-knowledge-compiler/apps/cli/dist/main.js
 
-node "$AKB" ingest /path/to/markdown-or-directory --recursive --no-compile --no-commit
-node "$AKB" ingest /path/to/markdown-or-directory --recursive --compile-concurrency 2 --no-commit
+node "$AKB" ingest /path/to/markdown-pdf-docx-or-directory --recursive --no-compile --no-commit
+node "$AKB" ingest /path/to/src/gc.c --no-compile --no-commit
+node "$AKB" ingest /path/to/codebase --recursive --include-code --no-compile --no-commit
+node "$AKB" ingest /path/to/docs --recursive --converter external --strict-convert --no-compile --no-commit
+node "$AKB" ingest /path/to/docs --recursive --compile-concurrency 2 --no-commit
 node "$AKB" index --rebuild
 node "$AKB" search "garbage collection"
 node "$AKB" search "garbage collection" --hybrid --format json
 ```
 
-`ingest` 支持单个 Markdown 文件或目录。目录递归导入需要显式传 `--recursive`。默认会在导入后触发 `compile` 并为写入操作创建 git commit；首次批量导入建议加 `--no-compile --no-commit`，确认 `pages/` 和索引正常后再分批运行 compile。
+`ingest` 支持 Markdown、`.pdf`、`.docx`、`.doc`、`.txt`、`.html`、`.rtf`、`.odt`，以及 `.c/.cpp/.h` 和 TS/JS 系列代码文件。所有非 Markdown 输入都会先规范化成 `pages/**/*.md`：例如 `spec.pdf` 写成 `pages/spec.pdf.md`，`src/gc.c` 写成 `pages/src/gc.c.md`。PDF/DOC/DOCX 等格式依赖可用转换器；`--converter auto|builtin|external` 控制选择策略，`--strict-convert` 会在任何转换失败时让命令失败。
+
+目录递归导入需要显式传 `--recursive`。目录导入默认不包含代码文件，避免把整个工程源码意外灌入知识库；单个代码文件会直接导入，目录代码导入需要显式加 `--include-code`。默认会在导入后触发 `compile` 并为写入操作创建 git commit；首次批量导入建议加 `--no-compile --no-commit`，确认 `pages/` 和索引正常后再分批运行 compile。
 
 导入阶段会串行写入 Markdown 和更新 SQLite index，避免多个写入者同时改 vault。导入完成后的 compile 阶段可以用 `--compile-concurrency <n>` 做有限并发；每个 source 仍只生成 proposed patch，不会直接应用到页面。批量 compile 结束后会打印 `Compile summary`，汇总 total、provider success、degraded、provider 分布和 degraded reason 计数。LLM compile provider 请求默认 120 秒超时，建议并发从 `2` 开始，避免过多并发触发 provider 限流或超时。
 

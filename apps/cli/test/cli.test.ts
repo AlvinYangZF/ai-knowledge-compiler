@@ -1282,10 +1282,7 @@ describe("akb CLI", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
     const source = join(dir, "gc.c");
-    writeFileSync(
-      source,
-      "int gc_should_trigger(void) { return 1; }\n",
-    );
+    writeFileSync(source, "int gc_should_trigger(void) { return 1; }\n");
 
     runCli(["ingest", source, "--no-compile", "--no-commit"], vault);
 
@@ -1338,6 +1335,46 @@ describe("akb CLI", () => {
     );
     expect(includeCodeOutput).toContain("Found 2 ingestible sources");
     expect(existsSync(join(vault, "pages", "src", "gc.c.md"))).toBe(true);
+  });
+
+  it("skips document conversion failures by default and fails in strict mode", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "legacy.doc");
+    writeFileSync(source, "legacy binary fixture");
+
+    const output = runCli(
+      [
+        "ingest",
+        source,
+        "--converter",
+        "builtin",
+        "--no-compile",
+        "--no-commit",
+      ],
+      vault,
+    );
+
+    expect(output).toContain("Warning: Skipping legacy.doc");
+    expect(output).toContain("No converter available");
+    expect(output).toContain("Ingested 0 pages");
+    expect(existsSync(join(vault, "pages", "legacy.doc.md"))).toBe(false);
+
+    const failure = runCliFailure(
+      [
+        "ingest",
+        source,
+        "--converter",
+        "builtin",
+        "--strict-convert",
+        "--no-compile",
+        "--no-commit",
+      ],
+      vault,
+    );
+    expect(failure).toContain("Skipping legacy.doc");
+    expect(failure).toContain("No converter available");
+    expect(existsSync(join(vault, "pages", "legacy.doc.md"))).toBe(false);
   });
 
   it("can compile ingested directory pages with bounded concurrency", async () => {
