@@ -41,13 +41,13 @@ import { ConfigSchema, PageFrontmatterSchema, PageIdSchema } from "@akb/core";
 import { loadGoldenSet, runEval } from "@akb/eval-harness";
 import { commitFiles, initVault } from "@akb/git-store";
 import {
-  convertIngestSource,
-  discoverIngestSources,
-  isSupportedCodeExtension,
-  targetMarkdownPath,
   type ConvertedMarkdown,
   type ConverterMode,
+  convertIngestSource,
+  discoverIngestSources,
   type IngestSource,
+  isSupportedCodeExtension,
+  targetMarkdownPath,
 } from "@akb/ingest-engine";
 import { ensureFrontmatter, parseMarkdown } from "@akb/markdown-engine";
 import { serveMcp } from "@akb/mcp-server";
@@ -430,10 +430,7 @@ export async function run(argv = process.argv): Promise<void> {
       "include PDF, Word, text, and markup document sources",
       true,
     )
-    .option(
-      "--no-include-documents",
-      "skip non-markdown document sources",
-    )
+    .option("--no-include-documents", "skip non-markdown document sources")
     .option("--include-code", "include supported code files", false)
     .option("--no-include-code", "skip supported code files")
     .option("--strict-convert", "fail when any source cannot be converted")
@@ -768,10 +765,9 @@ async function ingestCommand(
   const includeCodeOptionProvided =
     currentArgv.includes("--include-code") ||
     currentArgv.includes("--no-include-code");
-  const includeCode =
-    includeCodeOptionProvided
-      ? options.includeCode === true
-      : !sourceIsDirectory && isSupportedCodeExtension(extname(source));
+  const includeCode = includeCodeOptionProvided
+    ? options.includeCode === true
+    : !sourceIsDirectory && isSupportedCodeExtension(extname(source));
   const discovery = discoverIngestSources(source, {
     recursive,
     includeHidden,
@@ -788,7 +784,9 @@ async function ingestCommand(
   console.log(
     `Found ${sources.length} ingestible source${sources.length === 1 ? "" : "s"} to ingest.`,
   );
-  const markdownCount = sources.filter((item) => item.kind === "markdown").length;
+  const markdownCount = sources.filter(
+    (item) => item.kind === "markdown",
+  ).length;
   if (markdownCount === sources.length) {
     console.log(
       `Found ${markdownCount} markdown file${markdownCount === 1 ? "" : "s"} to ingest.`,
@@ -976,7 +974,10 @@ function recordIngestSourceAdded(
     sourceWeight: sourceWeightForPage(vaultDir, page),
   });
   return toPosix(
-    relative(vaultDir, appendConfidenceEventAndUpdateProjection(vaultDir, page, event)),
+    relative(
+      vaultDir,
+      appendConfidenceEventAndUpdateProjection(vaultDir, page, event),
+    ),
   );
 }
 
@@ -5578,45 +5579,6 @@ function markdownFiles(path: string, recursive = true): string[] {
     if (entry.isDirectory()) {
       if (recursive) {
         files.push(...markdownFiles(next, recursive));
-      }
-    } else if (entry.isFile() && extname(entry.name) === ".md") {
-      files.push(next);
-    }
-  }
-  return files.sort();
-}
-
-function markdownFilesForIngest(
-  path: string,
-  recursive: boolean,
-  includeHidden: boolean,
-): string[] {
-  if (!existsSync(path)) {
-    throw new Error(`Path does not exist: ${path}`);
-  }
-  if (!includeHidden && isHiddenName(basename(path))) {
-    return [];
-  }
-  const stat = statSync(path);
-  if (stat.isFile()) {
-    if (extname(path) !== ".md") {
-      console.warn(`Skipping non-markdown file: ${path}`);
-      return [];
-    }
-    return [path];
-  }
-  if (!stat.isDirectory()) {
-    return [];
-  }
-  const files: string[] = [];
-  for (const entry of readdirSync(path, { withFileTypes: true })) {
-    if (!includeHidden && isHiddenName(entry.name)) {
-      continue;
-    }
-    const next = join(path, entry.name);
-    if (entry.isDirectory()) {
-      if (recursive) {
-        files.push(...markdownFilesForIngest(next, recursive, includeHidden));
       }
     } else if (entry.isFile() && extname(entry.name) === ".md") {
       files.push(next);

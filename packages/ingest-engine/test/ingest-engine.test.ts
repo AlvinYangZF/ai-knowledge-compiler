@@ -1,15 +1,14 @@
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { mkdtempSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  type CommandRunner,
   convertIngestSource,
   discoverIngestSources,
+  type IngestSource,
   rawSourceHash,
   targetMarkdownPath,
-  type CommandRunner,
-  type IngestSource,
 } from "../src/index.js";
 
 describe("ingest-engine", () => {
@@ -21,7 +20,10 @@ describe("ingest-engine", () => {
     writeFileSync(join(root, "docs", "a.md"), "# A\n");
     writeFileSync(join(root, "docs", "readme.pdf"), "%PDF fixture");
     writeFileSync(join(root, "notes", "plain.txt"), "plain fixture");
-    writeFileSync(join(root, "src", "gc.c"), "int gc_should_trigger(void) { return 1; }\n");
+    writeFileSync(
+      join(root, "src", "gc.c"),
+      "int gc_should_trigger(void) { return 1; }\n",
+    );
 
     const result = discoverIngestSources(root, {
       recursive: true,

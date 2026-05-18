@@ -4,9 +4,9 @@ import { readFileSync } from "node:fs";
 import { basename, extname } from "node:path";
 import type {
   CommandRunner,
+  ConvertedMarkdown,
   ConvertOptions,
   ConvertResult,
-  ConvertedMarkdown,
   IngestSource,
 } from "./types.js";
 
@@ -44,7 +44,8 @@ export async function convertIngestSource(
     }
     return convertDocument(source, rawHash, options);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "conversion failed";
+    const message =
+      error instanceof Error ? error.message : "conversion failed";
     return { ok: false, error: message, warnings: [] };
   }
 }
@@ -109,7 +110,15 @@ function convertCode(
   appendList(lines, "Includes", metadata.includes);
   appendList(lines, "Imports", metadata.imports);
   appendList(lines, "Functions", metadata.functions);
-  lines.push("", "## Source", "", `${fenceFor(code)}${language}`, code, fenceFor(code), "");
+  lines.push(
+    "",
+    "## Source",
+    "",
+    `${fenceFor(code)}${language}`,
+    code,
+    fenceFor(code),
+    "",
+  );
   return {
     markdown: lines.join("\n"),
     title,
@@ -178,7 +187,9 @@ function documentAttempts(source: IngestSource): Array<{
   args: string[];
 }> {
   if (source.extension === ".pdf") {
-    return [{ command: "pdftotext", args: ["-layout", source.absolutePath, "-"] }];
+    return [
+      { command: "pdftotext", args: ["-layout", source.absolutePath, "-"] },
+    ];
   }
   const attempts = [
     {
@@ -186,7 +197,11 @@ function documentAttempts(source: IngestSource): Array<{
       args: [source.absolutePath, "-t", "gfm", "--wrap=none"],
     },
   ];
-  if ([".doc", ".docx", ".html", ".htm", ".rtf", ".odt"].includes(source.extension)) {
+  if (
+    [".doc", ".docx", ".html", ".htm", ".rtf", ".odt"].includes(
+      source.extension,
+    )
+  ) {
     attempts.push({
       command: "textutil",
       args: ["-convert", "txt", "-stdout", source.absolutePath],
@@ -265,7 +280,10 @@ function codeLanguage(extension: string): string {
   return normalized.replace(/^\./, "") || "text";
 }
 
-function codeMetadata(code: string, extension: string): {
+function codeMetadata(
+  code: string,
+  extension: string,
+): {
   includes: string[];
   imports: string[];
   functions: string[];

@@ -53,7 +53,6 @@ export function discoverIngestSources(
     throw new Error(`Path does not exist: ${inputPath}`);
   }
   const stat = statSync(inputPath);
-  const root = stat.isDirectory() ? inputPath : inputPath;
   const skipped: Array<{ path: string; reason: string }> = [];
   const sources = stat.isDirectory()
     ? discoverDirectory(inputPath, inputPath, options, skipped)
@@ -67,7 +66,9 @@ export function discoverIngestSources(
   };
 }
 
-export function targetMarkdownPath(source: Pick<IngestSource, "relativePath" | "kind" | "extension">): string {
+export function targetMarkdownPath(
+  source: Pick<IngestSource, "relativePath" | "kind" | "extension">,
+): string {
   const relativePath = toPosix(source.relativePath);
   if (source.kind === "markdown") {
     return source.extension === ".markdown"
@@ -143,7 +144,10 @@ function sourceForFile(
   const extension = extname(absolutePath).toLowerCase();
   const kind = classifyIngestExtension(extension);
   if (!kind) {
-    skipped.push({ path: toPosix(relativePath), reason: "unsupported extension" });
+    skipped.push({
+      path: toPosix(relativePath),
+      reason: "unsupported extension",
+    });
     return [];
   }
   if (kind === "code" && !options.includeCode) {
