@@ -782,6 +782,7 @@ async function ingestCommand(
   const index = new SearchIndex({ dbPath: join(vaultDir, ".akb", "index.db") });
   const existingPagePathsById = pagePathByIdMap(vaultDir);
   const written: string[] = [];
+  const ledgerFiles: string[] = [];
   const removed: string[] = [];
 
   console.log(
@@ -864,6 +865,10 @@ async function ingestCommand(
         existingPagePathsById.delete(replacedPageId);
       }
       index.upsertPage(page, body, { bodyStartLine });
+      const ledgerPath = recordIngestSourceAdded(vaultDir, page);
+      if (ledgerPath) {
+        ledgerFiles.push(ledgerPath);
+      }
       existingPagePathsById.set(page.id, target);
       written.push(targetRelative);
     }
@@ -877,7 +882,7 @@ async function ingestCommand(
   if (written.length > 0 && options.commit !== false) {
     await commitFiles(
       vaultDir,
-      [...written, ...removed, ...metadataFiles],
+      [...written, ...removed, ...ledgerFiles, ...metadataFiles],
       `ingest ${written.length === 1 ? basename(written[0]) : `${written.length} pages`}`,
     );
   }
@@ -938,6 +943,41 @@ function frontmatterDefaultsForIngest(
     defaults.line_count = converted.metadata.line_count;
   }
   return defaults as Partial<PageFrontmatter>;
+}
+
+function recordIngestSourceAdded(
+  vaultDir: string,
+  page: Page,
+): string | undefined {
+  const sourceKey =
+    page.frontmatter.source_hash ??
+    page.frontmatter.source_path ??
+    `src_unknown_${page.id}`;
+  const existing = loadConfidenceEvents(vaultDir, page.path, page.id);
+  if (
+    existing.some(
+      (event) => event.kind === "source_added" && event.sourceKey === sourceKey,
+    )
+  ) {
+    return undefined;
+  }
+  const timestamp = normalizeEventTimestamp(
+    page.frontmatter.imported_at ?? page.frontmatter.created_at,
+  );
+  const event = parseConfidenceEvent({
+    id: stableId("evt", `${page.id}:${sourceKey}:${timestamp}`),
+    kind: "source_added",
+    pageId: page.id,
+    timestamp,
+    actor: "system",
+    actorId: "akb-ingest",
+    sourceId: stableId("src", sourceKey),
+    sourceKey,
+    sourceWeight: sourceWeightForPage(vaultDir, page),
+  });
+  return toPosix(
+    relative(vaultDir, appendConfidenceEventAndUpdateProjection(vaultDir, page, event)),
+  );
 }
 
 async function indexCommand(options: IndexOptions): Promise<void> {
@@ -4247,7 +4287,7 @@ function confidenceStateForPage(
 const sourceTypeWeights: Record<string, number> = {
   markdown: 1,
   git_commit: 0.9,
-  code: 0.9,
+  code: 1,
   github_pr: 0.8,
   github_issue: 0.6,
   meeting: 0.7,

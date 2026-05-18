@@ -1278,6 +1278,33 @@ describe("akb CLI", () => {
     expect(page).toContain("```c");
   });
 
+  it("records a high-weight source_added confidence event for code ingest", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "gc.c");
+    writeFileSync(
+      source,
+      "int gc_should_trigger(void) { return 1; }\n",
+    );
+
+    runCli(["ingest", source, "--no-compile", "--no-commit"], vault);
+
+    const page = readFileSync(join(vault, "pages", "gc.c.md"), "utf8");
+    const pageId = page.match(/^id:\s+(page_[a-z0-9]{12})$/m)?.[1];
+    expect(pageId).toBeDefined();
+    const ledgerPath = join(vault, "pages", `.${pageId}.ledger.jsonl`);
+    const event = JSON.parse(
+      readFileSync(ledgerPath, "utf8").trim().split("\n")[0],
+    );
+    expect(event).toMatchObject({
+      kind: "source_added",
+      actor: "system",
+      actorId: "akb-ingest",
+      pageId,
+      sourceWeight: 1,
+    });
+  });
+
   it("skips code during directory ingest unless include-code is set", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
