@@ -112,9 +112,26 @@ Karpathy 在 2026 年 4 月提出的 [LLM Wiki 模式](https://gist.github.com/k
               （Obsidian 可直接打开）
 ```
 
-- **canonical**：`pages/*.md` + `.ledger.jsonl` —— 入 git，是事实
-- **projection**：SQLite FTS5、vector index、relation graph、confidence cache、chunk lineage —— 不入 git，可随时从 canonical 重建
-- **接口**：CLI（`akb ...`）+ MCP server（`search_knowledge` / `get_page` / ...）
+- **canonical**：`pages/*.md` + `pages/.<page_id>.ledger.jsonl` —— 入 git，是事实源
+- **review artifact**：`.akb/patches/*.yaml` —— compile 生成的待 review 变更，应用后才会写 Markdown
+- **projection/report**：SQLite FTS5、confidence cache、chunk lineage、`.akb/context/`、`.akb/graph/`、`.akb/code-intel/`、`.akb/web/`、`.akb/lint/` —— 不入 git，可随时重建
+- **接口**：CLI（`akb ...`）+ MCP server（`search_knowledge` / `get_page`）
+
+### v0.1 本地闭环能力地图
+
+| 目标 | 命令 | 是否依赖 LLM | 产物是否提交 |
+| --- | --- | --- | --- |
+| 创建 vault | `init` | 否 | `pages/`、`.akb/config.yaml`、ledger 后续提交 |
+| 导入 Markdown | `ingest --no-compile` | 否 | `pages/*.md` 提交 |
+| LLM compile patch | `compile` / `ingest --compile` | 可选；缺 key 时 degraded heuristic fallback | `.akb/patches/*.yaml` 用于 review |
+| Review patch | `patch apply` / `patch reject` | 否 | 应用后提交 Markdown + ledger |
+| 检索与问答 | `search` / `ask` | `search` 否；`ask` 有 evidence 且配置 key 时调用 LLM | 无新增 canonical 产物 |
+| Confidence 审计 | `confidence show/sections/file/report` | 否 | ledger 提交；report 不提交 |
+| Runtime verification | `verify` / `runbook exec` / `test --link-pages` / `webhook` | 否 | ledger 提交 |
+| Agent 上下文 | `context pack` | 否 | `.akb/context/` 不提交 |
+| 关系图与代码结构 | `graph export/show` / `code scan` | 否 | `.akb/graph/`、`.akb/code-intel/` 不提交 |
+| 本地 review UI | `web build` | 否 | `.akb/web/` 不提交 |
+| 团队质量门禁 | `gate run` | 否；可选 eval | 无新增 canonical 产物 |
 
 ---
 
@@ -151,7 +168,7 @@ cd /tmp/akb-demo
 - `pages/`：canonical Markdown 页面
 - `.akb/config.yaml`：vault 配置
 - `.akb/eval/golden.yaml`：eval golden set
-- `.gitignore`：忽略 `.akb/index.db`、`.akb/lint/`、`.akb/code-intel/` 等投影/诊断输出
+- `.gitignore`：忽略 `.akb/index.db`、`.akb/lint/`、`.akb/context/`、`.akb/graph/`、`.akb/code-intel/`、`.akb/web/` 等投影/诊断输出
 - git 仓库
 
 最小配置如下：
@@ -212,6 +229,19 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
 只需要设置你实际使用的 provider 对应的 key。未设置环境变量时，`ask` 会降级为 extractive answer，`compile` 会生成 degraded heuristic patch。
+
+### 推荐工作流
+
+第一次配置自己的知识库时，建议按这个顺序走：
+
+1. `init` 创建 vault，并确认 `.akb/config.yaml`。
+2. 可选配置 LLM provider，只把真实 API key 放在本机环境变量。
+3. `ingest --recursive --no-compile --no-commit` 先导入 Markdown，不立即 compile。
+4. `index --rebuild` 后用 `search` / `ask` 验证基础检索。
+5. `migrate to-v0.1 --no-commit` 初始化 Confidence Ledger。
+6. 对少量关键页面运行 `compile --source ...` 或小并发 `ingest --compile-concurrency 2`，review 后再 `patch apply`。
+7. 用 `confidence file`、`context pack`、`graph export`、`code scan`、`web build` 做审计和 agent 上下文准备。
+8. 在 PR/CI 场景用 `gate run` 把 lint、confidence、compile degraded ratio 和 eval 串起来。
 
 ### Ingest / Index / Search
 
@@ -465,7 +495,7 @@ pnpm demo
 | [docs/search-engine-skeleton.md](docs/search-engine-skeleton.md) | `search-engine` 包的代码骨架 —— API / SQL schema / 测试用例 frozen，可直接交给 agent 实现 |
 | [docs/v0.1-confidence-ledger.md](docs/v0.1-confidence-ledger.md) | Confidence Ledger 设计 —— 事件流、衰减公式、来源权重、supersession、runtime verification |
 | [docs/v0.1-llm-compile.md](docs/v0.1-llm-compile.md) | LLM Compile 设计 —— 5 阶段 pipeline、chunk lineage schema、与 confidence ledger 的集成 |
-| [docs/demo.md](docs/demo.md) | demo 脚本说明 |
+| [docs/demo.md](docs/demo.md) | 中文使用手册：从零配置自己的知识库并启用 v0.1 本地闭环 |
 
 建议阅读顺序：`v0.0-spec` → `confidence-ledger` → `llm-compile` → `search-engine-skeleton`。
 

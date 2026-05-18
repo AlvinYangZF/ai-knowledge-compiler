@@ -1,10 +1,39 @@
 # 中文 Demo：一步一步配置自己的 `akb` 知识库
 
-这份文档面向第一次使用 `akb` 的用户，目标是从零开始配置一个自己的知识库，并逐步启用检索、问答、confidence ledger、compile patch workflow 和 MCP 接入。
+这份文档面向第一次使用 `akb` 的用户，目标是从零开始配置一个自己的知识库，并逐步启用检索、问答、Confidence Ledger、compile patch workflow、context pack、relation graph、code intelligence report、静态 Web UI、质量门禁和 MCP 接入。
 
-`akb` 的核心约定是：Markdown 是事实源，`.akb/index.db`、confidence projection、runtime cache 等都是可以重建的投影。你需要提交到 git 的主要是 Markdown 页面和 ledger JSONL；不要提交 `.akb/index.db`、`.akb/lint/`、`.akb/code-intel/`、coverage、dist 等生成物。
+`akb` 的核心约定是：Markdown 是事实源，`.akb/index.db`、confidence projection、context pack、relation graph、code intelligence report、Web UI snapshot、runtime cache 等都是可以重建的投影。你需要提交到 git 的主要是 Markdown 页面和 ledger JSONL；不要提交 `.akb/index.db`、`.akb/lint/`、`.akb/context/`、`.akb/graph/`、`.akb/code-intel/`、`.akb/web/`、coverage、dist 等生成物。
 
-## 0. 准备环境
+## 0. 新设计的使用边界
+
+开始操作前先记住四类产物：
+
+| 类型 | 路径 | 用途 | 是否提交 |
+| --- | --- | --- | --- |
+| canonical truth | `pages/*.md` | 人和 agent 共同维护的知识页面 | 是 |
+| confidence ledger | `pages/.<page_id>.ledger.jsonl` | 来源、验证、矛盾、衰减、supersede 事件流 | 是 |
+| review artifact | `.akb/patches/*.yaml` | `compile` 生成的待 review patch | 按团队约定；应用前先 review |
+| projection/report | `.akb/index.db`、`.akb/lint/`、`.akb/context/`、`.akb/graph/`、`.akb/code-intel/`、`.akb/web/` | 搜索索引、审计报告、agent 上下文和本地 UI | 否 |
+
+只有两个常用路径会尝试调用 LLM：
+
+- `ask`：先检索本地知识库；只有找到 evidence 且配置了 API key 环境变量时才调用 LLM。没有 evidence 时不会调用。
+- `compile`：配置 API key 后使用 provider-backed pipeline；没有 key、超时或输出不符合 schema 时降级为 degraded heuristic patch。
+
+其他命令，包括 `ingest --no-compile`、`index`、`search`、`confidence`、`runbook exec`、`test --link-pages`、`graph`、`code scan`、`web build`、`gate run`，都不依赖 LLM。
+
+推荐第一次建库按这个顺序走：
+
+1. 初始化 vault。
+2. 可选配置 LLM provider 和本机环境变量。
+3. 先用 `ingest --no-compile` 导入 Markdown。
+4. `index --rebuild` 后验证 `search` / `ask`。
+5. `migrate to-v0.1` 初始化 Confidence Ledger。
+6. 对关键页面小批量运行 `compile`，review patch 后再应用。
+7. 生成 `context pack`、`graph`、`code scan`、`web build` 作为 agent/review 辅助。
+8. 用 `gate run` 接入 PR/CI。
+
+## 1. 准备环境
 
 在项目根目录安装依赖并构建：
 
@@ -27,7 +56,7 @@ node "$AKB" --help
 pnpm exec tsx apps/cli/src/main.ts --help
 ```
 
-## 1. 创建自己的知识库
+## 2. 创建自己的知识库
 
 选择一个目录作为你的知识库。下面以 `/tmp/my-akb-vault` 为例：
 
@@ -41,7 +70,7 @@ cd /tmp/my-akb-vault
 - `pages/`：你的 Markdown 知识页面
 - `.akb/config.yaml`：知识库配置
 - `.akb/eval/golden.yaml`：检索回归测试集
-- `.gitignore`：默认忽略 `.akb/index.db`、`.akb/lint/`、`.akb/code-intel/` 等生成物
+- `.gitignore`：默认忽略 `.akb/index.db`、`.akb/lint/`、`.akb/context/`、`.akb/graph/`、`.akb/code-intel/`、`.akb/web/` 等生成物
 - `.git/`：vault 自身是一个 git 仓库
 
 检查配置文件：
@@ -65,7 +94,7 @@ mcp:
   port: 8765
 ```
 
-## 2. 准备你的 Markdown 文件
+## 3. 准备你的 Markdown 文件
 
 把已有知识整理成 Markdown 文件。推荐每个主题一个文件，例如：
 
@@ -97,7 +126,7 @@ Rollback uses the previous stable image tag.
 
 如果你已经有 Obsidian vault，也可以直接导入其中的 Markdown。`akb` 会保留 `[[wikilinks]]`。
 
-## 3. 配置大模型 API Key
+## 4. 配置大模型 API Key
 
 如果希望 `ingest` 后的 `compile` 阶段直接使用大模型能力，需要先在 `.akb/config.yaml` 中配置 LLM provider、model 和 API key 环境变量名。`akb` 支持 DeepSeek、OpenAI 和 Anthropic；真实 API key 只放在本机环境变量中，不写入配置文件，避免误提交到远端。
 
@@ -143,7 +172,7 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 
 如果暂时不设置 API key 环境变量，`ask` 会降级为 extractive answer；`compile` 会生成 degraded heuristic patch，并在 `compileMeta.degraded=true` 中记录原因。
 
-## 4. 导入 Markdown
+## 5. 导入 Markdown
 
 重要：`ingest` 默认会在导入后继续执行 `compile`，为每个新页面生成 reviewable patch。首次批量导入自己的目录时，建议先加 `--no-compile`，只完成导入和索引，确认页面结构正常后再按需运行 compile。
 
@@ -220,7 +249,7 @@ node "$AKB" compile status
 
 确认页面导入正常后，再用 `compile --source <page-id-or-path>` 或 `compile --all-pending` 分批生成 patch。
 
-## 5. 建立索引并搜索
+## 6. 建立索引并搜索
 
 重建 SQLite FTS5 索引：
 
@@ -255,7 +284,7 @@ node "$AKB" search "deploy rollback" --hybrid --format json
 node "$AKB" search "deploy rollback" --include-superseded
 ```
 
-## 6. 用 `ask` 进行带引用问答
+## 7. 用 `ask` 进行带引用问答
 
 没有配置 LLM 时，`ask` 会使用 extractive answer，也就是从检索结果中抽取可引用片段：
 
@@ -278,15 +307,15 @@ node "$AKB" ask "如何回滚生产部署？" --hybrid
 - 成功生成时使用的 provider/model
 - 没有 evidence 时，明确提示 LLM 没有被调用
 
-API key 配置方式见第 3 节。不要把真实 key 写入配置文件或提交到远端。
+API key 配置方式见第 4 节。不要把真实 key 写入配置文件或提交到远端。
 
-## 7. 启用 Confidence Ledger
+## 8. 启用 Confidence Ledger
 
 Confidence Ledger 是每个页面旁边的 append-only JSONL 事件流，用来记录来源、验证、衰减、矛盾、supersede 等事件。
 
 这一步不依赖 LLM。它维护的是知识库的可信度历史：Markdown 页面仍然是事实源，`pages/.<page_id>.ledger.jsonl` 是可信度事件流，`.akb/index.db` 里的 `confidence_events` 和 `confidence_state` 只是可重建的查询投影。
 
-### 7.1 初始化已有页面的 ledger
+### 8.1 初始化已有页面的 ledger
 
 将现有 vault 迁移到 v0.1 ledger 形态：
 
@@ -298,7 +327,7 @@ node "$AKB" migrate to-v0.1 --no-commit
 
 命令还会生成或更新 `.akb/migration-report.md`，列出迁移了哪些页面、跳过了多少页面、每页初始化后有多少事件和初始 score。`--no-commit` 表示只改工作区，不自动创建 git commit；确认结果后可以手动提交。
 
-### 7.2 重建 confidence projection
+### 8.2 重建 confidence projection
 
 如果你刚迁移完、刚 pull 了别人的 ledger、删除过 `.akb/index.db`，或者想确认投影和 JSONL 事件流一致，就重建 confidence projection：
 
@@ -314,7 +343,7 @@ node "$AKB" projection rebuild --confidence
 node "$AKB" projection rebuild --all
 ```
 
-### 7.3 查看和审计单页 confidence
+### 8.3 查看和审计单页 confidence
 
 查看某个页面当前的 confidence：
 
@@ -374,7 +403,7 @@ node "$AKB" confidence report --by-file
 
 报告会写入 `.akb/lint/confidence-by-file.md`，按被引用文件分组列出相关页面、score、状态和最近事件时间。这个文件是 lint/report 产物，不需要提交到 git。
 
-### 7.4 记录人工或 agent 验证
+### 8.4 记录人工或 agent 验证
 
 记录人工或 agent 验证：
 
@@ -404,7 +433,7 @@ node "$AKB" verify "pages/**" --dry-run
 
 `--dry-run` 会按当前实现使用 `0.70` 作为低 confidence 阈值，只打印需要 review 的页面，不写事件、不刷新投影、不提交。
 
-### 7.5 写入时间衰减 checkpoint
+### 8.5 写入时间衰减 checkpoint
 
 随着时间推移，长期没有被验证或更新的页面 confidence 会自然衰减。`decay` 命令用于把这种衰减固化成稀疏 checkpoint：
 
@@ -420,7 +449,7 @@ node "$AKB" decay --run --no-commit
 node "$AKB" decay --run --now 2026-05-17T00:00:00.000Z --no-commit
 ```
 
-### 7.6 执行 runbook / linked tests 产生强 runtime 信号
+### 8.6 执行 runbook / linked tests 产生强 runtime 信号
 
 如果一个页面是可执行 runbook，可以把 shell 代码块作为真实验证来源：
 
@@ -452,7 +481,7 @@ node "$AKB" test --link-pages --command "pnpm test" --no-commit
 
 命令会扫描 `@akb-page <page_id>` 标注，执行 `--command` 指定的测试命令。测试通过时给关联页面写 `verified`，失败时写 `contradicted_by`。没有显式 `@akb-page` 标注时会拒绝写 ledger，避免把“测试通过”误归因到无关页面。
 
-### 7.7 接收外部 CI/runtime 信号
+### 8.7 接收外部 CI/runtime 信号
 
 `webhook` 用来把外部系统的结果转成 ledger 事件。例如 CI 成功可以证明相关页面仍然有效，CI 失败可以说明相关页面可能已经被现实行为反驳。
 
@@ -502,7 +531,7 @@ node "$AKB" watch --once --no-commit
 
 `kind` 以 `failure`、`failed` 或 `error` 结尾时会写 `contradicted_by`；其他 kind 会写 `verified`。这个文件模式适合没有 webhook 集成的系统：只要能把 JSON 写进 `.akb/runtime-signals/`，就能参与 Confidence Ledger。
 
-## 8. 使用 compile 生成可 review 的 patch
+## 9. 使用 compile 生成可 review 的 patch
 
 `compile` 用来把新 source 对现有 vault 的影响编译成 patch。它不会直接修改 Markdown，而是生成 `.akb/patches/*.yaml`，等待 review。
 
@@ -547,7 +576,7 @@ node "$AKB" compile replay <patch-id>
 
 Provider-backed patch replay 会重新调用对应 provider。如果 replay 降级为 heuristic，命令会失败，而不是静默通过。
 
-## 9. Review 并应用或拒绝 patch
+## 10. Review 并应用或拒绝 patch
 
 应用 patch：
 
@@ -569,7 +598,7 @@ node "$AKB" patch reject <patch-id> --reason "not relevant" --no-commit
 
 应用 patch 后，`akb` 会更新 Markdown，并写入相关 confidence/lineage 信息。
 
-## 10. 管理 supersede 关系
+## 11. 管理 supersede 关系
 
 当一个页面被新页面取代时，使用 `supersede`：
 
@@ -592,7 +621,7 @@ node "$AKB" supersede <old-page-id-or-path> \
 
 搜索默认过滤 superseded 页面；需要查看历史页面时加 `--include-superseded`。
 
-## 11. 查看 lineage
+## 12. 查看 lineage
 
 查看某个页面或 chunk 的 lineage：
 
@@ -608,7 +637,7 @@ node "$AKB" lineage --reverse <source-page-or-chunk-id>
 
 lineage 用来解释 compile 生成内容来自哪些 source chunk，也用于 replay 和审计。
 
-### 11.1 查看 relation graph projection
+### 12.1 查看 relation graph projection
 
 `graph` 命令会从当前 Markdown 派生关系图，不维护独立事实源：
 
@@ -625,7 +654,7 @@ node "$AKB" graph show <page-id-or-path>
 
 `.akb/graph/relations.json` 是投影文件，可以随时从 Markdown 重建，不需要提交。
 
-### 11.2 生成静态 Web UI
+### 12.2 生成静态 Web UI
 
 如果想用浏览器查看当前 vault 快照，可以生成静态 Web UI：
 
@@ -635,7 +664,7 @@ node "$AKB" web build --output .akb/web
 
 生成结果是 `.akb/web/index.html`。这个页面内嵌当前 vault 的页面列表、正文、confidence 状态、section report、patch 摘要、lineage 摘要、eval report 摘要和 relation graph。它是本地 review 产物，可以直接打开，不需要提交到 git。
 
-### 11.3 生成 code intelligence report
+### 12.3 生成 code intelligence report
 
 如果你的知识库引用了代码文件，或者你想让 agent 先理解代码库的文件结构，可以生成浅层 code intelligence report：
 
@@ -651,7 +680,7 @@ node "$AKB" code scan src --output .akb/code-intel/report.json
 
 `code scan` 是确定性扫描，不调用 LLM，也不需要配置 API key。`.akb/code-intel/report.json` 是本地投影文件，可以交给 agent、人工 review，或作为后续 LLM 反向生成设计文档 / ADR 的输入；默认不需要提交到 git。
 
-## 12. 生成 context pack 给 agent 使用
+## 13. 生成 context pack 给 agent 使用
 
 当你要开启一个 coding agent session，或者想把某个问题相关的知识打包给外部工具时，可以生成 context pack：
 
@@ -678,7 +707,7 @@ Context pack 会包含：
 
 `.akb/context/*.json` 是生成物，用来传给 agent 或审计一次 session，不需要提交到 git。
 
-## 13. 配置 MCP 给 coding agent 使用
+## 14. 配置 MCP 给 coding agent 使用
 
 stdio transport：
 
@@ -713,7 +742,7 @@ Claude Code MCP 配置示例：
 
 检索结果包含行号级 citation，并使用 confidence-aware rerank。
 
-## 14. 为自己的知识库添加 eval
+## 15. 为自己的知识库添加 eval
 
 编辑 `.akb/eval/golden.yaml`，加入与你知识库相关的问题：
 
@@ -734,7 +763,7 @@ node "$AKB" eval --set .akb/eval/golden.yaml
 
 建议把 golden set 当作知识库质量门禁：每次大规模 ingest、compile 或修改 ranker 后都跑一次。
 
-## 15. 运行团队质量门禁
+## 16. 运行团队质量门禁
 
 `gate run` 用于 CI/PR 场景，把几个质量信号串成一个明确的通过/失败出口：
 
@@ -761,7 +790,7 @@ node "$AKB" gate run \
 
 失败时命令返回非 0，并打印具体失败项，适合直接接到 PR check。
 
-## 16. 运行内置 sample demo
+## 17. 运行内置 sample demo
 
 如果你想先看完整样例：
 
@@ -782,7 +811,7 @@ recall@10:    1.00
 must-hit pass rate:  5/5 (100%)
 ```
 
-## 17. 已实现功能总览
+## 18. 已实现功能总览
 
 当前已经实现并可用于本地知识库的能力：
 
@@ -810,15 +839,15 @@ must-hit pass rate:  5/5 (100%)
 - MCP stdio / HTTP server
 - eval harness 和 search benchmark
 
-## 18. 即将补充的功能
+## 19. v0.2+ 功能边界
 
-后续 demo 应该在对应能力实现后继续补充：
+当前 v0.1 已经完成本地闭环。后续版本会在这些方向继续扩展：
 
 - LLM-assisted code intelligence：基于 `code scan` report 反向生成设计文档、ADR 和上下文包
 - GraphRAG traversal
 - 团队协作工作流：patch reviewer 和多人 review 分派
 
-## 19. 常用验证命令
+## 20. 常用验证命令
 
 在项目根目录运行：
 
