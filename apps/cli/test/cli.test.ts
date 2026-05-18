@@ -5475,13 +5475,13 @@ describe("akb CLI", () => {
       ].join("\n"),
     );
     const before = readFileSync(join(vault, "pages", "first.md"), "utf8");
+    const ledgerPath = join(vault, "pages", ".page_atomic000001.ledger.jsonl");
+    const ledgerBefore = readFileSync(ledgerPath, "utf8");
     const failure = runCliFailure(["patch", "apply", "patch_bad"], vault);
 
     expect(failure).toContain("Invalid patch");
     expect(readFileSync(join(vault, "pages", "first.md"), "utf8")).toBe(before);
-    expect(
-      existsSync(join(vault, "pages", ".page_atomic000001.ledger.jsonl")),
-    ).toBe(false);
+    expect(readFileSync(ledgerPath, "utf8")).toBe(ledgerBefore);
   });
 
   it("requires explicit review before applying low-confidence patches", () => {
@@ -5566,6 +5566,8 @@ describe("akb CLI", () => {
       join(vault, "pages", "reject-target.md"),
       "utf8",
     );
+    const ledgerPath = join(vault, "pages", ".page_reject000001.ledger.jsonl");
+    const ledgerBefore = readFileSync(ledgerPath, "utf8");
     writeFileSync(
       join(vault, ".akb", "patches", "patch_reject_me.yaml"),
       [
@@ -5612,9 +5614,7 @@ describe("akb CLI", () => {
     expect(readFileSync(join(vault, "pages", "reject-target.md"), "utf8")).toBe(
       before,
     );
-    expect(
-      existsSync(join(vault, "pages", ".page_reject000001.ledger.jsonl")),
-    ).toBe(false);
+    expect(readFileSync(ledgerPath, "utf8")).toBe(ledgerBefore);
 
     const list = runCli(["patch", "list"], vault);
     expect(list).toContain("patch_reject_me rejected");
