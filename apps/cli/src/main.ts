@@ -40,6 +40,15 @@ import type {
 import { ConfigSchema, PageFrontmatterSchema, PageIdSchema } from "@akb/core";
 import { loadGoldenSet, runEval } from "@akb/eval-harness";
 import { commitFiles, initVault } from "@akb/git-store";
+import {
+  convertIngestSource,
+  discoverIngestSources,
+  isSupportedCodeExtension,
+  targetMarkdownPath,
+  type ConvertedMarkdown,
+  type ConverterMode,
+  type IngestSource,
+} from "@akb/ingest-engine";
 import { ensureFrontmatter, parseMarkdown } from "@akb/markdown-engine";
 import { serveMcp } from "@akb/mcp-server";
 import { type RankConfidenceState, rankSearchResults } from "@akb/ranker";
@@ -51,6 +60,10 @@ interface IngestOptions {
   tag?: string[];
   force?: boolean;
   includeHidden?: boolean;
+  includeDocuments?: boolean;
+  includeCode?: boolean;
+  strictConvert?: boolean;
+  converter?: ConverterMode;
   commit?: boolean;
   recursive?: boolean;
   compile?: boolean;
@@ -412,6 +425,24 @@ export async function run(argv = process.argv): Promise<void> {
       "--include-hidden",
       "include hidden files and directories, importing them as non-hidden paths",
     )
+    .option(
+      "--include-documents",
+      "include PDF, Word, text, and markup document sources",
+      true,
+    )
+    .option(
+      "--no-include-documents",
+      "skip non-markdown document sources",
+    )
+    .option("--include-code", "include supported code files", false)
+    .option("--no-include-code", "skip supported code files")
+    .option("--strict-convert", "fail when any source cannot be converted")
+    .option(
+      "--converter <mode>",
+      "converter mode: auto, builtin, or external",
+      parseConverterMode,
+      "auto",
+    )
     .option("--compile", "compile imported pages into reviewable patches")
     .option("--no-compile", "skip compile after ingest")
     .option(
@@ -733,43 +764,80 @@ async function ingestCommand(
     hiddenEntries,
     options.includeHidden === true,
   );
-  const files = markdownFilesForIngest(source, recursive, includeHidden);
+  const sourceIsDirectory = statSync(source).isDirectory();
+  const includeCodeOptionProvided =
+    currentArgv.includes("--include-code") ||
+    currentArgv.includes("--no-include-code");
+  const includeCode =
+    includeCodeOptionProvided
+      ? options.includeCode === true
+      : !sourceIsDirectory && isSupportedCodeExtension(extname(source));
+  const discovery = discoverIngestSources(source, {
+    recursive,
+    includeHidden,
+    includeDocuments: options.includeDocuments !== false,
+    includeCode,
+  });
+  const sources = discovery.sources;
   const index = new SearchIndex({ dbPath: join(vaultDir, ".akb", "index.db") });
   const existingPagePathsById = pagePathByIdMap(vaultDir);
   const written: string[] = [];
   const removed: string[] = [];
-  const sourceIsDirectory = statSync(source).isDirectory();
 
   console.log(
-    `Found ${files.length} markdown file${files.length === 1 ? "" : "s"} to ingest.`,
+    `Found ${sources.length} ingestible source${sources.length === 1 ? "" : "s"} to ingest.`,
   );
+  const markdownCount = sources.filter((item) => item.kind === "markdown").length;
+  if (markdownCount === sources.length) {
+    console.log(
+      `Found ${markdownCount} markdown file${markdownCount === 1 ? "" : "s"} to ingest.`,
+    );
+  }
   try {
-    for (const [fileIndex, file] of files.entries()) {
-      const relativeSource = sourceIsDirectory
-        ? relative(source, file)
-        : basename(file);
-      console.log(
-        ingestProgressLine(fileIndex + 1, files.length, relativeSource),
-      );
+    for (const [fileIndex, ingestSource] of sources.entries()) {
+      const relativeSource = ingestSource.relativePath;
       const targetSource = includeHidden
         ? nonHiddenRelativePath(relativeSource)
         : relativeSource;
-      const targetRelative = toPosix(join("pages", targetSource));
+      const targetRelative = toPosix(
+        join(
+          "pages",
+          targetMarkdownPath({ ...ingestSource, relativePath: targetSource }),
+        ),
+      );
+      console.log(
+        `${ingestProgressLine(fileIndex + 1, sources.length, relativeSource)} -> ${targetRelative}`,
+      );
       const target = join(vaultDir, targetRelative);
       if (existsSync(target) && !options.force) {
         throw new Error(
           `Target page already exists: ${targetRelative}. Use --force to overwrite.`,
         );
       }
-      const raw = readUtf8File(file);
-      if (raw === undefined || raw.trim().length === 0) {
-        console.warn(`Skipping unreadable or empty markdown file: ${file}`);
+      const converted = await convertIngestSource(ingestSource, {
+        mode: options.converter ?? "auto",
+      });
+      if (!converted.ok) {
+        const message = `Skipping ${ingestSource.relativePath}: ${converted.error}`;
+        if (options.strictConvert) {
+          throw new Error(message);
+        }
+        console.log(`Warning: ${message}`);
+        continue;
+      }
+      const raw = converted.value.markdown;
+      if (raw.trim().length === 0) {
+        const message = `Skipping ${ingestSource.relativePath}: converted markdown is empty`;
+        if (options.strictConvert) {
+          throw new Error(message);
+        }
+        console.log(`Warning: ${message}`);
         continue;
       }
       const finalContent = ensureFrontmatter(
         raw,
-        {},
-        { tags: options.tag, sourcePath: inputPath },
+        frontmatterDefaultsForIngest(ingestSource, converted.value),
+        { tags: options.tag, sourcePath: ingestSource.relativePath },
       );
       const imported = parseMarkdown(finalContent);
       const importedId = String(imported.frontmatter.id) as PageId;
@@ -849,6 +917,27 @@ async function compileImportedPages(
     }),
   );
   printCompileSummary(summary);
+}
+
+function frontmatterDefaultsForIngest(
+  source: IngestSource,
+  converted: ConvertedMarkdown,
+): Partial<PageFrontmatter> {
+  const defaults: Record<string, unknown> = {
+    title: converted.title,
+    source_hash: converted.rawHash,
+    source_type: converted.sourceType,
+    converter: converted.converter,
+  };
+  if (converted.sourceSubtype) {
+    defaults.source_subtype = converted.sourceSubtype;
+  }
+  if (source.kind === "code") {
+    defaults.type = "module";
+    defaults.code_language = converted.metadata.code_language;
+    defaults.line_count = converted.metadata.line_count;
+  }
+  return defaults as Partial<PageFrontmatter>;
 }
 
 async function indexCommand(options: IndexOptions): Promise<void> {
@@ -5912,6 +6001,13 @@ function parseRatio(value: string): number {
 function parseFormat(value: string): "text" | "json" {
   if (value !== "text" && value !== "json") {
     throw new InvalidArgumentError("must be text or json");
+  }
+  return value;
+}
+
+function parseConverterMode(value: string): ConverterMode {
+  if (value !== "auto" && value !== "builtin" && value !== "external") {
+    throw new InvalidArgumentError("must be auto, builtin, or external");
   }
   return value;
 }

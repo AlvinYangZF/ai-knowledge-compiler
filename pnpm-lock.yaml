@@ -44,6 +44,9 @@ importers:
       '@akb/git-store':
         specifier: workspace:*
         version: link:../../packages/git-store
+      '@akb/ingest-engine':
+        specifier: workspace:*
+        version: link:../../packages/ingest-engine
       '@akb/markdown-engine':
         specifier: workspace:*
         version: link:../../packages/markdown-engine
@@ -132,6 +135,8 @@ importers:
       simple-git:
         specifier: ^3.29.0
         version: 3.36.0
+
+  packages/ingest-engine: {}
 
   packages/markdown-engine:
     dependencies:

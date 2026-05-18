@@ -80,7 +80,7 @@ function convertText(
   return {
     markdown: `# ${title}\n\n${text}\n`,
     title,
-    sourceType: source.extension === ".log" ? "text" : source.extension.slice(1),
+    sourceType: "text",
     sourceSubtype: source.extension === ".log" ? "log" : undefined,
     converter: { name: "text-reader", mode: "builtin" },
     warnings: [],

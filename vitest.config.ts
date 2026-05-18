@@ -10,6 +10,7 @@ export default defineConfig({
       "@akb/core": `${root}packages/core/src/index.ts`,
       "@akb/confidence": `${root}packages/confidence/src/index.ts`,
       "@akb/git-store": `${root}packages/git-store/src/index.ts`,
+      "@akb/ingest-engine": `${root}packages/ingest-engine/src/index.ts`,
       "@akb/markdown-engine": `${root}packages/markdown-engine/src/index.ts`,
       "@akb/ranker": `${root}packages/ranker/src/index.ts`,
       "@akb/search-engine": `${root}packages/search-engine/src/index.ts`,

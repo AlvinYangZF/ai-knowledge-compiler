@@ -1227,6 +1227,92 @@ describe("akb CLI", () => {
     expect(output).toContain("Ingested 2 pages");
   });
 
+  it("normalizes text files into markdown pages during ingest", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "plain.txt");
+    writeFileSync(source, "plain text knowledge\nsecond line\n");
+
+    const output = runCli(
+      ["ingest", source, "--no-compile", "--no-commit"],
+      vault,
+    );
+
+    expect(output).toContain("Found 1 ingestible source");
+    expect(output).toContain("plain.txt -> pages/plain.txt.md");
+    const page = readFileSync(join(vault, "pages", "plain.txt.md"), "utf8");
+    expect(page).toContain("source_type: text");
+    expect(page).toContain("# plain");
+    expect(page).toContain("plain text knowledge");
+  });
+
+  it("normalizes a single C source file into a code markdown page", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "gc.c");
+    writeFileSync(
+      source,
+      [
+        "#include <stdio.h>",
+        '#include "gc.h"',
+        "",
+        "int gc_should_trigger(void) {",
+        "  return 1;",
+        "}",
+      ].join("\n"),
+    );
+
+    const output = runCli(
+      ["ingest", source, "--no-compile", "--no-commit"],
+      vault,
+    );
+
+    expect(output).toContain("Found 1 ingestible source");
+    expect(output).toContain("gc.c -> pages/gc.c.md");
+    const page = readFileSync(join(vault, "pages", "gc.c.md"), "utf8");
+    expect(page).toContain("type: module");
+    expect(page).toContain("source_type: code");
+    expect(page).toContain("source_subtype: c");
+    expect(page).toContain("code_language: c");
+    expect(page).toContain("gc_should_trigger");
+    expect(page).toContain("```c");
+  });
+
+  it("skips code during directory ingest unless include-code is set", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "source");
+    mkdirSync(join(source, "src"), { recursive: true });
+    writeFileSync(join(source, "note.md"), "# Note\n\nMarkdown note.");
+    writeFileSync(
+      join(source, "src", "gc.c"),
+      "int gc_should_trigger(void) { return 1; }\n",
+    );
+
+    const defaultOutput = runCli(
+      ["ingest", source, "--recursive", "--no-compile", "--no-commit"],
+      vault,
+    );
+    expect(defaultOutput).toContain("Found 1 ingestible source");
+    expect(existsSync(join(vault, "pages", "note.md"))).toBe(true);
+    expect(existsSync(join(vault, "pages", "src", "gc.c.md"))).toBe(false);
+
+    const includeCodeOutput = runCli(
+      [
+        "ingest",
+        source,
+        "--recursive",
+        "--include-code",
+        "--force",
+        "--no-compile",
+        "--no-commit",
+      ],
+      vault,
+    );
+    expect(includeCodeOutput).toContain("Found 2 ingestible sources");
+    expect(existsSync(join(vault, "pages", "src", "gc.c.md"))).toBe(true);
+  });
+
   it("can compile ingested directory pages with bounded concurrency", async () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
@@ -1728,7 +1814,7 @@ describe("akb CLI", () => {
   it("migrates v0.0 pages to confidence ledgers and shows confidence", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
-    const source = join(dir, "confidence.md");
+    const source = join(vault, "pages", "confidence.md");
     writeFileSync(
       source,
       [
@@ -1745,8 +1831,6 @@ describe("akb CLI", () => {
         "This page should receive a source_added ledger event.",
       ].join("\n"),
     );
-    runCli(["ingest", source, "--no-commit"], vault);
-
     const migrateOutput = runCli(["migrate", "to-v0.1"], vault);
     const ledgerPath = join(vault, "pages", ".page_migrate00010.ledger.jsonl");
     const event = JSON.parse(
@@ -2792,6 +2876,7 @@ describe("akb CLI", () => {
         "---",
         "id: page_stale0000001",
         "title: Stale Runbook",
+        "source_type: chat",
         'created_at: "2025-01-01"',
         'source_path: "./stale.md"',
         "---",

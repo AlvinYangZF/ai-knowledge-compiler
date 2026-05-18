@@ -16,6 +16,7 @@
     "@akb/core": "workspace:*",
     "@akb/eval-harness": "workspace:*",
     "@akb/git-store": "workspace:*",
+    "@akb/ingest-engine": "workspace:*",
     "@akb/markdown-engine": "workspace:*",
     "@akb/mcp-server": "workspace:*",
     "@akb/ranker": "workspace:*",
