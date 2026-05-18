@@ -302,14 +302,15 @@ node "$AKB" decay --run --no-commit
 运行时信号可以通过 webhook/watch 写入 ledger：
 
 ```bash
-node "$AKB" runbook exec page_runbook00001 --no-commit
-node "$AKB" test --link-pages --command "pnpm test" --no-commit
-node "$AKB" webhook ci-success --changed-file pages/gc.md --evidence https://ci.example/run/123 --no-commit
+node "$AKB" runbook exec page_runbook00001 --by-agent codex --no-commit
+node "$AKB" test --link-pages --command "pnpm test" --by-agent codex --no-commit
+node "$AKB" webhook ci-success --by-agent codex --changed-file pages/gc.md --evidence local-agent-run-123 --no-commit
 node "$AKB" webhook ci-failure --changed-file pages/gc.md --evidence https://ci.example/run/124 --no-commit
-node "$AKB" watch --once --no-commit
+node "$AKB" watch --once --by-agent codex --no-commit
 ```
 
 `runbook exec` 会执行 runbook 页面里的 shell fenced code block。全部步骤成功时写 `verified`，某一步失败时写 `contradicted_by`。`test --link-pages` 会扫描 `@akb-page <page_id>` 标注，执行指定测试命令，并把测试结果写入对应页面 ledger。
+这些 runtime 命令支持 `--by-agent <id>`，会把任意本地 agent id 归一化为 `agent:<id>`，例如 `codex`、`claude-code`、`cursor-local` 或团队自定义 agent；`--actor-id` 仍保留给 CI、webhook 等外部系统。
 
 ### Supersede
 

@@ -4098,6 +4098,107 @@ describe("akb CLI", () => {
     expect(ledger.match(/"kind":"verified"/g)?.length).toBe(2);
   });
 
+  it("records webhook runtime signals from a local agent", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "agent-runtime.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_agentrt00001",
+        "title: Agent Runtime Signal Page",
+        "references:",
+        "  - src/agent-runtime.ts",
+        "---",
+        "# Agent Runtime Signal Page",
+        "",
+        "Runtime signal target.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+
+    runCli(
+      [
+        "webhook",
+        "ci-success",
+        "--by-agent",
+        "codex",
+        "--changed-file",
+        "src/agent-runtime.ts",
+        "--evidence",
+        "local-agent-run-1",
+        "--no-commit",
+      ],
+      vault,
+    );
+
+    const ledger = readFileSync(
+      join(vault, "pages", ".page_agentrt00001.ledger.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(ledger.at(-1)).toMatchObject({
+      kind: "verified",
+      actor: "agent",
+      actorId: "agent:codex",
+      verifierType: "agent",
+      verifierId: "codex",
+      reason: "ci_success: local-agent-run-1",
+    });
+  });
+
+  it("uses --by-agent for runtime signal files without coupling to a concrete agent", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "watch-agent.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_watchagent01",
+        "title: Watch Agent Page",
+        "---",
+        "# Watch Agent Page",
+        "",
+        "Runtime signal target.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+    const signalDir = join(vault, ".akb", "runtime-signals");
+    mkdirSync(signalDir, { recursive: true });
+    writeFileSync(
+      join(signalDir, "agent-signal.json"),
+      JSON.stringify({
+        kind: "deploy_success",
+        page_ids: ["page_watchagent01"],
+        evidence: "local-agent-run-2",
+      }),
+    );
+
+    runCli(
+      ["watch", "--once", "--by-agent", "cursor-local", "--no-commit"],
+      vault,
+    );
+
+    const ledger = readFileSync(
+      join(vault, "pages", ".page_watchagent01.ledger.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(ledger.at(-1)).toMatchObject({
+      kind: "verified",
+      actor: "agent",
+      actorId: "agent:cursor-local",
+      verifierId: "cursor-local",
+      reason: "deploy_success: local-agent-run-2",
+    });
+  });
+
   it("records runtime contradiction signals from webhook and watch failures", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
@@ -4238,6 +4339,58 @@ describe("akb CLI", () => {
     });
   });
 
+  it("records runbook execution by a local agent", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "runbook-agent.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_runbookagent",
+        "title: Agent Runbook",
+        "type: runbook",
+        "---",
+        "# Agent Runbook",
+        "",
+        "```bash",
+        "printf agent-runbook-ok",
+        "```",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+
+    runCli(
+      [
+        "runbook",
+        "exec",
+        "page_runbookagent",
+        "--by-agent",
+        "codex",
+        "--now",
+        "2026-05-17T00:00:00.000Z",
+        "--no-commit",
+      ],
+      vault,
+    );
+
+    const ledger = readFileSync(
+      join(vault, "pages", ".page_runbookagent.ledger.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(ledger.at(-1)).toMatchObject({
+      kind: "verified",
+      actor: "agent",
+      actorId: "agent:codex",
+      verifierType: "agent",
+      verifierId: "codex",
+      reason: "runbook_exec: pages/runbook-agent.md (1 step)",
+    });
+  });
+
   it("records runbook execution failure as runtime contradiction", () => {
     const vault = join(dir, "vault");
     runCli(["init", "vault"], dir);
@@ -4338,6 +4491,60 @@ describe("akb CLI", () => {
       timestamp: "2026-05-17T00:00:00.000Z",
       actorId: "test:integration",
       verifierId: "test:integration",
+      reason: "test_integration_success: true",
+    });
+  });
+
+  it("records linked test success by any local agent id", () => {
+    const vault = join(dir, "vault");
+    runCli(["init", "vault"], dir);
+    const source = join(dir, "linked-agent-page.md");
+    writeFileSync(
+      source,
+      [
+        "---",
+        "id: page_testagent001",
+        "title: Linked Agent Test Page",
+        "---",
+        "# Linked Agent Test Page",
+        "",
+        "Behavior covered by an external test.",
+      ].join("\n"),
+    );
+    runCli(["ingest", source, "--no-commit"], vault);
+    writeFileSync(
+      join(vault, "linked-agent.test.ts"),
+      "// @akb-page page_testagent001\n",
+    );
+
+    runCli(
+      [
+        "test",
+        "--link-pages",
+        "--command",
+        "true",
+        "--by-agent",
+        "custom-local-agent",
+        "--now",
+        "2026-05-17T00:00:00.000Z",
+        "--no-commit",
+      ],
+      vault,
+    );
+
+    const ledger = readFileSync(
+      join(vault, "pages", ".page_testagent001.ledger.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(ledger.at(-1)).toMatchObject({
+      kind: "verified",
+      actor: "agent",
+      actorId: "agent:custom-local-agent",
+      verifierType: "agent",
+      verifierId: "custom-local-agent",
       reason: "test_integration_success: true",
     });
   });

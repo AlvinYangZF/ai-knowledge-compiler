@@ -477,10 +477,10 @@ pnpm test
 执行 runbook：
 
 ```bash
-node "$AKB" runbook exec pages/deploy-runbook.md --no-commit
+node "$AKB" runbook exec pages/deploy-runbook.md --by-agent codex --no-commit
 ```
 
-`runbook exec` 会依次执行页面中的 `bash` / `sh` / `shell` / `zsh` fenced code block。所有步骤成功时写入 `verified` 事件，actor id 默认为 `runbook-exec`；任一步骤失败时写入 `contradicted_by`，severity 为 `major`，并返回非 0。
+`runbook exec` 会依次执行页面中的 `bash` / `sh` / `shell` / `zsh` fenced code block。所有步骤成功时写入 `verified` 事件，actor id 默认为 `runbook-exec`；加 `--by-agent <id>` 后会记录为本地 agent，例如 `actorId: agent:codex`。任一步骤失败时写入 `contradicted_by`，severity 为 `major`，并返回非 0。
 
 测试也可以显式链接到页面。在测试文件、Markdown 或 YAML 中加入：
 
@@ -491,10 +491,11 @@ node "$AKB" runbook exec pages/deploy-runbook.md --no-commit
 然后运行：
 
 ```bash
-node "$AKB" test --link-pages --command "pnpm test" --no-commit
+node "$AKB" test --link-pages --command "pnpm test" --by-agent codex --no-commit
 ```
 
 命令会扫描 `@akb-page <page_id>` 标注，执行 `--command` 指定的测试命令。测试通过时给关联页面写 `verified`，失败时写 `contradicted_by`。没有显式 `@akb-page` 标注时会拒绝写 ledger，避免把“测试通过”误归因到无关页面。
+`--by-agent` 不绑定具体 agent 实现；`codex`、`claude-code`、`cursor-local` 或自定义本地 agent id 都会按同一规则归一化为 `agent:<id>`。
 
 ### 8.7 接收外部 CI/runtime 信号
 
@@ -502,8 +503,9 @@ node "$AKB" test --link-pages --command "pnpm test" --no-commit
 
 ```bash
 node "$AKB" webhook ci-success \
+  --by-agent codex \
   --changed-file scripts/deploy.sh \
-  --evidence https://ci.example/run/123 \
+  --evidence local-agent-run-123 \
   --no-commit
 
 node "$AKB" webhook ci-failure \
@@ -531,9 +533,10 @@ references:
 
 ```bash
 node "$AKB" watch --once --no-commit
+node "$AKB" watch --once --by-agent codex --no-commit
 ```
 
-`watch --once` 会读取 `.akb/runtime-signals/*.json`，把文件中的信号转成 ledger 事件，然后删除已处理的 signal 文件。每个 signal 文件至少需要包含：
+`watch --once` 会读取 `.akb/runtime-signals/*.json`，把文件中的信号转成 ledger 事件，然后删除已处理的 signal 文件。没有传 `--by-agent` 时，每个 signal 文件至少需要包含：
 
 ```json
 {
@@ -544,6 +547,7 @@ node "$AKB" watch --once --no-commit
 }
 ```
 
+如果命令行传了 `--by-agent codex`，signal 文件可以省略 `actor_id`，整批 signal 都会记录为该本地 agent。
 `kind` 以 `failure`、`failed` 或 `error` 结尾时会写 `contradicted_by`；其他 kind 会写 `verified`。这个文件模式适合没有 webhook 集成的系统：只要能把 JSON 写进 `.akb/runtime-signals/`，就能参与 Confidence Ledger。
 
 ## 9. 使用 compile 生成可 review 的 patch

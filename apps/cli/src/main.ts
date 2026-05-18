@@ -301,6 +301,7 @@ interface DecayOptions {
 }
 
 interface WebhookCiSuccessOptions {
+  byAgent?: string;
   actorId?: string;
   changedFile?: string[];
   changedFilesList?: string;
@@ -311,10 +312,12 @@ interface WebhookCiSuccessOptions {
 
 interface WatchOptions {
   once?: boolean;
+  byAgent?: string;
   commit?: boolean;
 }
 
 interface RunbookExecOptions {
+  byAgent?: string;
   actorId?: string;
   now?: string;
   commit?: boolean;
@@ -323,6 +326,7 @@ interface RunbookExecOptions {
 interface LinkedTestOptions {
   linkPages?: boolean;
   command?: string;
+  byAgent?: string;
   actorId?: string;
   evidence?: string;
   now?: string;
@@ -553,7 +557,8 @@ export async function run(argv = process.argv): Promise<void> {
   runbook
     .command("exec")
     .argument("<page-id-or-path>")
-    .option("--actor-id <id>", "runtime actor id", "runbook-exec")
+    .option("--by-agent <id>", "record operation from a local agent")
+    .option("--actor-id <id>", "runtime actor id")
     .option("--now <timestamp>", "clock timestamp for deterministic output")
     .option("--no-commit", "skip git commit")
     .action(runbookExecCommand);
@@ -561,7 +566,8 @@ export async function run(argv = process.argv): Promise<void> {
     .command("test")
     .option("--link-pages", "link test result to @akb-page annotations")
     .option("--command <command>", "test command to execute", "pnpm test")
-    .option("--actor-id <id>", "runtime actor id", "test:integration")
+    .option("--by-agent <id>", "record operation from a local agent")
+    .option("--actor-id <id>", "runtime actor id")
     .option("--evidence <value>", "external evidence URL or id")
     .option("--now <timestamp>", "clock timestamp for deterministic output")
     .option("--no-commit", "skip git commit")
@@ -569,6 +575,7 @@ export async function run(argv = process.argv): Promise<void> {
   const webhook = program.command("webhook");
   webhook
     .command("ci-success")
+    .option("--by-agent <id>", "record operation from a local agent")
     .option("--actor-id <id>", "external actor id")
     .option("--changed-file <path>", "changed file path", collect, [])
     .option("--changed-files-list <path>", "file containing changed paths")
@@ -578,6 +585,7 @@ export async function run(argv = process.argv): Promise<void> {
     .action(webhookCiSuccessCommand);
   webhook
     .command("ci-failure")
+    .option("--by-agent <id>", "record operation from a local agent")
     .option("--actor-id <id>", "external actor id")
     .option("--changed-file <path>", "changed file path", collect, [])
     .option("--changed-files-list <path>", "file containing changed paths")
@@ -588,6 +596,7 @@ export async function run(argv = process.argv): Promise<void> {
   program
     .command("watch")
     .option("--once", "process runtime signal files once and exit")
+    .option("--by-agent <id>", "record runtime signal files from a local agent")
     .option("--no-commit", "skip git commit")
     .action(watchCommand);
   program
@@ -3475,13 +3484,13 @@ async function runbookExecCommand(
     throw new Error(`No executable runbook steps found for ${target.page.id}`);
   }
   const now = parseOptionalNow(options.now) ?? new Date();
-  const actorId = options.actorId ?? "runbook-exec";
+  const actor = runtimeActorIdentity(options, "runbook-exec");
 
   for (const step of steps) {
     const result = runShellCommand(step.command, vaultDir);
     if (!result.ok) {
       const written = writeRuntimeConfidenceEvents(vaultDir, [target], {
-        actorId,
+        ...actor,
         evidence: result.summary,
         signalKind: `runbook_exec_failed step ${step.index}`,
         mode: "contradicted_by",
@@ -3498,7 +3507,7 @@ async function runbookExecCommand(
 
   const evidence = `${target.page.path} (${steps.length} step${steps.length === 1 ? "" : "s"})`;
   const written = writeRuntimeConfidenceEvents(vaultDir, [target], {
-    actorId,
+    ...actor,
     evidence,
     signalKind: "runbook_exec",
     mode: "verified",
@@ -3530,13 +3539,13 @@ async function linkedTestCommand(options: LinkedTestOptions): Promise<void> {
     return pageFromFile(vaultDir, file);
   });
   const command = options.command ?? "pnpm test";
-  const actorId = options.actorId ?? "test:integration";
+  const actor = runtimeActorIdentity(options, "test:integration");
   const now = parseOptionalNow(options.now) ?? new Date();
   const evidence = options.evidence ?? command;
   const result = runShellCommand(command, vaultDir);
   if (!result.ok) {
     const written = writeRuntimeConfidenceEvents(vaultDir, targets, {
-      actorId,
+      ...actor,
       evidence: result.summary,
       signalKind: "test_integration_failed",
       mode: "contradicted_by",
@@ -3551,7 +3560,7 @@ async function linkedTestCommand(options: LinkedTestOptions): Promise<void> {
   }
 
   const written = writeRuntimeConfidenceEvents(vaultDir, targets, {
-    actorId,
+    ...actor,
     evidence,
     signalKind: "test_integration_success",
     mode: "verified",
@@ -3598,7 +3607,7 @@ async function webhookCiRuntimeSignalCommand(
 ): Promise<void> {
   const vaultDir = process.cwd();
   assertVault(vaultDir);
-  const actorId = options.actorId ?? "ci:github-actions";
+  const actor = runtimeActorIdentity(options, "ci:github-actions");
   const evidence = options.evidence ?? options.prNumber;
   if (!evidence) {
     throw new Error("Runtime signals require --evidence or --pr-number");
@@ -3627,7 +3636,7 @@ async function webhookCiRuntimeSignalCommand(
     throw new Error("Runtime signal did not match any pages");
   }
   const written = writeRuntimeConfidenceEvents(vaultDir, targets, {
-    actorId,
+    ...actor,
     evidence,
     signalKind: opts.signalKind,
     mode: opts.mode,
@@ -3665,7 +3674,7 @@ async function watchCommand(options: WatchOptions): Promise<void> {
       actor_id?: string;
       evidence?: string;
     };
-    if (!signal.actor_id || !signal.evidence) {
+    if ((!options.byAgent && !signal.actor_id) || !signal.evidence) {
       throw new Error(`Runtime signal ${file} requires actor_id and evidence`);
     }
     if (!Array.isArray(signal.page_ids) || signal.page_ids.length === 0) {
@@ -3681,8 +3690,12 @@ async function watchCommand(options: WatchOptions): Promise<void> {
       return pageFromFile(vaultDir, pageFile);
     });
     const signalKind = signal.kind ?? "runtime_signal";
-    for (const writtenPath of writeRuntimeConfidenceEvents(vaultDir, targets, {
+    const actor = runtimeActorIdentity({
+      byAgent: options.byAgent,
       actorId: signal.actor_id,
+    });
+    for (const writtenPath of writeRuntimeConfidenceEvents(vaultDir, targets, {
+      ...actor,
       evidence: signal.evidence,
       signalKind,
       mode: runtimeSignalMode(signalKind),
@@ -3804,9 +3817,10 @@ async function verifyCommand(
   const written = new Set<string>();
   for (const file of targets) {
     const { page } = pageFromFile(vaultDir, file);
-    const actorId = options.byAgent
-      ? `agent:${options.byAgent}`
-      : humanActorId();
+    const agentActor = options.byAgent
+      ? localAgentActorIdentity(options.byAgent)
+      : undefined;
+    const actorId = agentActor?.actorId ?? humanActorId();
     const event = parseConfidenceEvent({
       id: stableId(
         "evt",
@@ -3815,10 +3829,10 @@ async function verifyCommand(
       kind: "verified",
       pageId: page.id,
       timestamp,
-      actor: options.byAgent ? "agent" : "human",
+      actor: agentActor?.actor ?? "human",
       actorId,
-      verifierType: options.byAgent ? "agent" : "human",
-      verifierId: options.byAgent ?? actorId,
+      verifierType: agentActor ? "agent" : "human",
+      verifierId: agentActor?.verifierId ?? actorId,
       reason: options.reason,
     });
     const ledgerPath = appendConfidenceEventAndUpdateProjection(
@@ -6063,6 +6077,54 @@ function humanActorId(): string {
   return "human:local";
 }
 
+interface RuntimeActorIdentity {
+  actor: "agent" | "system";
+  actorId: string;
+  verifierId: string;
+}
+
+function normalizeLocalAgentId(value: string): string {
+  const trimmed = value.trim();
+  const agentId = trimmed.startsWith("agent:")
+    ? trimmed.slice("agent:".length)
+    : trimmed;
+  if (agentId.length === 0 || /\s/.test(agentId)) {
+    throw new Error(`Invalid local agent id: ${value}`);
+  }
+  return agentId;
+}
+
+function localAgentActorIdentity(byAgent: string): {
+  actor: "agent";
+  actorId: string;
+  verifierId: string;
+} {
+  const agentId = normalizeLocalAgentId(byAgent);
+  return {
+    actor: "agent",
+    actorId: `agent:${agentId}`,
+    verifierId: agentId,
+  };
+}
+
+function runtimeActorIdentity(
+  options: { byAgent?: string; actorId?: string },
+  defaultActorId?: string,
+): RuntimeActorIdentity {
+  if (options.byAgent) {
+    return localAgentActorIdentity(options.byAgent);
+  }
+  const actorId = options.actorId ?? defaultActorId;
+  if (!actorId) {
+    throw new Error("Runtime signals require --by-agent or --actor-id");
+  }
+  return {
+    actor: "system",
+    actorId,
+    verifierId: actorId,
+  };
+}
+
 function parseOptionalNow(value: string | undefined): Date | undefined {
   if (!value) {
     return undefined;
@@ -6259,7 +6321,9 @@ function writeRuntimeConfidenceEvents(
   vaultDir: string,
   targets: Array<{ page: Page; body: string; bodyStartLine: number }>,
   opts: {
+    actor: "agent" | "system";
     actorId: string;
+    verifierId: string;
     evidence: string;
     signalKind: string;
     mode: RuntimeSignalMode;
@@ -6279,10 +6343,10 @@ function writeRuntimeConfidenceEvents(
             kind: "verified",
             pageId: target.page.id,
             timestamp,
-            actor: "system",
+            actor: opts.actor,
             actorId: opts.actorId,
             verifierType: "agent",
-            verifierId: opts.actorId,
+            verifierId: opts.verifierId,
             reason: `${opts.signalKind}: ${opts.evidence}`,
           })
         : parseConfidenceEvent({
@@ -6293,7 +6357,7 @@ function writeRuntimeConfidenceEvents(
             kind: "contradicted_by",
             pageId: target.page.id,
             timestamp,
-            actor: "system",
+            actor: opts.actor,
             actorId: opts.actorId,
             bySourceId: stableId(
               "src",
